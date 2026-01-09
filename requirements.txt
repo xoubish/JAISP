@@ -1,0 +1,15 @@
+# Core scientific stack
+numpy
+scipy
+matplotlib
+astropy
+astroquery
+
+# File / IO helpers
+fsspec
+s3fs
+h5py
+
+# Notebooks
+jupyter
+ipykernel
