@@ -1,4 +1,23 @@
-import os, glob
+# JAISP_dataloader.py
+#
+# Paired Rubin + Euclid tiles with EXACT sizes (no crop/pad/resample).
+# Returns variable-sized images as lists via a custom collate_fn.
+#
+# Rubin NPZ schema (per tile):
+#   - img: (6,Hr,Wr)
+#   - var: (6,Hr,Wr)
+#   - mask: (6,Hr,Wr)  [optional, not used here]
+#   - wcs_hdr or similar (optional)
+#   - ra_center, dec_center, tile_id, ...
+#
+# Euclid NPZ schema (per tile):
+#   - img_VIS/img_Y/img_J/img_H
+#   - var_VIS/var_Y/var_J/var_H
+#   - wcs_VIS, wcs_Y, ...
+#   - ra_center, dec_center, tile_id, ...
+
+import os
+import glob
 import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader
@@ -6,95 +25,97 @@ from torch.utils.data import Dataset, DataLoader
 RUBIN_BANDS  = ["u", "g", "r", "i", "z", "y"]
 EUCLID_BANDS = ["VIS", "Y", "J", "H"]
 
+
 def _to_float32(x):
     x = np.asarray(x)
     return x.astype(np.float32, copy=False) if x.dtype != np.float32 else x
 
+
+def _safe_sqrt_var(var: np.ndarray) -> np.ndarray:
+    """sqrt(max(var,0)) while preserving NaNs."""
+    var = _to_float32(var)
+    # keep NaNs; only clamp finite negatives to 0
+    out = var.copy()
+    m = np.isfinite(out)
+    out[m] = np.maximum(out[m], 0.0)
+    return np.sqrt(out, dtype=np.float32)
+
+
 def _extract_wcs_like(npz_obj, band=None):
+    """
+    WCS is stored as strings (to_header_string) in your Euclid saver.
+    Rubin may store a header-ish blob under various keys.
+    We keep this loose and return whatever is present.
+    """
     if band is None:
-        for k in ("wcs", "WCS", "header", "fits_header"):
+        for k in ("wcs_hdr", "wcs", "WCS", "header", "fits_header"):
             if k in npz_obj:
                 return npz_obj[k]
         return None
+
     for k in (f"wcs_{band}", f"WCS_{band}", f"header_{band}", f"fits_header_{band}"):
         if k in npz_obj:
             return npz_obj[k]
     return None
 
-def _per_band_percentiles(x, qlo=1.0, qhi=99.0):
-    C = x.shape[0]
-    lo = np.zeros((C,), dtype=np.float32)
-    hi = np.zeros((C,), dtype=np.float32)
-    for c in range(C):
-        v = x[c]
-        lo[c] = np.nanpercentile(v, qlo)
-        hi[c] = np.nanpercentile(v, qhi)
-        if not np.isfinite(lo[c]) or not np.isfinite(hi[c]) or hi[c] <= lo[c]:
-            mu = np.nanmean(v)
-            sig = np.nanstd(v)
-            lo[c] = np.float32(mu - 3.0 * sig)
-            hi[c] = np.float32(mu + 3.0 * sig + 1e-6)
-    return lo, hi
-
-def normalize_affine(x, lo, hi, eps=1e-6):
-    lo = lo[:, None, None]
-    hi = hi[:, None, None]
-    return (x - lo) / (hi - lo + eps)
-
-def denormalize_affine(xn, lo, hi, eps=1e-6):
-    lo = lo[:, None, None]
-    hi = hi[:, None, None]
-    return xn * (hi - lo + eps) + lo
-
-def normalize_robust01(x, lo, hi, eps=1e-6):
-    xn = normalize_affine(x, lo, hi, eps=eps)
-    return np.clip(xn, 0.0, 1.0)
 
 def jaisp_collate_variable(batch):
     """
-    Variable-size collate:
-      - keep images as lists (no stacking across batch)
-      - stack only mask_euclid (fixed length 4)
-      - meta stays list[dict]
+    Variable-size collate: keep images/var/rms as lists (no stacking across batch),
+    because Rubin and Euclid have different shapes and tiles can vary.
     """
-    return {
-        "x_rubin": [b["x_rubin"] for b in batch],     # list of (6,Hr,Wr)
-        "x_euclid": [b["x_euclid"] for b in batch],   # list of (4,He,We)
+    out = {
+        "x_rubin":    [b["x_rubin"] for b in batch],      # list of (6,Hr,Wr) tensors
+        "x_euclid":   [b["x_euclid"] for b in batch],     # list of (4,He,We) tensors
         "mask_euclid": torch.stack([b["mask_euclid"] for b in batch], dim=0),  # (B,4)
-        "meta": [b["meta"] for b in batch],
+        "meta":       [b["meta"] for b in batch],
     }
+
+    # Always present in this implementation
+    out["var_rubin"]  = [b["var_rubin"] for b in batch]   # list of (6,Hr,Wr)
+    out["var_euclid"] = [b["var_euclid"] for b in batch]  # list of (4,He,We)
+
+    out["rms_rubin"]  = [b["rms_rubin"] for b in batch]   # list of (6,Hr,Wr)
+    out["rms_euclid"] = [b["rms_euclid"] for b in batch]  # list of (4,He,We)
+
+    return out
+
 
 class RubinEuclidTiles(Dataset):
     """
-    EXACT-SIZE paired dataset. No augmentation. No resizing/cropping/padding.
+    EXACT-SIZE paired dataset (no crop/pad/resample, no augmentation).
 
-    Rubin:  <tile_id>.npz
-      - img: (6,Hr,Wr) in RUBIN_BANDS order
+    Rubin file:  <tile_id>.npz
+      - img: (6,Hr,Wr)
+      - var: (6,Hr,Wr)
       - ra_center, dec_center
-      - optional: wcs/header
+      - optional: wcs_hdr (or similar)
 
-    Euclid: <tile_id>_euclid.npz
-      - img_VIS/img_Y/img_J/img_H each (He,We)
+    Euclid file: <tile_id>_euclid.npz
+      - img_VIS/img_Y/img_J/img_H
+      - var_VIS/var_Y/var_J/var_H
       - optional: wcs_VIS, etc.
+
+    Notes on missing Euclid:
+      - if a Euclid file exists but one band is missing, we fill placeholders with ref_shape.
+      - if the whole Euclid file is missing, we fall back to Rubin shape as placeholders
+        (debug convenience only). mask_euclid will be all zeros in that case.
     """
+
     def __init__(
         self,
         rubin_dir,
         euclid_dir,
         tile_ids=None,
-        normalize="none",          # "none" | "affine" | "robust01"
-        norm_qlo=1.0,
-        norm_qhi=99.0,
-        euclid_missing="zeros",    # "zeros" | "nan"
+        euclid_missing="zeros",        # missing SCI: "zeros" | "nan"
+        euclid_missing_var="nan",      # missing VAR: "nan" | "ones" | "zeros"
         return_wcs=False,
         mmap=True,
     ):
         self.rubin_dir = rubin_dir
         self.euclid_dir = euclid_dir
-        self.normalize = normalize
-        self.norm_qlo = norm_qlo
-        self.norm_qhi = norm_qhi
         self.euclid_missing = euclid_missing
+        self.euclid_missing_var = euclid_missing_var
         self.return_wcs = return_wcs
         self.mmap = mmap
 
@@ -109,6 +130,7 @@ class RubinEuclidTiles(Dataset):
             ep = os.path.join(self.euclid_dir, f"{tid}_euclid.npz")
             if os.path.exists(rp):
                 self.pairs.append((tid, rp, ep))
+
         if len(self.pairs) == 0:
             raise FileNotFoundError("No Rubin tiles found (tile_x*_y*.npz).")
 
@@ -121,73 +143,90 @@ class RubinEuclidTiles(Dataset):
         # ---- Rubin ----
         r = np.load(rubin_path, mmap_mode="r" if self.mmap else None, allow_pickle=True)
         rubin_img = _to_float32(r["img"])  # (6,Hr,Wr)
+
         ra = float(r["ra_center"]) if "ra_center" in r else np.nan
         dec = float(r["dec_center"]) if "dec_center" in r else np.nan
 
+        rubin_var = _to_float32(r["var"]) if "var" in r else None
+        if rubin_var is None:
+            # This should not happen in your current schema, but keep it robust.
+            rubin_var = np.full_like(rubin_img, np.nan, dtype=np.float32)
+
+        rubin_rms = _safe_sqrt_var(rubin_var)
+
         # ---- Euclid ----
         mask_e = np.zeros((len(EUCLID_BANDS),), dtype=np.float32)
-        e_stack = []
+
+        e_img_stack, e_var_stack = [], []
         wcs_e = {}
+
+        def fill_sci(shape):
+            if self.euclid_missing == "nan":
+                return np.full(shape, np.nan, np.float32)
+            return np.zeros(shape, np.float32)
+
+        def fill_var(shape):
+            if self.euclid_missing_var == "zeros":
+                return np.zeros(shape, np.float32)
+            if self.euclid_missing_var == "ones":
+                return np.ones(shape, np.float32)
+            # default "nan": safest; downstream can mask by finite(var)
+            return np.full(shape, np.nan, np.float32)
 
         if os.path.exists(euclid_path):
             e = np.load(euclid_path, mmap_mode="r" if self.mmap else None, allow_pickle=True)
 
-            # reference shape for missing band placeholders
+            # reference shape for placeholders
             ref_shape = None
             for b in EUCLID_BANDS:
-                k = f"img_{b}"
-                if k in e:
-                    ref_shape = e[k].shape
+                k_img = f"img_{b}"
+                if k_img in e:
+                    ref_shape = e[k_img].shape
                     break
             if ref_shape is None:
-                # if no Euclid images exist, fall back to Rubin shape for placeholders
+                # fallback only
                 ref_shape = rubin_img.shape[-2:]
 
             for j, b in enumerate(EUCLID_BANDS):
-                k = f"img_{b}"
-                if k in e:
-                    img = _to_float32(e[k])
+                k_img = f"img_{b}"
+                if k_img in e:
+                    img = _to_float32(e[k_img])
                     mask_e[j] = 1.0
                 else:
-                    img = (np.full(ref_shape, np.nan, np.float32)
-                           if self.euclid_missing == "nan"
-                           else np.zeros(ref_shape, np.float32))
-                e_stack.append(img)
+                    img = fill_sci(ref_shape)
+                e_img_stack.append(img)
+
+                k_var = f"var_{b}"
+                if k_var in e:
+                    v = _to_float32(e[k_var])
+                else:
+                    v = fill_var(ref_shape)
+                e_var_stack.append(v)
 
                 if self.return_wcs:
                     w = _extract_wcs_like(e, band=b)
                     if w is not None:
                         wcs_e[b] = w
+
         else:
-            # Entire Euclid file missing: placeholders in Rubin shape
+            # No Euclid file at all: placeholders (debug convenience only)
             ref_shape = rubin_img.shape[-2:]
             for _ in EUCLID_BANDS:
-                img = (np.full(ref_shape, np.nan, np.float32)
-                       if self.euclid_missing == "nan"
-                       else np.zeros(ref_shape, np.float32))
-                e_stack.append(img)
+                e_img_stack.append(fill_sci(ref_shape))
+                e_var_stack.append(fill_var(ref_shape))
 
-        euclid_img = np.stack(e_stack, axis=0)  # (4,He,We) exact native
-
-        # ---- Optional normalization (stored for reversibility) ----
-        norm = {"rubin": None, "euclid": None}
-        if self.normalize in ("affine", "robust01"):
-            r_lo, r_hi = _per_band_percentiles(rubin_img, qlo=self.norm_qlo, qhi=self.norm_qhi)
-            rubin_img = normalize_affine(rubin_img, r_lo, r_hi) if self.normalize == "affine" \
-                        else normalize_robust01(rubin_img, r_lo, r_hi)
-            norm["rubin"] = {"method": self.normalize, "qlo": float(self.norm_qlo), "qhi": float(self.norm_qhi),
-                             "lo": r_lo, "hi": r_hi}
-
-            e_lo, e_hi = _per_band_percentiles(euclid_img, qlo=self.norm_qlo, qhi=self.norm_qhi)
-            euclid_img = normalize_affine(euclid_img, e_lo, e_hi) if self.normalize == "affine" \
-                         else normalize_robust01(euclid_img, e_lo, e_hi)
-            norm["euclid"] = {"method": self.normalize, "qlo": float(self.norm_qlo), "qhi": float(self.norm_qhi),
-                              "lo": e_lo, "hi": e_hi}
+        euclid_img = np.stack(e_img_stack, axis=0)   # (4,He,We)
+        euclid_var = np.stack(e_var_stack, axis=0)   # (4,He,We)
+        euclid_rms = _safe_sqrt_var(euclid_var)      # (4,He,We)
 
         sample = {
-            "x_rubin": torch.from_numpy(rubin_img),     # (6,Hr,Wr)
-            "x_euclid": torch.from_numpy(euclid_img),   # (4,He,We)
-            "mask_euclid": torch.from_numpy(mask_e),    # (4,)
+            "x_rubin": torch.from_numpy(rubin_img),
+            "x_euclid": torch.from_numpy(euclid_img),
+            "var_rubin": torch.from_numpy(rubin_var),
+            "var_euclid": torch.from_numpy(euclid_var),
+            "rms_rubin": torch.from_numpy(rubin_rms),
+            "rms_euclid": torch.from_numpy(euclid_rms),
+            "mask_euclid": torch.from_numpy(mask_e),
             "meta": {
                 "tile_id": tile_id,
                 "ra_center": ra,
@@ -198,8 +237,7 @@ class RubinEuclidTiles(Dataset):
                 "euclid_bands": EUCLID_BANDS,
                 "rubin_hw": tuple(map(int, rubin_img.shape[-2:])),
                 "euclid_hw": tuple(map(int, euclid_img.shape[-2:])),
-                "norm": norm,
-            }
+            },
         }
 
         if self.return_wcs:
@@ -208,9 +246,11 @@ class RubinEuclidTiles(Dataset):
 
         return sample
 
+
 def seed_worker(worker_id):
     worker_seed = torch.initial_seed() % 2**32
     np.random.seed(worker_seed)
+
 
 def make_loader(
     rubin_dir,
