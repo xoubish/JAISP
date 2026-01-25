@@ -1,0 +1,9 @@
+Embedding Quality Metrics
+========================================
+diagonal_mean            : 0.0398
+diagonal_std             : 0.0164
+off_diagonal_mean        : 0.0383
+off_diagonal_std         : 0.0147
+separation               : 0.0015
+top1_accuracy            : 0.0000
+top5_accuracy            : 0.0191

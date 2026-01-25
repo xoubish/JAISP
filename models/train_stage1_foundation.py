@@ -48,16 +48,19 @@ class Stage1Trainer:
         
         # Create model
         self.model = JAISPFoundation(
-            patch_size=128,
+            patch_size=128,  # Rubin patch size (Euclid will be 256)
             n_patches_per_tile=4,
             vit_patch_size=16,
             embed_dim=384,
             depth=6,
             num_heads=6,
             projection_dim=256,
-            temperature=0.5,  # Increased for better separation
+            temperature=0.1,  # Lower temperature for sharper gradients
             use_band_masking=False  # Trust variance weighting
         ).to(self.device)
+        
+        print("  Rubin patches:  128×128 pixels = 25.6\" × 25.6\" on sky")
+        print("  Euclid patches: 256×256 pixels = 25.6\" × 25.6\" on sky (matched!)")
         
         # Count parameters
         n_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)

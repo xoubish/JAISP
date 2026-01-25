@@ -19,11 +19,15 @@ from typing import List, Dict, Tuple, Optional
 class PatchExtractor(nn.Module):
     """
     Extract fixed-size patches from variable-sized tiles.
-    Handles RMS weighting and normalization.
+    Handles different pixel scales: matches physical sky area, not pixel count.
     """
-    def __init__(self, patch_size: int = 128, n_patches: int = 4):
+    def __init__(self, 
+                 patch_size_rubin: int = 128,
+                 patch_size_euclid: int = 256,  # 2x to match 0.1" vs 0.2" pixel scale
+                 n_patches: int = 4):
         super().__init__()
-        self.patch_size = patch_size
+        self.patch_size_rubin = patch_size_rubin
+        self.patch_size_euclid = patch_size_euclid
         self.n_patches = n_patches
     
     def forward(self, img_list: List[torch.Tensor], 
@@ -116,9 +120,9 @@ class ViTEncoder(nn.Module):
                                      kernel_size=patch_size, 
                                      stride=patch_size)
         
-        # Learnable position embedding
-        # Max image size we expect: 128x128 -> 8x8 patches with p=16
-        max_patches = (128 // patch_size) ** 2
+        # Learnable position embedding (dynamic size)
+        # Max patches we expect: 256/16 = 16, so 16*16 = 256 max patches for Euclid
+        max_patches = 256  # Conservative upper bound
         self.pos_embed = nn.Parameter(torch.randn(1, max_patches, embed_dim) * 0.02)
         
         # CLS token for global representation
@@ -252,11 +256,15 @@ class ProjectionHead(nn.Module):
             nn.Linear(in_dim, hidden_dim),
             nn.BatchNorm1d(hidden_dim),
             nn.ReLU(inplace=True),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.BatchNorm1d(hidden_dim),
+            nn.ReLU(inplace=True),
             nn.Linear(hidden_dim, out_dim)
         )
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return F.normalize(self.net(x), dim=-1)  # L2 normalize
+        # Do NOT normalize - let the loss handle similarity scaling
+        return self.net(x)
 
 
 class JAISPFoundation(nn.Module):
@@ -279,7 +287,11 @@ class JAISPFoundation(nn.Module):
         self.use_band_masking = use_band_masking
         
         # Patch extraction
-        self.patch_extractor = PatchExtractor(patch_size, n_patches_per_tile)
+        self.patch_extractor = PatchExtractor(
+            patch_size_rubin=128,   # 128 × 0.2" = 25.6" on sky
+            patch_size_euclid=256,  # 256 × 0.1" = 25.6" on sky (MATCHED!)
+            n_patches_per_tile=n_patches_per_tile
+        )
         
         # Separate encoders for each survey
         self.encoder_rubin = ViTEncoder(
@@ -322,10 +334,10 @@ class JAISPFoundation(nn.Module):
         
         # Extract patches (PatchExtractor will move data to device)
         rubin_patches, rubin_weights = self.patch_extractor(
-            batch['x_rubin'], batch['rms_rubin'], device=device
+            batch['x_rubin'], batch['rms_rubin'], device=device, survey='rubin'
         )
         euclid_patches, euclid_weights = self.patch_extractor(
-            batch['x_euclid'], batch['rms_euclid'], device=device
+            batch['x_euclid'], batch['rms_euclid'], device=device, survey='euclid'
         )
         
         # Optional: Create band quality masks (only if catastrophic failures)
@@ -365,47 +377,53 @@ class JAISPFoundation(nn.Module):
     def contrastive_loss(self, z1: torch.Tensor, z2: torch.Tensor) -> torch.Tensor:
         """
         NT-Xent (Normalized Temperature-scaled Cross Entropy) loss
-        Stronger version of InfoNCE with better negative sampling
+        Normalize embeddings for cosine similarity, but don't force unit norm in forward pass
         """
         B = z1.shape[0]
         device = z1.device
         
+        # Normalize for cosine similarity
+        z1 = F.normalize(z1, dim=-1)
+        z2 = F.normalize(z2, dim=-1)
+        
         # Concatenate both views
         z = torch.cat([z1, z2], dim=0)  # (2B, D)
         
-        # Compute full similarity matrix
+        # Compute full similarity matrix with temperature
         sim = torch.matmul(z, z.T) / self.temperature  # (2B, 2B)
         
         # Create mask for positive pairs
-        # Each Rubin patch i is paired with Euclid patch i
-        mask = torch.zeros((2*B, 2*B), dtype=torch.bool, device=device)
-        for i in range(B):
-            mask[i, B + i] = True      # Rubin i <-> Euclid i
-            mask[B + i, i] = True      # Euclid i <-> Rubin i
-        
-        # Create mask for negatives (everything except self and positive)
-        neg_mask = ~mask
-        # Remove self-similarity from negatives
-        neg_mask.fill_diagonal_(False)
-        
-        # For numerical stability
-        sim_max, _ = sim.max(dim=1, keepdim=True)
-        sim = sim - sim_max.detach()
-        
-        # Compute loss
-        # Positive similarity
-        pos_sim = sim[mask].view(2*B, 1)
-        
-        # Negative similarities
-        neg_sim = sim[neg_mask].view(2*B, -1)
-        
-        # InfoNCE with explicit negatives
-        logits = torch.cat([pos_sim, neg_sim], dim=1)
+        # Rubin patch i matches Euclid patch i
         labels = torch.zeros(2*B, dtype=torch.long, device=device)
         
-        loss = F.cross_entropy(logits, labels)
+        # Positive pairs are at specific indices
+        # For index i (i < B): positive is at i+B
+        # For index i (i >= B): positive is at i-B
+        pos_mask = torch.zeros((2*B, 2*B), dtype=torch.bool, device=device)
+        for i in range(B):
+            pos_mask[i, B + i] = True
+            pos_mask[B + i, i] = True
         
-        return loss
+        # Mask out self-similarity (diagonal)
+        sim = sim - torch.eye(2*B, device=device) * 1e9
+        
+        # For each sample, positive is the paired sample from other view
+        # Build target indices
+        pos_indices = torch.arange(2*B, device=device)
+        pos_indices[:B] = pos_indices[:B] + B
+        pos_indices[B:] = pos_indices[B:] - B
+        
+        # Compute loss: log(exp(pos) / sum(exp(all)))
+        # Equivalent to cross-entropy where we want to maximize similarity with positive
+        exp_sim = torch.exp(sim)
+        
+        # Get positive similarities
+        pos_sim = sim[torch.arange(2*B, device=device), pos_indices]
+        
+        # Negative log likelihood
+        loss = -pos_sim + torch.logsumexp(sim, dim=1)
+        
+        return loss.mean()
     
     def _init_weights(self):
         """Initialize projection heads with smaller weights"""
