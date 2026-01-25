@@ -94,7 +94,7 @@ class PatchExtractor(nn.Module):
 class ViTEncoder(nn.Module):
     """
     Vision Transformer encoder for multi-band astronomical images.
-    Handles variance-weighted input normalization.
+    Handles variance-weighted input normalization and band masking.
     """
     def __init__(self, 
                  in_channels: int,
@@ -103,10 +103,13 @@ class ViTEncoder(nn.Module):
                  depth: int = 6,
                  num_heads: int = 6,
                  mlp_ratio: float = 4.0,
-                 dropout: float = 0.1):
+                 dropout: float = 0.1,
+                 band_dropout: float = 0.0):  # NEW: randomly drop bands during training
         super().__init__()
         self.patch_size = patch_size
         self.embed_dim = embed_dim
+        self.in_channels = in_channels
+        self.band_dropout = band_dropout
         
         # Patch embedding: (C, H, W) -> (N, D) where N = (H/p)*(W/p)
         self.patch_embed = nn.Conv2d(in_channels, embed_dim, 
@@ -129,11 +132,13 @@ class ViTEncoder(nn.Module):
         
         self.norm = nn.LayerNorm(embed_dim)
         
-    def forward(self, x: torch.Tensor, weights: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, weights: Optional[torch.Tensor] = None,
+                band_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         """
         Args:
             x: (B, C, H, W)
             weights: (B, C, H, W) - inverse variance weights (optional)
+            band_mask: (B, C) - binary mask for valid bands (1=use, 0=ignore)
         
         Returns:
             features: (B, embed_dim) - CLS token representation
@@ -145,10 +150,28 @@ class ViTEncoder(nn.Module):
         x = x.to(device)
         if weights is not None:
             weights = weights.to(device)
+        if band_mask is not None:
+            band_mask = band_mask.to(device)
+        
+        # Apply band mask (zero out bad bands)
+        if band_mask is not None:
+            # Expand mask: (B, C) -> (B, C, 1, 1)
+            mask_expanded = band_mask.view(B, -1, 1, 1)
+            x = x * mask_expanded
+            if weights is not None:
+                weights = weights * mask_expanded
+        
+        # Apply band dropout during training (robustness)
+        if self.training and self.band_dropout > 0:
+            drop_mask = torch.bernoulli(
+                torch.full((B, self.in_channels, 1, 1), 1 - self.band_dropout, device=device)
+            )
+            x = x * drop_mask
+            if weights is not None:
+                weights = weights * drop_mask
         
         # Variance-weighted normalization per band
         if weights is not None:
-            # Weighted mean and std per channel
             x_norm = self._weighted_normalize(x, weights)
         else:
             # Standard normalization
@@ -176,16 +199,26 @@ class ViTEncoder(nn.Module):
         return x[:, 0]  # (B, D)
     
     def _weighted_normalize(self, x: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
-        """Normalize using inverse-variance weights"""
+        """
+        Normalize using inverse-variance weights.
+        High variance (low weight) regions contribute less to normalization.
+        """
         # Compute weighted mean per channel
-        w_sum = w.sum(dim=(2,3), keepdim=True) + 1e-10
+        w_sum = w.sum(dim=(2,3), keepdim=True).clamp(min=1e-10)
         mean = (x * w).sum(dim=(2,3), keepdim=True) / w_sum
         
         # Compute weighted std
         var = ((x - mean)**2 * w).sum(dim=(2,3), keepdim=True) / w_sum
-        std = torch.sqrt(var + 1e-10)
+        std = torch.sqrt(var.clamp(min=1e-10))
         
-        return (x - mean) / std
+        # Normalize
+        x_norm = (x - mean) / std
+        
+        # Re-apply weights: down-weight noisy regions in the normalized space
+        # This is KEY: noisy pixels contribute less to the final embedding
+        x_norm = x_norm * torch.sqrt(w / (w.mean(dim=(2,3), keepdim=True) + 1e-10))
+        
+        return x_norm
 
 
 class TransformerBlock(nn.Module):
@@ -239,8 +272,11 @@ class JAISPFoundation(nn.Module):
                  depth: int = 6,
                  num_heads: int = 6,
                  projection_dim: int = 256,
-                 temperature: float = 0.07):
+                 temperature: float = 0.07,
+                 use_band_masking: bool = False):  # NEW: make masking optional
         super().__init__()
+        
+        self.use_band_masking = use_band_masking
         
         # Patch extraction
         self.patch_extractor = PatchExtractor(patch_size, n_patches_per_tile)
@@ -251,7 +287,8 @@ class JAISPFoundation(nn.Module):
             patch_size=vit_patch_size,
             embed_dim=embed_dim,
             depth=depth,
-            num_heads=num_heads
+            num_heads=num_heads,
+            band_dropout=0.1  # Randomly drop 10% of bands for robustness
         )
         
         self.encoder_euclid = ViTEncoder(
@@ -259,7 +296,8 @@ class JAISPFoundation(nn.Module):
             patch_size=vit_patch_size,
             embed_dim=embed_dim,
             depth=depth,
-            num_heads=num_heads
+            num_heads=num_heads,
+            band_dropout=0.1
         )
         
         # Projection heads to shared space
@@ -267,6 +305,9 @@ class JAISPFoundation(nn.Module):
         self.proj_euclid = ProjectionHead(embed_dim, embed_dim, projection_dim)
         
         self.temperature = temperature
+        
+        # Initialize projection heads with smaller weights for stability
+        self._init_weights()
     
     def forward(self, batch: Dict) -> Dict[str, torch.Tensor]:
         """
@@ -287,9 +328,24 @@ class JAISPFoundation(nn.Module):
             batch['x_euclid'], batch['rms_euclid'], device=device
         )
         
-        # Encode
-        z_rubin_raw = self.encoder_rubin(rubin_patches, rubin_weights)
-        z_euclid_raw = self.encoder_euclid(euclid_patches, euclid_weights)
+        # Optional: Create band quality masks (only if catastrophic failures)
+        if self.use_band_masking:
+            rubin_band_mask = self._create_rubin_band_mask(rubin_patches, rubin_weights)
+            euclid_band_mask = batch['mask_euclid'].to(device)
+            
+            # Expand euclid_band_mask to match number of patches
+            n_patches = rubin_patches.shape[0]
+            batch_size = len(batch['x_rubin'])
+            patches_per_tile = n_patches // batch_size
+            euclid_band_mask = euclid_band_mask.repeat_interleave(patches_per_tile, dim=0)
+        else:
+            # Trust the variance weighting completely
+            rubin_band_mask = None
+            euclid_band_mask = None
+        
+        # Encode with variance weighting (and optional band masks)
+        z_rubin_raw = self.encoder_rubin(rubin_patches, rubin_weights, rubin_band_mask)
+        z_euclid_raw = self.encoder_euclid(euclid_patches, euclid_weights, euclid_band_mask)
         
         # Project to shared space
         z_rubin = self.proj_rubin(z_rubin_raw)
@@ -308,22 +364,95 @@ class JAISPFoundation(nn.Module):
     
     def contrastive_loss(self, z1: torch.Tensor, z2: torch.Tensor) -> torch.Tensor:
         """
-        InfoNCE loss: pull together corresponding Rubin-Euclid patch pairs,
-        push apart non-corresponding pairs
+        NT-Xent (Normalized Temperature-scaled Cross Entropy) loss
+        Stronger version of InfoNCE with better negative sampling
         """
         B = z1.shape[0]
+        device = z1.device
         
-        # Cosine similarity matrix
-        sim_matrix = torch.matmul(z1, z2.T) / self.temperature  # (B, B)
+        # Concatenate both views
+        z = torch.cat([z1, z2], dim=0)  # (2B, D)
         
-        # Labels: diagonal is positive pairs
-        labels = torch.arange(B, device=z1.device)
+        # Compute full similarity matrix
+        sim = torch.matmul(z, z.T) / self.temperature  # (2B, 2B)
         
-        # Cross-entropy loss in both directions
-        loss_12 = F.cross_entropy(sim_matrix, labels)
-        loss_21 = F.cross_entropy(sim_matrix.T, labels)
+        # Create mask for positive pairs
+        # Each Rubin patch i is paired with Euclid patch i
+        mask = torch.zeros((2*B, 2*B), dtype=torch.bool, device=device)
+        for i in range(B):
+            mask[i, B + i] = True      # Rubin i <-> Euclid i
+            mask[B + i, i] = True      # Euclid i <-> Rubin i
         
-        return (loss_12 + loss_21) / 2
+        # Create mask for negatives (everything except self and positive)
+        neg_mask = ~mask
+        # Remove self-similarity from negatives
+        neg_mask.fill_diagonal_(False)
+        
+        # For numerical stability
+        sim_max, _ = sim.max(dim=1, keepdim=True)
+        sim = sim - sim_max.detach()
+        
+        # Compute loss
+        # Positive similarity
+        pos_sim = sim[mask].view(2*B, 1)
+        
+        # Negative similarities
+        neg_sim = sim[neg_mask].view(2*B, -1)
+        
+        # InfoNCE with explicit negatives
+        logits = torch.cat([pos_sim, neg_sim], dim=1)
+        labels = torch.zeros(2*B, dtype=torch.long, device=device)
+        
+        loss = F.cross_entropy(logits, labels)
+        
+        return loss
+    
+    def _init_weights(self):
+        """Initialize projection heads with smaller weights"""
+        for module in [self.proj_rubin, self.proj_euclid]:
+            for m in module.modules():
+                if isinstance(m, nn.Linear):
+                    nn.init.xavier_uniform_(m.weight, gain=0.01)
+                    if m.bias is not None:
+                        nn.init.constant_(m.bias, 0)
+    
+    def _create_rubin_band_mask(self, patches: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
+        """
+        Create band quality mask based on effective signal content.
+        Uses variance weighting to determine if a band has usable information.
+        
+        Args:
+            patches: (B, C, H, W)
+            weights: (B, C, H, W) - inverse variance weights
+        
+        Returns:
+            mask: (B, C) - binary mask (1=good, 0=bad)
+        """
+        B, C = patches.shape[:2]
+        device = patches.device
+        
+        # Compute effective SNR: weighted signal
+        # If weights are all near-zero (high variance everywhere), band is useless
+        effective_weight = weights.mean(dim=(2, 3))  # (B, C)
+        signal = patches.abs().mean(dim=(2, 3))      # (B, C)
+        
+        # A band is "bad" if:
+        # 1. Weights are too low (variance too high everywhere) OR
+        # 2. Signal is essentially zero
+        weight_threshold = 0.01  # Relative to typical weights
+        signal_threshold = 1e-6
+        
+        mask = ((effective_weight > weight_threshold) & (signal > signal_threshold)).float()
+        
+        # Ensure at least 3 bands are active (or model gets confused)
+        n_active = mask.sum(dim=1, keepdim=True)
+        if (n_active < 3).any():
+            # If too few bands, use top 3 by effective weight
+            _, top_indices = effective_weight.topk(min(3, C), dim=1)
+            mask = torch.zeros_like(mask)
+            mask.scatter_(1, top_indices, 1.0)
+        
+        return mask
 
 
 # Training utilities

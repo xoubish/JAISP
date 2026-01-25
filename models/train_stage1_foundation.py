@@ -55,7 +55,8 @@ class Stage1Trainer:
             depth=6,
             num_heads=6,
             projection_dim=256,
-            temperature=0.07
+            temperature=0.5,  # Increased for better separation
+            use_band_masking=False  # Trust variance weighting
         ).to(self.device)
         
         # Count parameters
