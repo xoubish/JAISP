@@ -28,11 +28,13 @@ class PatchExtractor(nn.Module):
     
     def forward(self, img_list: List[torch.Tensor], 
                 rms_list: List[torch.Tensor],
+                device: Optional[torch.device] = None,
                 valid_mask: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Args:
             img_list: List of (C, H, W) tensors
             rms_list: List of (C, H, W) RMS maps
+            device: Device to move tensors to
             valid_mask: Optional (B, C) mask indicating valid bands
         
         Returns:
@@ -43,6 +45,10 @@ class PatchExtractor(nn.Module):
         all_weights = []
         
         for img, rms in zip(img_list, rms_list):
+            # Move to device if specified
+            if device is not None:
+                img = img.to(device)
+                rms = rms.to(device)
             C, H, W = img.shape
             
             # Extract n_patches from this tile
@@ -133,6 +139,12 @@ class ViTEncoder(nn.Module):
             features: (B, embed_dim) - CLS token representation
         """
         B = x.shape[0]
+        
+        # Ensure x and weights are on the same device as the model
+        device = next(self.parameters()).device
+        x = x.to(device)
+        if weights is not None:
+            weights = weights.to(device)
         
         # Variance-weighted normalization per band
         if weights is not None:
@@ -264,12 +276,15 @@ class JAISPFoundation(nn.Module):
         Returns:
             Dict with embeddings and loss
         """
-        # Extract patches
+        # Get model device
+        device = next(self.parameters()).device
+        
+        # Extract patches (PatchExtractor will move data to device)
         rubin_patches, rubin_weights = self.patch_extractor(
-            batch['x_rubin'], batch['rms_rubin']
+            batch['x_rubin'], batch['rms_rubin'], device=device
         )
         euclid_patches, euclid_weights = self.patch_extractor(
-            batch['x_euclid'], batch['rms_euclid']
+            batch['x_euclid'], batch['rms_euclid'], device=device
         )
         
         # Encode

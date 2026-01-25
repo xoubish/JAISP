@@ -1,13 +1,16 @@
 # train_stage1_foundation.py
 #
 # Training script for JEPA Foundation Model (Stage 1)
+# With comprehensive W&B logging
 
 import os
 import torch
 import numpy as np
 from pathlib import Path
 from tqdm import tqdm
-import wandb  # Optional: for logging
+import wandb
+import matplotlib.pyplot as plt
+import seaborn as sns
 
 from JAISP_dataloader import make_loader
 from stage1_jepa_foundation import JAISPFoundation, create_optimizer, create_scheduler
@@ -21,12 +24,12 @@ class Stage1Trainer:
                  batch_size: int = 4,
                  num_workers: int = 4,
                  device: str = "cuda" if torch.cuda.is_available() else "cpu",
-                 use_wandb: bool = False):
+                 wandb_project: str = "JAISP-Foundation",
+                 wandb_name: str = None):
         
         self.device = torch.device(device)
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(exist_ok=True, parents=True)
-        self.use_wandb = use_wandb
         
         # Create dataloaders
         print(f"Loading data from:\n  Rubin: {rubin_dir}\n  Euclid: {euclid_dir}")
@@ -58,6 +61,60 @@ class Stage1Trainer:
         # Count parameters
         n_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
         print(f"Model parameters: {n_params:,} ({n_params/1e6:.2f}M)")
+        
+        # W&B config
+        self.wandb_project = wandb_project
+        self.wandb_name = wandb_name
+    
+    def log_similarity_matrix_to_wandb(self, outputs, step):
+        """Log similarity matrix visualization to W&B"""
+        z_rubin = outputs['z_rubin'].detach().cpu().numpy()
+        z_euclid = outputs['z_euclid'].detach().cpu().numpy()
+        
+        # Compute similarity (subsample if too large)
+        n_samples = min(100, len(z_rubin))
+        z_r = z_rubin[:n_samples]
+        z_e = z_euclid[:n_samples]
+        
+        similarity = z_r @ z_e.T
+        
+        # Create heatmap
+        fig, ax = plt.subplots(figsize=(8, 8))
+        sns.heatmap(similarity, cmap='RdBu_r', center=0, 
+                   vmin=-1, vmax=1, square=True, ax=ax,
+                   cbar_kws={'label': 'Cosine Similarity'})
+        ax.set_xlabel('Euclid Patches')
+        ax.set_ylabel('Rubin Patches')
+        ax.set_title(f'Similarity Matrix (Step {step})')
+        
+        # Log to W&B
+        wandb.log({"similarity_matrix": wandb.Image(fig)}, step=step)
+        plt.close(fig)
+    
+    def log_embedding_histogram(self, outputs, step):
+        """Log embedding distribution histograms"""
+        z_rubin = outputs['z_rubin'].detach().cpu().numpy()
+        z_euclid = outputs['z_euclid'].detach().cpu().numpy()
+        
+        fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+        
+        # Rubin embeddings
+        axes[0].hist(z_rubin.flatten(), bins=50, alpha=0.7, color='#E74C3C', edgecolor='black')
+        axes[0].set_xlabel('Embedding Value')
+        axes[0].set_ylabel('Count')
+        axes[0].set_title('Rubin Embedding Distribution')
+        axes[0].grid(alpha=0.3)
+        
+        # Euclid embeddings
+        axes[1].hist(z_euclid.flatten(), bins=50, alpha=0.7, color='#3498DB', edgecolor='black')
+        axes[1].set_xlabel('Embedding Value')
+        axes[1].set_ylabel('Count')
+        axes[1].set_title('Euclid Embedding Distribution')
+        axes[1].grid(alpha=0.3)
+        
+        plt.tight_layout()
+        wandb.log({"embedding_distributions": wandb.Image(fig)}, step=step)
+        plt.close(fig)
     
     def train(self, 
               epochs: int = 100,
@@ -65,38 +122,57 @@ class Stage1Trainer:
               weight_decay: float = 0.05,
               warmup_epochs: int = 10,
               save_freq: int = 10,
-              log_freq: int = 10):
+              log_freq: int = 10,
+              vis_freq: int = 50):  # Frequency for visual logs
         
         # Setup optimizer and scheduler
         optimizer = create_optimizer(self.model, lr=lr, weight_decay=weight_decay)
         scheduler = create_scheduler(optimizer, warmup_epochs, epochs)
         
         # Initialize wandb
-        if self.use_wandb:
-            wandb.init(
-                project="JAISP-Foundation",
-                config={
-                    "epochs": epochs,
-                    "lr": lr,
-                    "batch_size": self.dataloader.batch_size,
-                    "model": "JEPA-ViT",
-                    "n_tiles": len(self.dataset)
-                }
-            )
+        config = {
+            "epochs": epochs,
+            "lr": lr,
+            "weight_decay": weight_decay,
+            "warmup_epochs": warmup_epochs,
+            "batch_size": self.dataloader.batch_size,
+            "n_tiles": len(self.dataset),
+            "n_batches_per_epoch": len(self.dataloader),
+            "patch_size": 128,
+            "n_patches_per_tile": 4,
+            "embed_dim": 384,
+            "projection_dim": 256,
+            "vit_depth": 6,
+            "vit_heads": 6,
+            "temperature": 0.07,
+            "device": str(self.device),
+            "model_params": sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+        }
+        
+        wandb.init(
+            project=self.wandb_project,
+            name=self.wandb_name,
+            config=config,
+            settings=wandb.Settings(start_method="thread")
+        )
+        
+        # Watch model (logs gradients and parameters)
+        wandb.watch(self.model, log="all", log_freq=log_freq)
         
         # Training loop
         best_loss = float('inf')
+        global_step = 0
         
         for epoch in range(epochs):
             self.model.train()
             epoch_loss = 0.0
+            epoch_separation = 0.0
+            epoch_diag_sim = 0.0
+            epoch_off_diag_sim = 0.0
             
             pbar = tqdm(self.dataloader, desc=f"Epoch {epoch+1}/{epochs}")
             
             for batch_idx, batch in enumerate(pbar):
-                # Move to device (only move tensors, not lists)
-                # Lists stay as-is for the patch extractor
-                
                 optimizer.zero_grad()
                 
                 # Forward pass
@@ -107,27 +183,82 @@ class Stage1Trainer:
                 loss.backward()
                 
                 # Gradient clipping
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
                 
                 optimizer.step()
                 
-                # Logging
-                epoch_loss += loss.item()
-                pbar.set_postfix({'loss': f'{loss.item():.4f}'})
+                # Compute metrics
+                with torch.no_grad():
+                    similarity = torch.matmul(outputs['z_rubin'], outputs['z_euclid'].T)
+                    diag_sim = torch.diag(similarity).mean().item()
+                    
+                    # Off-diagonal similarity
+                    n = similarity.shape[0]
+                    off_diag = similarity.clone()
+                    off_diag.fill_diagonal_(0)
+                    off_diag_sim = off_diag.sum().item() / (similarity.numel() - n) if n > 1 else 0.0
+                    
+                    separation = diag_sim - off_diag_sim
+                    
+                    # Top-1 accuracy (how many matches are correctly identified)
+                    top1_acc = (similarity.argmax(dim=1) == torch.arange(n, device=similarity.device)).float().mean().item()
                 
-                if self.use_wandb and batch_idx % log_freq == 0:
+                # Accumulate for epoch stats
+                epoch_loss += loss.item()
+                epoch_separation += separation
+                epoch_diag_sim += diag_sim
+                epoch_off_diag_sim += off_diag_sim
+                
+                # Update progress bar
+                pbar.set_postfix({
+                    'loss': f'{loss.item():.4f}',
+                    'sep': f'{separation:.4f}',
+                    'top1': f'{top1_acc:.2%}'
+                })
+                
+                # Log to W&B
+                if batch_idx % log_freq == 0:
                     wandb.log({
                         'train/loss': loss.item(),
+                        'train/separation': separation,
+                        'train/diagonal_similarity': diag_sim,
+                        'train/off_diagonal_similarity': off_diag_sim,
+                        'train/top1_accuracy': top1_acc,
+                        'train/gradient_norm': grad_norm.item(),
                         'train/lr': optimizer.param_groups[0]['lr'],
-                        'epoch': epoch
+                        'epoch': epoch,
+                        'global_step': global_step
                     })
+                
+                # Log visualizations periodically
+                if global_step % vis_freq == 0 and global_step > 0:
+                    self.log_similarity_matrix_to_wandb(outputs, global_step)
+                    self.log_embedding_histogram(outputs, global_step)
+                
+                global_step += 1
             
             # Epoch summary
-            avg_loss = epoch_loss / len(self.dataloader)
-            print(f"\nEpoch {epoch+1} Summary: Loss = {avg_loss:.4f}, LR = {optimizer.param_groups[0]['lr']:.6f}")
+            n_batches = len(self.dataloader)
+            avg_loss = epoch_loss / n_batches
+            avg_separation = epoch_separation / n_batches
+            avg_diag_sim = epoch_diag_sim / n_batches
+            avg_off_diag_sim = epoch_off_diag_sim / n_batches
             
-            if self.use_wandb:
-                wandb.log({'train/epoch_loss': avg_loss, 'epoch': epoch})
+            print(f"\nEpoch {epoch+1} Summary:")
+            print(f"  Loss: {avg_loss:.4f}")
+            print(f"  Separation: {avg_separation:.4f}")
+            print(f"  Diagonal similarity: {avg_diag_sim:.4f}")
+            print(f"  Off-diagonal similarity: {avg_off_diag_sim:.4f}")
+            print(f"  LR: {optimizer.param_groups[0]['lr']:.6f}")
+            
+            # Log epoch metrics
+            wandb.log({
+                'train/epoch_loss': avg_loss,
+                'train/epoch_separation': avg_separation,
+                'train/epoch_diagonal_similarity': avg_diag_sim,
+                'train/epoch_off_diagonal_similarity': avg_off_diag_sim,
+                'epoch': epoch
+            })
             
             # Step scheduler
             scheduler.step()
@@ -140,11 +271,15 @@ class Stage1Trainer:
                     'optimizer_state_dict': optimizer.state_dict(),
                     'scheduler_state_dict': scheduler.state_dict(),
                     'loss': avg_loss,
+                    'separation': avg_separation,
                 }
                 
                 # Save regular checkpoint
                 ckpt_path = self.output_dir / f"checkpoint_epoch_{epoch+1:03d}.pt"
                 torch.save(checkpoint, ckpt_path)
+                
+                # Save to W&B
+                wandb.save(str(ckpt_path))
                 print(f"Saved checkpoint: {ckpt_path}")
                 
                 # Save best model
@@ -152,46 +287,98 @@ class Stage1Trainer:
                     best_loss = avg_loss
                     best_path = self.output_dir / "best_model.pt"
                     torch.save(checkpoint, best_path)
-                    print(f"New best model! Loss: {best_loss:.4f}")
+                    wandb.save(str(best_path))
+                    print(f"✨ New best model! Loss: {best_loss:.4f}, Separation: {avg_separation:.4f}")
         
-        print(f"\nTraining complete! Best loss: {best_loss:.4f}")
+        print(f"\n{'='*60}")
+        print(f"Training complete! Best loss: {best_loss:.4f}")
+        print(f"{'='*60}")
         
-        if self.use_wandb:
-            wandb.finish()
+        # Final evaluation with visualizations
+        print("\nGenerating final visualizations...")
+        self.final_evaluation()
+        
+        wandb.finish()
     
-    def validate_sample(self):
-        """Quick validation: visualize embeddings on a single batch"""
+    def final_evaluation(self):
+        """Run final evaluation and log comprehensive visualizations"""
         self.model.eval()
         
+        all_z_rubin = []
+        all_z_euclid = []
+        
+        print("Extracting embeddings for final evaluation...")
         with torch.no_grad():
-            batch = next(iter(self.dataloader))
-            outputs = self.model(batch)
-            
-            print("\nSample batch validation:")
-            print(f"  Loss: {outputs['loss'].item():.4f}")
-            print(f"  Rubin embeddings: {outputs['z_rubin'].shape}")
-            print(f"  Euclid embeddings: {outputs['z_euclid'].shape}")
-            
-            # Check embedding similarity
-            similarity = torch.matmul(outputs['z_rubin'], outputs['z_euclid'].T)
-            diag_sim = torch.diag(similarity).mean()
-            off_diag_sim = (similarity.sum() - torch.diag(similarity).sum()) / (similarity.numel() - similarity.shape[0])
-            
-            print(f"  Avg diagonal similarity (matched pairs): {diag_sim:.4f}")
-            print(f"  Avg off-diagonal similarity (non-matched): {off_diag_sim:.4f}")
-            print(f"  Separation: {diag_sim - off_diag_sim:.4f} (higher is better)")
+            for batch in tqdm(self.dataloader):
+                outputs = self.model(batch)
+                all_z_rubin.append(outputs['z_rubin'].cpu())
+                all_z_euclid.append(outputs['z_euclid'].cpu())
+        
+        z_rubin = torch.cat(all_z_rubin, dim=0).numpy()
+        z_euclid = torch.cat(all_z_euclid, dim=0).numpy()
+        
+        # Compute final metrics
+        similarity = z_rubin @ z_euclid.T
+        diag = np.diag(similarity)
+        off_diag = similarity[~np.eye(similarity.shape[0], dtype=bool)]
+        
+        final_metrics = {
+            'final/diagonal_mean': diag.mean(),
+            'final/diagonal_std': diag.std(),
+            'final/off_diagonal_mean': off_diag.mean(),
+            'final/off_diagonal_std': off_diag.std(),
+            'final/separation': diag.mean() - off_diag.mean(),
+            'final/top1_accuracy': (similarity.argmax(axis=1) == np.arange(len(similarity))).mean(),
+        }
+        
+        wandb.log(final_metrics)
+        
+        # Create final similarity matrix
+        n_vis = min(200, len(similarity))
+        fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+        
+        # Similarity matrix
+        sns.heatmap(similarity[:n_vis, :n_vis], cmap='RdBu_r', center=0,
+                   vmin=-1, vmax=1, square=True, ax=axes[0],
+                   cbar_kws={'label': 'Cosine Similarity'})
+        axes[0].set_title('Final Similarity Matrix')
+        axes[0].set_xlabel('Euclid Patches')
+        axes[0].set_ylabel('Rubin Patches')
+        
+        # Distribution comparison
+        axes[1].hist(diag, bins=50, alpha=0.7, label='Matched pairs', color='#2ECC71', edgecolor='black')
+        axes[1].hist(off_diag, bins=50, alpha=0.7, label='Unmatched pairs', color='#E74C3C', edgecolor='black')
+        axes[1].axvline(diag.mean(), color='#2ECC71', linestyle='--', linewidth=2)
+        axes[1].axvline(off_diag.mean(), color='#E74C3C', linestyle='--', linewidth=2)
+        axes[1].set_xlabel('Cosine Similarity')
+        axes[1].set_ylabel('Count')
+        axes[1].set_title('Final Similarity Distribution')
+        axes[1].legend()
+        axes[1].grid(alpha=0.3)
+        
+        plt.tight_layout()
+        wandb.log({"final/similarity_analysis": wandb.Image(fig)})
+        plt.close(fig)
+        
+        print("\n✓ Final evaluation complete")
+        print(f"  Separation: {final_metrics['final/separation']:.4f}")
+        print(f"  Top-1 Accuracy: {final_metrics['final/top1_accuracy']:.2%}")
 
 
 def main():
     # Configuration
-    RUBIN_DIR = "./data/rubin_tiles"  # Update to your path
-    EUCLID_DIR = "./data/euclid_tiles"  # Update to your path
+    RUBIN_DIR = "../data/rubin_tiles_ecdfs"
+    EUCLID_DIR = "../data/euclid_tiles_ecdfs"
     OUTPUT_DIR = "./checkpoints/stage1_foundation"
     
-    BATCH_SIZE = 4  # Adjust based on your GPU memory
+    BATCH_SIZE = 8  # Adjust based on your GPU memory
     NUM_WORKERS = 4
     EPOCHS = 100
     LEARNING_RATE = 1e-4
+    
+    # W&B configuration
+    WANDB_PROJECT = "JAISP-Foundation"
+    WANDB_NAME = f"stage1_jepa_b{BATCH_SIZE}_lr{LEARNING_RATE}"
     
     # Check GPU
     if torch.cuda.is_available():
@@ -207,14 +394,9 @@ def main():
         output_dir=OUTPUT_DIR,
         batch_size=BATCH_SIZE,
         num_workers=NUM_WORKERS,
-        use_wandb=False  # Set to True if you want W&B logging
+        wandb_project=WANDB_PROJECT,
+        wandb_name=WANDB_NAME
     )
-    
-    # Quick validation before training
-    print("\n" + "="*60)
-    print("Running validation on sample batch...")
-    print("="*60)
-    trainer.validate_sample()
     
     # Train
     print("\n" + "="*60)
@@ -224,7 +406,8 @@ def main():
         epochs=EPOCHS,
         lr=LEARNING_RATE,
         save_freq=10,
-        log_freq=10
+        log_freq=10,
+        vis_freq=50  # Log visualizations every 50 steps
     )
 
 
