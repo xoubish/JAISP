@@ -12,7 +12,7 @@ import wandb
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-from JAISP_dataloader import make_loader
+from JAISP_dataset import make_loader
 from stage1_jepa_foundation import JAISPFoundation, create_optimizer, create_scheduler
 
 

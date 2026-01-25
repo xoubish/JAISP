@@ -16,7 +16,7 @@ from tqdm import tqdm
 import umap
 from sklearn.decomposition import PCA
 
-from JAISP_dataloader import make_loader
+from JAISP_dataset import make_loader
 from stage1_jepa_foundation import JAISPFoundation
 
 
