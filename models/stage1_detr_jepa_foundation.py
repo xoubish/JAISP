@@ -41,7 +41,9 @@ class ViTBackbone(nn.Module):
                                      kernel_size=patch_size, stride=patch_size)
         
         # Positional embedding (learnable)
-        max_patches = 256  # For up to 256×256 image with 16×16 patches
+        # Rubin: 512×512 / 16 = 32×32 = 1024 patches
+        # Euclid: 1050×1050 / 16 = 65×65 = 4225 patches
+        max_patches = 5000  # Conservative upper bound
         self.pos_embed = nn.Parameter(torch.randn(1, max_patches, embed_dim) * 0.02)
         
         # Transformer encoder blocks
@@ -226,9 +228,18 @@ class SetMatchingLoss(nn.Module):
         
         B, Q, D = rubin_objects.shape
         
-        # Normalize for cosine similarity
-        rubin_norm = F.normalize(rubin_objects, dim=-1)
-        euclid_norm = F.normalize(euclid_objects, dim=-1)
+        # Normalize for cosine similarity (with safety checks)
+        rubin_norm = F.normalize(rubin_objects + 1e-8, dim=-1, eps=1e-8)
+        euclid_norm = F.normalize(euclid_objects + 1e-8, dim=-1, eps=1e-8)
+        
+        # Check for NaNs/Infs (more aggressive)
+        if (not torch.isfinite(rubin_norm).all() or 
+            not torch.isfinite(euclid_norm).all() or
+            torch.isnan(rubin_objects).any() or
+            torch.isnan(euclid_objects).any()):
+            # Return small positive loss to keep gradients flowing
+            dummy_loss = (rubin_objects ** 2).mean() + (euclid_objects ** 2).mean()
+            return dummy_loss * 0.001, torch.zeros((B, Q), dtype=torch.long, device=rubin_objects.device)
         
         total_loss = 0
         all_matches = []
@@ -237,8 +248,15 @@ class SetMatchingLoss(nn.Module):
             # Cost matrix: negative similarity (we want to maximize similarity)
             cost_matrix = -(rubin_norm[b] @ euclid_norm[b].T)  # (Q, Q)
             
+            # Check for invalid values
+            cost_np = cost_matrix.detach().cpu().numpy()
+            if not np.isfinite(cost_np).all():
+                # Skip this batch if cost matrix is invalid
+                all_matches.append(torch.arange(Q, device=rubin_objects.device))
+                continue
+            
             # Hungarian algorithm to find optimal matching
-            row_ind, col_ind = linear_sum_assignment(cost_matrix.detach().cpu().numpy())
+            row_ind, col_ind = linear_sum_assignment(cost_np)
             
             # Compute loss on matched pairs
             matched_rubin = rubin_norm[b, row_ind]
@@ -313,6 +331,20 @@ class DETRJEPA(nn.Module):
         print(f"  Backbone: ViT-{embed_dim} (depth={backbone_depth})")
         print(f"  Decoder: {num_queries} object queries (depth={decoder_depth})")
         print(f"  Learning: Object manifold alignment via Hungarian matching")
+        
+        # Initialize weights
+        self._init_weights()
+    
+    def _init_weights(self):
+        """Initialize model weights carefully"""
+        for module in self.modules():
+            if isinstance(module, nn.Linear):
+                nn.init.xavier_uniform_(module.weight, gain=0.01)
+                if module.bias is not None:
+                    nn.init.constant_(module.bias, 0)
+            elif isinstance(module, nn.LayerNorm):
+                nn.init.constant_(module.weight, 1.0)
+                nn.init.constant_(module.bias, 0)
     
     def forward(self, batch: Dict) -> Dict[str, torch.Tensor]:
         """
@@ -355,7 +387,10 @@ class DETRJEPA(nn.Module):
         return {
             'loss': loss,
             'similarity': similarity.item(),
-            'n_objects': rubin_objects.shape[1]
+            'n_objects': rubin_objects.shape[1],
+            'matches': matches,
+            'rubin_objects': rubin_objects,
+            'euclid_objects': euclid_objects
         }
 
 
