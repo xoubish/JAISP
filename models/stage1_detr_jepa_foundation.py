@@ -88,14 +88,33 @@ class ViTBackbone(nn.Module):
         return x  # (B, N, D) - patch features
     
     def _weighted_normalize(self, x: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
-        """Variance-weighted normalization"""
+        """Variance-weighted normalization with NaN protection"""
+        # Check inputs
+        if not torch.isfinite(x).all():
+            x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
+        if not torch.isfinite(w).all():
+            w = torch.nan_to_num(w, nan=1e-10, posinf=1e-10, neginf=1e-10)
+        
+        # Clamp weights to reasonable range
+        w = w.clamp(min=1e-10, max=1e10)
+        
+        # Compute weighted mean per channel
         w_sum = w.sum(dim=(2,3), keepdim=True).clamp(min=1e-10)
         mean = (x * w).sum(dim=(2,3), keepdim=True) / w_sum
+        
+        # Compute weighted std
         var = ((x - mean)**2 * w).sum(dim=(2,3), keepdim=True) / w_sum
         std = torch.sqrt(var.clamp(min=1e-10))
-        x_norm = (x - mean) / std
-        # Re-weight in normalized space
-        x_norm = x_norm * torch.sqrt(w / (w.mean(dim=(2,3), keepdim=True) + 1e-10))
+        
+        # Normalize
+        x_norm = (x - mean) / (std + 1e-6)
+        
+        # Re-weight (optional, can disable if causing issues)
+        # x_norm = x_norm * torch.sqrt(w / (w.mean(dim=(2,3), keepdim=True) + 1e-10))
+        
+        # Final safety check
+        x_norm = torch.nan_to_num(x_norm, nan=0.0, posinf=0.0, neginf=0.0)
+        
         return x_norm
 
 
@@ -298,7 +317,7 @@ class DETRJEPA(nn.Module):
             patch_size=patch_size,
             embed_dim=embed_dim,
             depth=backbone_depth,
-            num_heads=6
+            num_heads=num_heads  # Use same num_heads
         )
         
         self.backbone_euclid = ViTBackbone(
@@ -306,7 +325,7 @@ class DETRJEPA(nn.Module):
             patch_size=patch_size,
             embed_dim=embed_dim,
             depth=backbone_depth,
-            num_heads=6
+            num_heads=num_heads  # Use same num_heads
         )
         
         # Object decoders (DETR-style)
@@ -357,22 +376,51 @@ class DETRJEPA(nn.Module):
         device = next(self.parameters()).device
         
         # For simplicity, process first item in batch
-        # (Can extend to true batching later)
         rubin_img = batch['x_rubin'][0].unsqueeze(0).to(device)
         euclid_img = batch['x_euclid'][0].unsqueeze(0).to(device)
         rubin_rms = batch['rms_rubin'][0].unsqueeze(0).to(device)
         euclid_rms = batch['rms_euclid'][0].unsqueeze(0).to(device)
         
+        # Check inputs
+        if not torch.isfinite(rubin_img).all():
+            rubin_img = torch.nan_to_num(rubin_img, nan=0.0, posinf=0.0, neginf=0.0)
+        if not torch.isfinite(euclid_img).all():
+            euclid_img = torch.nan_to_num(euclid_img, nan=0.0, posinf=0.0, neginf=0.0)
+        if not torch.isfinite(rubin_rms).all():
+            rubin_rms = torch.nan_to_num(rubin_rms, nan=1.0, posinf=1.0, neginf=1.0)
+        if not torch.isfinite(euclid_rms).all():
+            euclid_rms = torch.nan_to_num(euclid_rms, nan=1.0, posinf=1.0, neginf=1.0)
+        
         rubin_weights = 1.0 / (rubin_rms ** 2 + 1e-10)
         euclid_weights = 1.0 / (euclid_rms ** 2 + 1e-10)
+        
+        # Clamp weights
+        rubin_weights = rubin_weights.clamp(min=1e-10, max=1e10)
+        euclid_weights = euclid_weights.clamp(min=1e-10, max=1e10)
         
         # Extract patch features via ViT
         rubin_features = self.backbone_rubin(rubin_img, rubin_weights)  # (1, N_r, D)
         euclid_features = self.backbone_euclid(euclid_img, euclid_weights)  # (1, N_e, D)
         
+        # Safety check after backbone
+        if not torch.isfinite(rubin_features).all():
+            print("WARNING: Rubin features contain NaN/Inf after backbone")
+            rubin_features = torch.nan_to_num(rubin_features, nan=0.0, posinf=0.0, neginf=0.0)
+        if not torch.isfinite(euclid_features).all():
+            print("WARNING: Euclid features contain NaN/Inf after backbone")
+            euclid_features = torch.nan_to_num(euclid_features, nan=0.0, posinf=0.0, neginf=0.0)
+        
         # Decode to object representations
         rubin_objects = self.decoder_rubin(rubin_features)  # (1, Q, D)
         euclid_objects = self.decoder_euclid(euclid_features)  # (1, Q, D)
+        
+        # Safety check after decoder
+        if not torch.isfinite(rubin_objects).all():
+            print("WARNING: Rubin objects contain NaN/Inf after decoder")
+            rubin_objects = torch.nan_to_num(rubin_objects, nan=0.0, posinf=0.0, neginf=0.0)
+        if not torch.isfinite(euclid_objects).all():
+            print("WARNING: Euclid objects contain NaN/Inf after decoder")
+            euclid_objects = torch.nan_to_num(euclid_objects, nan=0.0, posinf=0.0, neginf=0.0)
         
         # Set matching loss (Hungarian algorithm)
         loss, matches = self.set_loss(rubin_objects, euclid_objects)
