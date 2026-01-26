@@ -21,7 +21,7 @@ class Stage1Trainer:
                  rubin_dir: str,
                  euclid_dir: str,
                  output_dir: str = "./checkpoints",
-                 batch_size: int = 4,
+                 batch_size: int = 32,
                  num_workers: int = 4,
                  device: str = "cuda" if torch.cuda.is_available() else "cpu",
                  wandb_project: str = "JAISP-Foundation",
@@ -48,15 +48,13 @@ class Stage1Trainer:
         
         # Create model
         self.model = JAISPFoundation(
-            patch_size=128,  # Rubin patch size (Euclid will be 256)
             n_patches_per_tile=4,
-            vit_patch_size=16,
+            vit_patch_size=8,        # Match the 8x8 ViT patches we set for zoomed cuts
             embed_dim=384,
             depth=6,
             num_heads=6,
             projection_dim=256,
-            temperature=0.1,  # Lower temperature for sharper gradients
-            use_band_masking=False  # Trust variance weighting
+            temperature=0.05
         ).to(self.device)
         
         print("  Rubin patches:  128×128 pixels = 25.6\" × 25.6\" on sky")
@@ -124,7 +122,7 @@ class Stage1Trainer:
               epochs: int = 100,
               lr: float = 1e-4,
               weight_decay: float = 0.05,
-              warmup_epochs: int = 10,
+              warmup_epochs: int = 20,
               save_freq: int = 10,
               log_freq: int = 10,
               vis_freq: int = 50):  # Frequency for visual logs
@@ -133,13 +131,16 @@ class Stage1Trainer:
         optimizer = create_optimizer(self.model, lr=lr, weight_decay=weight_decay)
         scheduler = create_scheduler(optimizer, warmup_epochs, epochs)
         
-        # Initialize wandb
         config = {
             "epochs": epochs,
             "lr": lr,
+            "batch_size": self.dataloader.batch_size,
+            "patch_size_rubin": 48,  # Updated
+            "patch_size_euclid": 96, # Updated
+            "vit_patch_size": 8,     # Updated
+            "temperature": 0.05,     # Updated
             "weight_decay": weight_decay,
             "warmup_epochs": warmup_epochs,
-            "batch_size": self.dataloader.batch_size,
             "n_tiles": len(self.dataset),
             "n_batches_per_epoch": len(self.dataloader),
             "patch_size": 128,
@@ -148,7 +149,6 @@ class Stage1Trainer:
             "projection_dim": 256,
             "vit_depth": 6,
             "vit_heads": 6,
-            "temperature": 0.07,
             "device": str(self.device),
             "model_params": sum(p.numel() for p in self.model.parameters() if p.requires_grad)
         }
