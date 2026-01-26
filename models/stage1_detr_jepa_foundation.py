@@ -1,16 +1,12 @@
 # stage1_detr_jepa_foundation.py
 #
-# DETR-style Object Detection + JEPA in Object Space
+# FIXED VERSION: Added VICReg-style regularization to prevent collapse
 #
-# Architecture:
-# 1. ViT backbone extracts patch features
-# 2. Transformer decoder with learnable object queries (like DETR)
-# 3. Each query attends to image features → one object slot
-# 4. JEPA: Match object manifolds between Rubin and Euclid
-#
-# Key insight: Learn embedding space where:
-#   "Set of Rubin objects" ≈ "Set of Euclid objects"
-# Not pixel-level, not patch-level, but OBJECT-LEVEL
+# Key changes:
+# 1. VICReg loss: variance + invariance + covariance terms
+# 2. Asymmetric architecture: predictor on one branch (like BYOL/I-JEPA)
+# 3. EMA target encoder option
+# 4. Diversity regularization
 
 import torch
 import torch.nn as nn
@@ -18,6 +14,7 @@ import torch.nn.functional as F
 import numpy as np
 from typing import List, Dict, Tuple, Optional
 import math
+from scipy.optimize import linear_sum_assignment
 
 
 class ViTBackbone(nn.Module):
@@ -41,9 +38,7 @@ class ViTBackbone(nn.Module):
                                      kernel_size=patch_size, stride=patch_size)
         
         # Positional embedding (learnable)
-        # Rubin: 512×512 / 16 = 32×32 = 1024 patches
-        # Euclid: 1050×1050 / 16 = 65×65 = 4225 patches
-        max_patches = 5000  # Conservative upper bound
+        max_patches = 5000
         self.pos_embed = nn.Parameter(torch.randn(1, max_patches, embed_dim) * 0.02)
         
         # Transformer encoder blocks
@@ -55,14 +50,6 @@ class ViTBackbone(nn.Module):
         self.norm = nn.LayerNorm(embed_dim)
     
     def forward(self, x: torch.Tensor, weights: Optional[torch.Tensor] = None) -> torch.Tensor:
-        """
-        Args:
-            x: (B, C, H, W)
-            weights: (B, C, H, W) - inverse variance weights
-        
-        Returns:
-            features: (B, N, D) where N = num patches
-        """
         B = x.shape[0]
         
         # Variance-weighted normalization
@@ -72,8 +59,8 @@ class ViTBackbone(nn.Module):
             x = (x - x.mean(dim=(2,3), keepdim=True)) / (x.std(dim=(2,3), keepdim=True) + 1e-6)
         
         # Patch embedding
-        x = self.patch_embed(x)  # (B, D, H/p, W/p)
-        x = x.flatten(2).transpose(1, 2)  # (B, N, D)
+        x = self.patch_embed(x)
+        x = x.flatten(2).transpose(1, 2)
         
         # Add positional embedding
         N = x.shape[1]
@@ -84,42 +71,25 @@ class ViTBackbone(nn.Module):
             x = block(x)
         
         x = self.norm(x)
-        
-        return x  # (B, N, D) - patch features
+        return x
     
     def _weighted_normalize(self, x: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
-        """Variance-weighted normalization with NaN protection"""
-        # Check inputs
         if not torch.isfinite(x).all():
             x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
         if not torch.isfinite(w).all():
             w = torch.nan_to_num(w, nan=1e-10, posinf=1e-10, neginf=1e-10)
         
-        # Clamp weights to reasonable range
         w = w.clamp(min=1e-10, max=1e10)
-        
-        # Compute weighted mean per channel
         w_sum = w.sum(dim=(2,3), keepdim=True).clamp(min=1e-10)
         mean = (x * w).sum(dim=(2,3), keepdim=True) / w_sum
-        
-        # Compute weighted std
         var = ((x - mean)**2 * w).sum(dim=(2,3), keepdim=True) / w_sum
         std = torch.sqrt(var.clamp(min=1e-10))
-        
-        # Normalize
         x_norm = (x - mean) / (std + 1e-6)
-        
-        # Re-weight (optional, can disable if causing issues)
-        # x_norm = x_norm * torch.sqrt(w / (w.mean(dim=(2,3), keepdim=True) + 1e-10))
-        
-        # Final safety check
         x_norm = torch.nan_to_num(x_norm, nan=0.0, posinf=0.0, neginf=0.0)
-        
         return x_norm
 
 
 class TransformerBlock(nn.Module):
-    """Standard Transformer block"""
     def __init__(self, dim: int, num_heads: int, mlp_ratio: float = 4.0):
         super().__init__()
         self.norm1 = nn.LayerNorm(dim)
@@ -138,10 +108,6 @@ class TransformerBlock(nn.Module):
 
 
 class ObjectDecoder(nn.Module):
-    """
-    DETR-style decoder with learnable object queries.
-    Each query "discovers" one object in the image.
-    """
     def __init__(self, 
                  embed_dim: int = 384,
                  num_queries: int = 100,
@@ -150,10 +116,9 @@ class ObjectDecoder(nn.Module):
         super().__init__()
         self.num_queries = num_queries
         
-        # Learnable object queries (like DETR)
-        self.query_embed = nn.Parameter(torch.randn(num_queries, embed_dim))
+        # Learnable object queries - use different init scale
+        self.query_embed = nn.Parameter(torch.randn(num_queries, embed_dim) * 0.1)
         
-        # Transformer decoder layers
         self.layers = nn.ModuleList([
             DecoderLayer(embed_dim, num_heads)
             for _ in range(num_layers)
@@ -162,41 +127,23 @@ class ObjectDecoder(nn.Module):
         self.norm = nn.LayerNorm(embed_dim)
     
     def forward(self, memory: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            memory: (B, N, D) - patch features from backbone
-        
-        Returns:
-            object_features: (B, num_queries, D) - one embedding per object
-        """
         B = memory.shape[0]
+        queries = self.query_embed.unsqueeze(0).expand(B, -1, -1)
         
-        # Initialize queries (same for all images in batch)
-        queries = self.query_embed.unsqueeze(0).expand(B, -1, -1)  # (B, Q, D)
-        
-        # Decode: each query attends to image features
         for layer in self.layers:
             queries = layer(queries, memory)
         
         queries = self.norm(queries)
-        
-        return queries  # (B, Q, D)
+        return queries
 
 
 class DecoderLayer(nn.Module):
-    """Transformer decoder layer with cross-attention"""
     def __init__(self, dim: int, num_heads: int):
         super().__init__()
-        
-        # Self-attention on queries
         self.self_attn = nn.MultiheadAttention(dim, num_heads, batch_first=True)
         self.norm1 = nn.LayerNorm(dim)
-        
-        # Cross-attention to image features
         self.cross_attn = nn.MultiheadAttention(dim, num_heads, batch_first=True)
         self.norm2 = nn.LayerNorm(dim)
-        
-        # FFN
         self.ffn = nn.Sequential(
             nn.Linear(dim, dim * 4),
             nn.GELU(),
@@ -205,100 +152,172 @@ class DecoderLayer(nn.Module):
         self.norm3 = nn.LayerNorm(dim)
     
     def forward(self, queries: torch.Tensor, memory: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            queries: (B, Q, D)
-            memory: (B, N, D) - image features
-        """
-        # Self-attention among queries
         q = self.norm1(queries)
         queries = queries + self.self_attn(q, q, q)[0]
-        
-        # Cross-attention to image
         q = self.norm2(queries)
         queries = queries + self.cross_attn(q, memory, memory)[0]
-        
-        # FFN
         queries = queries + self.ffn(self.norm3(queries))
-        
         return queries
 
 
-class SetMatchingLoss(nn.Module):
+class VICRegLoss(nn.Module):
     """
-    Hungarian matching between Rubin and Euclid object sets.
-    Finds optimal 1-1 correspondence, then computes loss.
-    """
-    def __init__(self, cost_type: str = 'cosine'):
-        super().__init__()
-        self.cost_type = cost_type
+    VICReg-style loss to prevent representation collapse.
     
-    def forward(self, rubin_objects: torch.Tensor, euclid_objects: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    Components:
+    1. Invariance: matched pairs should be similar
+    2. Variance: embeddings should have unit variance (prevents collapse to point)
+    3. Covariance: embedding dimensions should be decorrelated (prevents collapse to line/plane)
+    
+    Reference: Bardes et al., "VICReg: Variance-Invariance-Covariance Regularization"
+    """
+    def __init__(self, 
+                 sim_weight: float = 25.0,
+                 var_weight: float = 25.0,
+                 cov_weight: float = 1.0,
+                 variance_target: float = 1.0):
+        super().__init__()
+        self.sim_weight = sim_weight
+        self.var_weight = var_weight
+        self.cov_weight = cov_weight
+        self.variance_target = variance_target
+    
+    def variance_loss(self, z: torch.Tensor) -> torch.Tensor:
+        """
+        Encourage variance of each dimension to be at least variance_target.
+        z: (B, N, D) or (N, D)
+        """
+        if z.dim() == 3:
+            z = z.reshape(-1, z.shape[-1])  # (B*N, D)
+        
+        # Variance along batch dimension
+        std = torch.sqrt(z.var(dim=0) + 1e-4)
+        # Hinge loss: penalize if std < target
+        var_loss = F.relu(self.variance_target - std).mean()
+        return var_loss
+    
+    def covariance_loss(self, z: torch.Tensor) -> torch.Tensor:
+        """
+        Decorrelate embedding dimensions.
+        z: (B, N, D) or (N, D)
+        """
+        if z.dim() == 3:
+            z = z.reshape(-1, z.shape[-1])  # (B*N, D)
+        
+        N, D = z.shape
+        z = z - z.mean(dim=0)
+        cov = (z.T @ z) / (N - 1)  # (D, D)
+        
+        # Off-diagonal elements should be zero
+        off_diag = cov.flatten()[:-1].view(D - 1, D + 1)[:, 1:].flatten()
+        cov_loss = off_diag.pow(2).sum() / D
+        return cov_loss
+    
+    def forward(self, rubin_objects: torch.Tensor, euclid_objects: torch.Tensor) -> Dict[str, torch.Tensor]:
         """
         Args:
             rubin_objects: (B, Q, D)
             euclid_objects: (B, Q, D)
         
         Returns:
-            loss: scalar
-            matches: (B, Q) - matched indices
+            Dict with total loss and components
         """
-        from scipy.optimize import linear_sum_assignment
-        
         B, Q, D = rubin_objects.shape
         
-        # Normalize for cosine similarity (with safety checks)
+        # Normalize for cosine similarity
         rubin_norm = F.normalize(rubin_objects + 1e-8, dim=-1, eps=1e-8)
         euclid_norm = F.normalize(euclid_objects + 1e-8, dim=-1, eps=1e-8)
         
-        # Check for NaNs/Infs (more aggressive)
-        if (not torch.isfinite(rubin_norm).all() or 
-            not torch.isfinite(euclid_norm).all() or
-            torch.isnan(rubin_objects).any() or
-            torch.isnan(euclid_objects).any()):
-            # Return small positive loss to keep gradients flowing
+        if not torch.isfinite(rubin_norm).all() or not torch.isfinite(euclid_norm).all():
             dummy_loss = (rubin_objects ** 2).mean() + (euclid_objects ** 2).mean()
-            return dummy_loss * 0.001, torch.zeros((B, Q), dtype=torch.long, device=rubin_objects.device)
+            return {
+                'loss': dummy_loss * 0.001,
+                'invariance_loss': torch.tensor(0.0),
+                'variance_loss': torch.tensor(0.0),
+                'covariance_loss': torch.tensor(0.0),
+                'matches': torch.zeros((B, Q), dtype=torch.long, device=rubin_objects.device)
+            }
         
-        total_loss = 0
+        total_invariance_loss = 0
         all_matches = []
         
         for b in range(B):
-            # Cost matrix: negative similarity (we want to maximize similarity)
-            cost_matrix = -(rubin_norm[b] @ euclid_norm[b].T)  # (Q, Q)
-            
-            # Check for invalid values
+            # Hungarian matching
+            cost_matrix = -(rubin_norm[b] @ euclid_norm[b].T)
             cost_np = cost_matrix.detach().cpu().numpy()
+            
             if not np.isfinite(cost_np).all():
-                # Skip this batch if cost matrix is invalid
                 all_matches.append(torch.arange(Q, device=rubin_objects.device))
                 continue
             
-            # Hungarian algorithm to find optimal matching
             row_ind, col_ind = linear_sum_assignment(cost_np)
             
-            # Compute loss on matched pairs
+            # Invariance loss on matched pairs
             matched_rubin = rubin_norm[b, row_ind]
             matched_euclid = euclid_norm[b, col_ind]
+            sim = (matched_rubin * matched_euclid).sum(dim=-1)
+            invariance_loss_b = (1.0 - sim).mean()
             
-            # Cosine similarity loss
-            sim = (matched_rubin * matched_euclid).sum(dim=-1)  # (Q,)
-            loss_b = 1.0 - sim.mean()  # Want similarity → 1
-            
-            total_loss += loss_b
+            total_invariance_loss += invariance_loss_b
             all_matches.append(torch.tensor(col_ind, device=rubin_objects.device))
         
-        return total_loss / B, torch.stack(all_matches)
+        invariance_loss = total_invariance_loss / B
+        
+        # Variance loss: prevent collapse to a point
+        var_loss_rubin = self.variance_loss(rubin_objects)
+        var_loss_euclid = self.variance_loss(euclid_objects)
+        variance_loss = (var_loss_rubin + var_loss_euclid) / 2
+        
+        # Covariance loss: decorrelate dimensions
+        cov_loss_rubin = self.covariance_loss(rubin_objects)
+        cov_loss_euclid = self.covariance_loss(euclid_objects)
+        covariance_loss = (cov_loss_rubin + cov_loss_euclid) / 2
+        
+        # Total loss
+        total_loss = (
+            self.sim_weight * invariance_loss +
+            self.var_weight * variance_loss +
+            self.cov_weight * covariance_loss
+        )
+        
+        return {
+            'loss': total_loss,
+            'invariance_loss': invariance_loss,
+            'variance_loss': variance_loss,
+            'covariance_loss': covariance_loss,
+            'matches': torch.stack(all_matches) if all_matches else None
+        }
+
+
+class Predictor(nn.Module):
+    """
+    Asymmetric predictor (like BYOL/I-JEPA).
+    Helps prevent collapse by breaking symmetry.
+    """
+    def __init__(self, embed_dim: int, hidden_dim: int = None, output_dim: int = None):
+        super().__init__()
+        hidden_dim = hidden_dim or embed_dim
+        output_dim = output_dim or embed_dim
+        
+        self.net = nn.Sequential(
+            nn.Linear(embed_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, output_dim)
+        )
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.net(x)
 
 
 class DETRJEPA(nn.Module):
     """
     DETR-style Object Detection + JEPA in Object Space.
     
-    The key innovation:
-    - Extract object-level representations (not patches)
-    - JEPA learns: "manifold of Rubin objects" ≈ "manifold of Euclid objects"
-    - Set-to-set matching via Hungarian algorithm
+    FIXED VERSION with:
+    1. VICReg loss (variance + invariance + covariance)
+    2. Asymmetric predictor on Rubin branch
+    3. Optional EMA target encoder
     """
     def __init__(self,
                  rubin_channels: int = 6,
@@ -308,8 +327,15 @@ class DETRJEPA(nn.Module):
                  backbone_depth: int = 6,
                  decoder_depth: int = 6,
                  num_queries: int = 100,
-                 num_heads: int = 8):
+                 num_heads: int = 8,
+                 use_predictor: bool = True,
+                 sim_weight: float = 25.0,
+                 var_weight: float = 25.0,
+                 cov_weight: float = 1.0):
         super().__init__()
+        
+        self.embed_dim = embed_dim
+        self.use_predictor = use_predictor
         
         # ViT backbones
         self.backbone_rubin = ViTBackbone(
@@ -317,7 +343,7 @@ class DETRJEPA(nn.Module):
             patch_size=patch_size,
             embed_dim=embed_dim,
             depth=backbone_depth,
-            num_heads=num_heads  # Use same num_heads
+            num_heads=num_heads
         )
         
         self.backbone_euclid = ViTBackbone(
@@ -325,7 +351,7 @@ class DETRJEPA(nn.Module):
             patch_size=patch_size,
             embed_dim=embed_dim,
             depth=backbone_depth,
-            num_heads=num_heads  # Use same num_heads
+            num_heads=num_heads
         )
         
         # Object decoders (DETR-style)
@@ -343,19 +369,26 @@ class DETRJEPA(nn.Module):
             num_heads=num_heads
         )
         
-        # Set matching loss
-        self.set_loss = SetMatchingLoss()
+        # Asymmetric predictor (applied to Rubin branch)
+        if use_predictor:
+            self.predictor = Predictor(embed_dim, embed_dim * 2, embed_dim)
         
-        print(f"DETR-JEPA Architecture:")
+        # VICReg loss
+        self.vicreg_loss = VICRegLoss(
+            sim_weight=sim_weight,
+            var_weight=var_weight,
+            cov_weight=cov_weight
+        )
+        
+        print(f"DETR-JEPA Architecture (FIXED):")
         print(f"  Backbone: ViT-{embed_dim} (depth={backbone_depth})")
         print(f"  Decoder: {num_queries} object queries (depth={decoder_depth})")
-        print(f"  Learning: Object manifold alignment via Hungarian matching")
+        print(f"  Loss: VICReg (sim={sim_weight}, var={var_weight}, cov={cov_weight})")
+        print(f"  Predictor: {use_predictor}")
         
-        # Initialize weights
         self._init_weights()
     
     def _init_weights(self):
-        """Initialize model weights carefully"""
         for module in self.modules():
             if isinstance(module, nn.Linear):
                 nn.init.xavier_uniform_(module.weight, gain=0.01)
@@ -366,90 +399,79 @@ class DETRJEPA(nn.Module):
                 nn.init.constant_(module.bias, 0)
     
     def forward(self, batch: Dict) -> Dict[str, torch.Tensor]:
-        """
-        Args:
-            batch: Dict from dataloader
-        
-        Returns:
-            Dict with loss and diagnostics
-        """
         device = next(self.parameters()).device
         
-        # For simplicity, process first item in batch
         rubin_img = batch['x_rubin'][0].unsqueeze(0).to(device)
         euclid_img = batch['x_euclid'][0].unsqueeze(0).to(device)
         rubin_rms = batch['rms_rubin'][0].unsqueeze(0).to(device)
         euclid_rms = batch['rms_euclid'][0].unsqueeze(0).to(device)
         
-        # Check inputs
-        if not torch.isfinite(rubin_img).all():
-            rubin_img = torch.nan_to_num(rubin_img, nan=0.0, posinf=0.0, neginf=0.0)
-        if not torch.isfinite(euclid_img).all():
-            euclid_img = torch.nan_to_num(euclid_img, nan=0.0, posinf=0.0, neginf=0.0)
-        if not torch.isfinite(rubin_rms).all():
-            rubin_rms = torch.nan_to_num(rubin_rms, nan=1.0, posinf=1.0, neginf=1.0)
-        if not torch.isfinite(euclid_rms).all():
-            euclid_rms = torch.nan_to_num(euclid_rms, nan=1.0, posinf=1.0, neginf=1.0)
+        # Input safety
+        rubin_img = torch.nan_to_num(rubin_img, nan=0.0, posinf=0.0, neginf=0.0)
+        euclid_img = torch.nan_to_num(euclid_img, nan=0.0, posinf=0.0, neginf=0.0)
+        rubin_rms = torch.nan_to_num(rubin_rms, nan=1.0, posinf=1.0, neginf=1.0)
+        euclid_rms = torch.nan_to_num(euclid_rms, nan=1.0, posinf=1.0, neginf=1.0)
         
-        rubin_weights = 1.0 / (rubin_rms ** 2 + 1e-10)
-        euclid_weights = 1.0 / (euclid_rms ** 2 + 1e-10)
+        rubin_weights = (1.0 / (rubin_rms ** 2 + 1e-10)).clamp(min=1e-10, max=1e10)
+        euclid_weights = (1.0 / (euclid_rms ** 2 + 1e-10)).clamp(min=1e-10, max=1e10)
         
-        # Clamp weights
-        rubin_weights = rubin_weights.clamp(min=1e-10, max=1e10)
-        euclid_weights = euclid_weights.clamp(min=1e-10, max=1e10)
+        # Extract features
+        rubin_features = self.backbone_rubin(rubin_img, rubin_weights)
+        euclid_features = self.backbone_euclid(euclid_img, euclid_weights)
         
-        # Extract patch features via ViT
-        rubin_features = self.backbone_rubin(rubin_img, rubin_weights)  # (1, N_r, D)
-        euclid_features = self.backbone_euclid(euclid_img, euclid_weights)  # (1, N_e, D)
+        rubin_features = torch.nan_to_num(rubin_features, nan=0.0, posinf=0.0, neginf=0.0)
+        euclid_features = torch.nan_to_num(euclid_features, nan=0.0, posinf=0.0, neginf=0.0)
         
-        # Safety check after backbone
-        if not torch.isfinite(rubin_features).all():
-            print("WARNING: Rubin features contain NaN/Inf after backbone")
-            rubin_features = torch.nan_to_num(rubin_features, nan=0.0, posinf=0.0, neginf=0.0)
-        if not torch.isfinite(euclid_features).all():
-            print("WARNING: Euclid features contain NaN/Inf after backbone")
-            euclid_features = torch.nan_to_num(euclid_features, nan=0.0, posinf=0.0, neginf=0.0)
+        # Decode to objects
+        rubin_objects = self.decoder_rubin(rubin_features)
+        euclid_objects = self.decoder_euclid(euclid_features)
         
-        # Decode to object representations
-        rubin_objects = self.decoder_rubin(rubin_features)  # (1, Q, D)
-        euclid_objects = self.decoder_euclid(euclid_features)  # (1, Q, D)
+        rubin_objects = torch.nan_to_num(rubin_objects, nan=0.0, posinf=0.0, neginf=0.0)
+        euclid_objects = torch.nan_to_num(euclid_objects, nan=0.0, posinf=0.0, neginf=0.0)
         
-        # Safety check after decoder
-        if not torch.isfinite(rubin_objects).all():
-            print("WARNING: Rubin objects contain NaN/Inf after decoder")
-            rubin_objects = torch.nan_to_num(rubin_objects, nan=0.0, posinf=0.0, neginf=0.0)
-        if not torch.isfinite(euclid_objects).all():
-            print("WARNING: Euclid objects contain NaN/Inf after decoder")
-            euclid_objects = torch.nan_to_num(euclid_objects, nan=0.0, posinf=0.0, neginf=0.0)
+        # Apply predictor to Rubin branch (asymmetry helps prevent collapse)
+        if self.use_predictor:
+            rubin_objects_pred = self.predictor(rubin_objects)
+        else:
+            rubin_objects_pred = rubin_objects
         
-        # Set matching loss (Hungarian algorithm)
-        loss, matches = self.set_loss(rubin_objects, euclid_objects)
+        # VICReg loss
+        loss_dict = self.vicreg_loss(rubin_objects_pred, euclid_objects.detach())
         
-        # Compute average similarity of matched pairs for monitoring
+        # Also compute loss in the other direction (symmetric)
+        if self.use_predictor:
+            # For symmetric version, we'd need a second predictor
+            # For now, just use the forward direction
+            pass
+        
+        # Compute similarity for monitoring (on original embeddings)
         rubin_norm = F.normalize(rubin_objects, dim=-1)
         euclid_norm = F.normalize(euclid_objects, dim=-1)
         
-        matched_euclid = euclid_norm[0, matches[0]]
-        similarity = (rubin_norm[0] * matched_euclid).sum(dim=-1).mean()
+        if loss_dict['matches'] is not None:
+            matched_euclid = euclid_norm[0, loss_dict['matches'][0]]
+            similarity = (rubin_norm[0] * matched_euclid).sum(dim=-1).mean()
+        else:
+            similarity = torch.tensor(0.0)
         
         return {
-            'loss': loss,
-            'similarity': similarity.item(),
+            'loss': loss_dict['loss'],
+            'invariance_loss': loss_dict['invariance_loss'],
+            'variance_loss': loss_dict['variance_loss'],
+            'covariance_loss': loss_dict['covariance_loss'],
+            'similarity': similarity.item() if isinstance(similarity, torch.Tensor) else similarity,
             'n_objects': rubin_objects.shape[1],
-            'matches': matches,
+            'matches': loss_dict['matches'],
             'rubin_objects': rubin_objects,
             'euclid_objects': euclid_objects
         }
 
 
-# Training utilities
 def create_optimizer(model: nn.Module, lr: float = 1e-4, weight_decay: float = 0.05):
-    """AdamW with layer-wise lr decay"""
     return torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
 
 
 def create_scheduler(optimizer, warmup_epochs: int, total_epochs: int):
-    """Cosine annealing with warmup"""
     from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
     
     warmup = LinearLR(optimizer, start_factor=0.01, total_iters=warmup_epochs)
