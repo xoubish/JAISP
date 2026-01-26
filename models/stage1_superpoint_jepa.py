@@ -35,7 +35,6 @@ class TransformerBlock(nn.Module):
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, N, C = x.shape
-        # FIX: Corrected reshape dimensions using self.num_heads
         qkv = self.qkv(self.norm1(x)).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
         attn_out = F.scaled_dot_product_attention(qkv[0], qkv[1], qkv[2])
         attn_out = attn_out.transpose(1, 2).reshape(B, N, C)
@@ -53,14 +52,20 @@ class SuperPointJEPA(nn.Module):
         self.predictor = nn.Sequential(nn.Linear(descriptor_dim, descriptor_dim), nn.LayerNorm(descriptor_dim), nn.GELU(), nn.Linear(descriptor_dim, descriptor_dim))
 
     def encode_image(self, x, patch_embed, mask=None):
+        B, C, H, W = x.shape
         x = (x - x.mean(dim=(2, 3), keepdim=True)) / (x.std(dim=(2, 3), keepdim=True) + 1e-8)
         patches, grid_size = patch_embed(torch.nan_to_num(x, nan=0.0))
         for block in self.encoder:
             patches = checkpoint(block, patches, use_reentrant=False) if self.training else block(patches)
-        feat_map = patches.transpose(1, 2).view(x.shape[0], -1, grid_size[0], grid_size[1])
+        
+        feat_map = patches.transpose(1, 2).view(B, -1, grid_size[0], grid_size[1])
         heatmap = self.keypoint_head(feat_map)
+        
         if mask is not None:
+            if mask.dim() == 2: mask = mask.unsqueeze(0).unsqueeze(0)
+            elif mask.dim() == 3: mask = mask.unsqueeze(1)
             heatmap = heatmap * F.interpolate(mask.float(), size=grid_size, mode='nearest')
+            
         descs = F.normalize(self.descriptor_head(feat_map).flatten(2).transpose(1, 2), dim=-1)
         return {'heatmap': heatmap, 'descriptors': descs}
 
