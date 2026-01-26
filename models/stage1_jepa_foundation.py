@@ -23,23 +23,25 @@ class PatchExtractor(nn.Module):
     """
     def __init__(self, 
                  patch_size_rubin: int = 128,
-                 patch_size_euclid: int = 256,  # 2x to match 0.1" vs 0.2" pixel scale
-                 n_patches: int = 4):
+                 patch_size_euclid: int = 256,  
+                 n_patches_per_tile: int = 4): 
         super().__init__()
         self.patch_size_rubin = patch_size_rubin
         self.patch_size_euclid = patch_size_euclid
-        self.n_patches = n_patches
+        self.n_patches = n_patches_per_tile
     
     def forward(self, img_list: List[torch.Tensor], 
                 rms_list: List[torch.Tensor],
                 device: Optional[torch.device] = None,
-                valid_mask: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:
+                valid_mask: Optional[torch.Tensor] = None,
+                survey: str = 'rubin') -> Tuple[torch.Tensor, torch.Tensor]: # Fixed: Added survey keyword
         """
         Args:
             img_list: List of (C, H, W) tensors
             rms_list: List of (C, H, W) RMS maps
             device: Device to move tensors to
             valid_mask: Optional (B, C) mask indicating valid bands
+            survey: 'rubin' or 'euclid' to determine physical patch size
         
         Returns:
             patches: (B*n_patches, C, patch_size, patch_size)
@@ -47,6 +49,9 @@ class PatchExtractor(nn.Module):
         """
         all_patches = []
         all_weights = []
+        
+        # Select patch size based on survey to maintain constant sky area
+        p_size = self.patch_size_rubin if survey == 'rubin' else self.patch_size_euclid
         
         for img, rms in zip(img_list, rms_list):
             # Move to device if specified
@@ -58,23 +63,23 @@ class PatchExtractor(nn.Module):
             # Extract n_patches from this tile
             for _ in range(self.n_patches):
                 # Random crop position
-                if H >= self.patch_size and W >= self.patch_size:
-                    y = np.random.randint(0, H - self.patch_size + 1)
-                    x = np.random.randint(0, W - self.patch_size + 1)
+                if H >= p_size and W >= p_size:
+                    y = np.random.randint(0, H - p_size + 1)
+                    x = np.random.randint(0, W - p_size + 1)
                     
-                    patch = img[:, y:y+self.patch_size, x:x+self.patch_size]
-                    rms_patch = rms[:, y:y+self.patch_size, x:x+self.patch_size]
+                    patch = img[:, y:y+p_size, x:x+p_size]
+                    rms_patch = rms[:, y:y+p_size, x:x+p_size]
                 else:
                     # Tile too small: pad to patch_size
-                    patch = F.pad(img, (0, max(0, self.patch_size-W), 
-                                       0, max(0, self.patch_size-H)))
-                    rms_patch = F.pad(rms, (0, max(0, self.patch_size-W), 
-                                           0, max(0, self.patch_size-H)), 
+                    patch = F.pad(img, (0, max(0, p_size-W), 
+                                       0, max(0, p_size-H)))
+                    rms_patch = F.pad(rms, (0, max(0, p_size-W), 
+                                           0, max(0, p_size-H)), 
                                      value=float('inf'))  # Infinite noise = zero weight
                     
                     # Crop if larger
-                    patch = patch[:, :self.patch_size, :self.patch_size]
-                    rms_patch = rms_patch[:, :self.patch_size, :self.patch_size]
+                    patch = patch[:, :p_size, :p_size]
+                    rms_patch = rms_patch[:, :p_size, :p_size]
                 
                 # Compute inverse variance weights
                 # weight = 1 / (rms^2 + eps), but handle NaN/Inf carefully
@@ -108,7 +113,7 @@ class ViTEncoder(nn.Module):
                  num_heads: int = 6,
                  mlp_ratio: float = 4.0,
                  dropout: float = 0.1,
-                 band_dropout: float = 0.0):  # NEW: randomly drop bands during training
+                 band_dropout: float = 0.0):  # randomly drop bands during training
         super().__init__()
         self.patch_size = patch_size
         self.embed_dim = embed_dim
@@ -281,7 +286,7 @@ class JAISPFoundation(nn.Module):
                  num_heads: int = 6,
                  projection_dim: int = 256,
                  temperature: float = 0.07,
-                 use_band_masking: bool = False):  # NEW: make masking optional
+                 use_band_masking: bool = False):
         super().__init__()
         
         self.use_band_masking = use_band_masking
@@ -290,7 +295,7 @@ class JAISPFoundation(nn.Module):
         self.patch_extractor = PatchExtractor(
             patch_size_rubin=128,   # 128 × 0.2" = 25.6" on sky
             patch_size_euclid=256,  # 256 × 0.1" = 25.6" on sky (MATCHED!)
-            n_patches_per_tile=n_patches_per_tile
+            n_patches_per_tile=n_patches_per_tile # Fixed: Keyword name matches PatchExtractor.__init__
         )
         
         # Separate encoders for each survey
@@ -332,7 +337,7 @@ class JAISPFoundation(nn.Module):
         # Get model device
         device = next(self.parameters()).device
         
-        # Extract patches (PatchExtractor will move data to device)
+        # Extract patches (PatchExtractor now accepts 'survey' to select correct size)
         rubin_patches, rubin_weights = self.patch_extractor(
             batch['x_rubin'], batch['rms_rubin'], device=device, survey='rubin'
         )
@@ -392,35 +397,18 @@ class JAISPFoundation(nn.Module):
         # Compute full similarity matrix with temperature
         sim = torch.matmul(z, z.T) / self.temperature  # (2B, 2B)
         
-        # Create mask for positive pairs
-        # Rubin patch i matches Euclid patch i
-        labels = torch.zeros(2*B, dtype=torch.long, device=device)
-        
-        # Positive pairs are at specific indices
-        # For index i (i < B): positive is at i+B
-        # For index i (i >= B): positive is at i-B
-        pos_mask = torch.zeros((2*B, 2*B), dtype=torch.bool, device=device)
-        for i in range(B):
-            pos_mask[i, B + i] = True
-            pos_mask[B + i, i] = True
-        
         # Mask out self-similarity (diagonal)
         sim = sim - torch.eye(2*B, device=device) * 1e9
         
-        # For each sample, positive is the paired sample from other view
-        # Build target indices
+        # Build target indices: Rubin patch i matches Euclid patch i
         pos_indices = torch.arange(2*B, device=device)
         pos_indices[:B] = pos_indices[:B] + B
         pos_indices[B:] = pos_indices[B:] - B
         
-        # Compute loss: log(exp(pos) / sum(exp(all)))
-        # Equivalent to cross-entropy where we want to maximize similarity with positive
-        exp_sim = torch.exp(sim)
-        
         # Get positive similarities
         pos_sim = sim[torch.arange(2*B, device=device), pos_indices]
         
-        # Negative log likelihood
+        # Negative log likelihood (log(exp(pos) / sum(exp(all))))
         loss = -pos_sim + torch.logsumexp(sim, dim=1)
         
         return loss.mean()
@@ -438,34 +426,21 @@ class JAISPFoundation(nn.Module):
         """
         Create band quality mask based on effective signal content.
         Uses variance weighting to determine if a band has usable information.
-        
-        Args:
-            patches: (B, C, H, W)
-            weights: (B, C, H, W) - inverse variance weights
-        
-        Returns:
-            mask: (B, C) - binary mask (1=good, 0=bad)
         """
         B, C = patches.shape[:2]
-        device = patches.device
-        
         # Compute effective SNR: weighted signal
-        # If weights are all near-zero (high variance everywhere), band is useless
         effective_weight = weights.mean(dim=(2, 3))  # (B, C)
         signal = patches.abs().mean(dim=(2, 3))      # (B, C)
         
-        # A band is "bad" if:
-        # 1. Weights are too low (variance too high everywhere) OR
-        # 2. Signal is essentially zero
-        weight_threshold = 0.01  # Relative to typical weights
+        # A band is "bad" if weights are too low or signal is essentially zero
+        weight_threshold = 0.01 
         signal_threshold = 1e-6
         
         mask = ((effective_weight > weight_threshold) & (signal > signal_threshold)).float()
         
-        # Ensure at least 3 bands are active (or model gets confused)
+        # Ensure at least 3 bands are active
         n_active = mask.sum(dim=1, keepdim=True)
         if (n_active < 3).any():
-            # If too few bands, use top 3 by effective weight
             _, top_indices = effective_weight.topk(min(3, C), dim=1)
             mask = torch.zeros_like(mask)
             mask.scatter_(1, top_indices, 1.0)
