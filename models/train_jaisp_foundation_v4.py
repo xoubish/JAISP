@@ -41,7 +41,6 @@ class JAISPTrainerV4:
             euclid_dir=euclid_dir,
             batch_size=batch_size,
             num_workers=num_workers,
-            patch_size=512,
             augment=True
         )
         
@@ -228,7 +227,7 @@ Weight-Act Corr: {corr:.3f}
             project=self.wandb_project,
             name=self.wandb_name,
             config={
-                "arch": "v4-direct-alignment",
+                "arch": "v4-direct-alignment-native-res",
                 "epochs": epochs,
                 "lr": lr,
                 "embed_dim": self.model.embed_dim,
@@ -238,6 +237,7 @@ Weight-Act Corr: {corr:.3f}
         
         best_loss = float('inf')
         global_step = 0
+        accum_steps = 4  # Gradient accumulation to simulate batch_size=4
         
         for epoch in range(epochs):
             self.model.train()
@@ -245,17 +245,23 @@ Weight-Act Corr: {corr:.3f}
             n_batches = 0
             
             pbar = tqdm(self.dataloader, desc=f"Epoch {epoch+1}/{epochs}")
-            for batch in pbar:
-                optimizer.zero_grad()
+            optimizer.zero_grad()
+            
+            for batch_idx, batch in enumerate(pbar):
                 outputs = self.model(batch)
-                loss = outputs['loss']
+                loss = outputs['loss'] / accum_steps  # Scale loss for accumulation
                 loss.backward()
                 
-                grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
-                optimizer.step()
+                # Step optimizer every accum_steps
+                if (batch_idx + 1) % accum_steps == 0 or (batch_idx + 1) == len(self.dataloader):
+                    grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+                    optimizer.step()
+                    optimizer.zero_grad()
+                else:
+                    grad_norm = torch.tensor(0.0)
                 
-                # Track
-                stats['loss'] += loss.item()
+                # Track (use unscaled loss)
+                stats['loss'] += outputs['loss'].item()
                 stats['align'] += outputs['align_loss'].item()
                 stats['var'] += outputs['var_loss'].item()
                 stats['cov'] += outputs['cov_loss'].item()
@@ -271,13 +277,13 @@ Weight-Act Corr: {corr:.3f}
                 self.band_tracker[b2] += 1
                 
                 pbar.set_postfix({
-                    'loss': f"{loss.item():.3f}",
+                    'loss': f"{outputs['loss'].item():.3f}",
                     'tok_sim': f"{outputs['token_sim']:.3f}",
                     'glob_sim': f"{outputs['global_sim']:.3f}"
                 })
                 
                 wandb.log({
-                    'train/loss': loss.item(),
+                    'train/loss': outputs['loss'].item(),
                     'train/align_loss': outputs['align_loss'].item(),
                     'train/var_loss': outputs['var_loss'].item(),
                     'train/cov_loss': outputs['cov_loss'].item(),
@@ -345,17 +351,17 @@ def main():
         proj_dim=256,
         depth=6,
         patch_size=16,
-        batch_size=4,
+        batch_size=1,  # Reduced due to Euclid 1050x1050 memory requirements
         num_workers=4,
         wandb_project="JAISP-Foundation-v4",
-        wandb_name="v4_direct_align"
+        wandb_name="v4_native_res"
     )
     
     trainer.train(
-        epochs=100,
+        epochs=200,
         lr=3e-4,
-        warmup_epochs=10,
-        save_freq=10,
+        warmup_epochs=20,
+        save_freq=20,
         vis_freq=5
     )
 

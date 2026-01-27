@@ -115,17 +115,41 @@ class TransformerBlock(nn.Module):
 
 
 class SharedEncoder(nn.Module):
-    """Shared transformer encoder"""
+    """Shared transformer encoder with flexible position embeddings"""
     def __init__(self, stem_ch: int = 64, embed_dim: int = 256, depth: int = 6, patch_size: int = 16):
         super().__init__()
         self.patch_embed = PatchEmbed(stem_ch, embed_dim, patch_size)
-        self.pos_embed = nn.Parameter(torch.randn(1, 1024, embed_dim) * 0.02)
+        # Base position embeddings for 32x32 grid (Rubin size)
+        # Will be interpolated for larger grids (Euclid)
+        self.base_grid_size = 32
+        self.pos_embed = nn.Parameter(torch.randn(1, self.base_grid_size ** 2, embed_dim) * 0.02)
         self.blocks = nn.ModuleList([TransformerBlock(embed_dim) for _ in range(depth)])
         self.norm = nn.LayerNorm(embed_dim)
     
+    def _interpolate_pos_embed(self, num_tokens: int, grid_size: Tuple[int, int]) -> torch.Tensor:
+        """Interpolate position embeddings to match current grid size"""
+        if num_tokens == self.base_grid_size ** 2:
+            return self.pos_embed
+        
+        # Reshape to 2D grid
+        pos_embed = self.pos_embed.reshape(1, self.base_grid_size, self.base_grid_size, -1)
+        pos_embed = pos_embed.permute(0, 3, 1, 2)  # (1, D, H, W)
+        
+        # Interpolate to target grid size
+        H, W = grid_size
+        pos_embed = F.interpolate(pos_embed, size=(H, W), mode='bilinear', align_corners=False)
+        
+        # Reshape back
+        pos_embed = pos_embed.permute(0, 2, 3, 1).reshape(1, H * W, -1)
+        return pos_embed
+    
     def forward(self, x):
         tokens, gs = self.patch_embed(x)
-        tokens = tokens + self.pos_embed[:, :tokens.shape[1]]
+        
+        # Get interpolated position embeddings for this grid size
+        pos_embed = self._interpolate_pos_embed(tokens.shape[1], gs)
+        tokens = tokens + pos_embed
+        
         for blk in self.blocks:
             tokens = blk(tokens)
         return self.norm(tokens), gs
