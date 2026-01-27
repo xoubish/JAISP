@@ -1,13 +1,12 @@
 # jaisp_dataset_v3.py
 #
 # Dataset for JAISP Foundation v3 - Per-Band Views
-#
-# Each band is a separate view. Dataset handles:
-# - Extracting individual bands from multi-band files
-# - Smart pairing: cross-instrument, cross-wavelength, same-instrument
-# - Missing band handling
-# - Per-band RMS
+# Updated to match actual JAISP data format:
+#   - Rubin: tile_x*_y*.npz with 'img' (6,H,W), 'var' (6,H,W)
+#   - Euclid: tile_x*_y*_euclid.npz with 'img_VIS', 'img_Y', etc.
 
+import os
+import glob
 import torch
 from torch.utils.data import Dataset, DataLoader
 import numpy as np
@@ -16,9 +15,13 @@ from typing import Dict, List, Tuple, Optional
 import random
 
 
-# Band definitions
+# Band definitions matching your data
 RUBIN_BANDS = ['rubin_u', 'rubin_g', 'rubin_r', 'rubin_i', 'rubin_z', 'rubin_y']
-EUCLID_BANDS = ['euclid_vis', 'euclid_y', 'euclid_j', 'euclid_h']
+RUBIN_BAND_ORDER = ['u', 'g', 'r', 'i', 'z', 'y']  # Order in the (6,H,W) array
+
+EUCLID_BANDS = ['euclid_VIS', 'euclid_Y', 'euclid_J', 'euclid_H']
+EUCLID_BAND_KEYS = ['VIS', 'Y', 'J', 'H']  # Keys in the npz file
+
 ALL_BANDS = RUBIN_BANDS + EUCLID_BANDS
 
 # Wavelength ordering (approximate central wavelength in nm)
@@ -29,16 +32,30 @@ BAND_WAVELENGTHS = {
     'rubin_i': 755,
     'rubin_z': 869,
     'rubin_y': 971,
-    'euclid_vis': 700,  # Broad optical
-    'euclid_y': 1020,
-    'euclid_j': 1250,
-    'euclid_h': 1650,
+    'euclid_VIS': 700,
+    'euclid_Y': 1020,
+    'euclid_J': 1250,
+    'euclid_H': 1650,
 }
+
+
+def _to_float32(x):
+    x = np.asarray(x)
+    return x.astype(np.float32, copy=False) if x.dtype != np.float32 else x
+
+
+def _safe_sqrt_var(var: np.ndarray) -> np.ndarray:
+    """sqrt(max(var,0)) while preserving NaNs."""
+    var = _to_float32(var)
+    out = var.copy()
+    m = np.isfinite(out)
+    out[m] = np.maximum(out[m], 0.0)
+    return np.sqrt(out, dtype=np.float32)
 
 
 class PairingSampler:
     """
-    Intelligent band pair sampling following the roadmap.
+    Intelligent band pair sampling.
     
     Ensures:
     - All bands participate regularly
@@ -63,22 +80,14 @@ class PairingSampler:
         self.band_usage = {b: 0 for b in available_bands}
     
     def sample_pair(self, tile_available_bands: List[str]) -> Tuple[str, str]:
-        """
-        Sample a pair of bands for training.
-        
-        Args:
-            tile_available_bands: which bands are available for this tile
-        
-        Returns:
-            (band1, band2)
-        """
+        """Sample a pair of bands for training."""
         available = [b for b in tile_available_bands if b in self.available_bands]
         
         if len(available) < 2:
-            # Not enough bands, return what we have (will be handled upstream)
-            return available[0], available[0] if len(available) == 1 else (None, None)
+            if len(available) == 1:
+                return available[0], available[0]
+            return None, None
         
-        # Decide pairing strategy
         r = self.rng.rand()
         
         rubin_avail = [b for b in available if b.startswith('rubin')]
@@ -89,7 +98,7 @@ class PairingSampler:
             band1 = self._sample_least_used(rubin_avail)
             band2 = self._sample_least_used(euclid_avail)
         elif r < self.cross_instrument_prob + self.hard_pair_prob:
-            # Hard pair: large wavelength gap within available
+            # Hard pair: large wavelength gap
             band1, band2 = self._sample_wavelength_distant(available)
         else:
             # Random pair
@@ -101,18 +110,14 @@ class PairingSampler:
         return band1, band2
     
     def _sample_least_used(self, bands: List[str]) -> str:
-        """Sample from least-used bands to ensure balance"""
         usage = [self.band_usage[b] for b in bands]
         min_usage = min(usage)
         least_used = [b for b, u in zip(bands, usage) if u == min_usage]
         return self.rng.choice(least_used)
     
     def _sample_wavelength_distant(self, bands: List[str]) -> Tuple[str, str]:
-        """Sample pair with large wavelength difference"""
         wavelengths = [(b, BAND_WAVELENGTHS.get(b, 500)) for b in bands]
         wavelengths.sort(key=lambda x: x[1])
-        
-        # Pick from ends (blue and red)
         n = len(wavelengths)
         if n >= 4:
             blue_half = [b for b, _ in wavelengths[:n//2]]
@@ -126,158 +131,174 @@ class JAISPPerBandDataset(Dataset):
     """
     Dataset that treats each band as a separate view.
     
-    Expected data format:
-        rubin_dir/tile_001.npz:
-            'image': (6, H, W) - 6 bands stacked
-            'rms': (6, H, W) - per-band RMS
+    Data format:
+        rubin_dir/tile_x*_y*.npz:
+            'img': (6, H, W) - 6 bands stacked [u,g,r,i,z,y]
+            'var': (6, H, W) - variance per band
         
-        euclid_dir/tile_001.npz:
-            'image': (4, H, W) - 4 bands stacked
-            'rms': (4, H, W)
+        euclid_dir/tile_x*_y*_euclid.npz:
+            'img_VIS', 'img_Y', 'img_J', 'img_H': (H, W) each
+            'var_VIS', 'var_Y', 'var_J', 'var_H': (H, W) each
     
     Returns single-band pairs for training.
     """
     def __init__(self,
                  rubin_dir: str,
                  euclid_dir: str,
-                 rubin_bands: List[str] = RUBIN_BANDS,
-                 euclid_bands: List[str] = EUCLID_BANDS,
                  patch_size: int = 512,
                  hard_pair_prob: float = 0.3,
                  cross_instrument_prob: float = 0.5,
                  augment: bool = True,
+                 mmap: bool = True,
                  seed: int = 42):
         
         self.rubin_dir = Path(rubin_dir)
         self.euclid_dir = Path(euclid_dir)
-        self.rubin_bands = rubin_bands
-        self.euclid_bands = euclid_bands
-        self.all_bands = rubin_bands + euclid_bands
         self.patch_size = patch_size
         self.augment = augment
+        self.mmap = mmap
         self.rng = np.random.RandomState(seed)
         
-        # Band index mapping
-        self.rubin_band_idx = {b: i for i, b in enumerate(rubin_bands)}
-        self.euclid_band_idx = {b: i for i, b in enumerate(euclid_bands)}
+        # Find tiles (Rubin naming: tile_x*_y*.npz)
+        rubin_files = sorted(glob.glob(os.path.join(rubin_dir, "tile_x*_y*.npz")))
+        self.tile_ids = [os.path.splitext(os.path.basename(p))[0] for p in rubin_files]
         
-        # Find matching tiles
-        rubin_tiles = {f.stem for f in self.rubin_dir.glob("*.npz")} if self.rubin_dir.exists() else set()
-        euclid_tiles = {f.stem for f in self.euclid_dir.glob("*.npz")} if self.euclid_dir.exists() else set()
-        self.tiles = sorted(rubin_tiles & euclid_tiles)
+        # Build pairs list
+        self.pairs = []
+        for tid in self.tile_ids:
+            rubin_path = os.path.join(rubin_dir, f"{tid}.npz")
+            euclid_path = os.path.join(euclid_dir, f"{tid}_euclid.npz")
+            if os.path.exists(rubin_path):
+                self.pairs.append({
+                    'tile_id': tid,
+                    'rubin_path': rubin_path,
+                    'euclid_path': euclid_path,
+                    'has_euclid': os.path.exists(euclid_path)
+                })
+        
+        if len(self.pairs) == 0:
+            raise FileNotFoundError(f"No Rubin tiles found (tile_x*_y*.npz) in {rubin_dir}")
         
         # Pairing sampler
         self.sampler = PairingSampler(
-            self.all_bands,
+            ALL_BANDS,
             hard_pair_prob=hard_pair_prob,
             cross_instrument_prob=cross_instrument_prob,
             seed=seed
         )
         
         print(f"JAISPPerBandDataset:")
-        print(f"  Tiles: {len(self.tiles)}")
-        print(f"  Rubin bands: {rubin_bands}")
-        print(f"  Euclid bands: {euclid_bands}")
-        print(f"  Total bands (views): {len(self.all_bands)}")
+        print(f"  Tiles: {len(self.pairs)}")
+        print(f"  Rubin bands: {RUBIN_BANDS}")
+        print(f"  Euclid bands: {EUCLID_BANDS}")
+        print(f"  Total bands (views): {len(ALL_BANDS)}")
     
-    def _load_band(self, tile_id: str, band: str) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        Load a single band from the appropriate file.
+    def _load_rubin_band(self, rubin_path: str, band: str) -> Tuple[np.ndarray, np.ndarray]:
+        """Load a single Rubin band."""
+        # band is like 'rubin_u', extract 'u'
+        band_letter = band.split('_')[1]
+        band_idx = RUBIN_BAND_ORDER.index(band_letter)
         
-        Returns:
-            image: (H, W) single band
-            rms: (H, W) noise for this band
-        """
-        if band.startswith('rubin'):
-            path = self.rubin_dir / f"{tile_id}.npz"
-            band_idx = self.rubin_band_idx[band]
+        data = np.load(rubin_path, mmap_mode='r' if self.mmap else None, allow_pickle=True)
+        img = _to_float32(data['img'][band_idx])  # (H, W)
+        
+        if 'var' in data:
+            var = _to_float32(data['var'][band_idx])
+            rms = _safe_sqrt_var(var)
         else:
-            path = self.euclid_dir / f"{tile_id}.npz"
-            band_idx = self.euclid_band_idx[band]
+            rms = np.ones_like(img) * np.nanstd(img)
         
-        data = np.load(path)
-        
-        # Handle different key conventions
-        if 'image' in data:
-            image = data['image'][band_idx]
-        elif 'data' in data:
-            image = data['data'][band_idx]
-        else:
-            image = data[list(data.keys())[0]][band_idx]
-        
-        if 'rms' in data:
-            rms = data['rms'][band_idx]
-        elif 'noise' in data:
-            rms = data['noise'][band_idx]
-        elif 'weight' in data:
-            w = data['weight'][band_idx]
-            rms = 1.0 / np.sqrt(np.maximum(w, 1e-10))
-        else:
-            # Estimate from image
-            rms = np.ones_like(image) * np.std(image)
-        
-        return image.astype(np.float32), rms.astype(np.float32)
+        return img, rms
     
-    def _get_available_bands(self, tile_id: str) -> List[str]:
-        """Check which bands have valid data for this tile"""
+    def _load_euclid_band(self, euclid_path: str, band: str) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+        """Load a single Euclid band. Returns None if band missing."""
+        # band is like 'euclid_VIS', extract 'VIS'
+        band_key = band.split('_')[1]
+        
+        if not os.path.exists(euclid_path):
+            return None, None
+        
+        data = np.load(euclid_path, mmap_mode='r' if self.mmap else None, allow_pickle=True)
+        
+        img_key = f'img_{band_key}'
+        var_key = f'var_{band_key}'
+        
+        if img_key not in data:
+            return None, None
+        
+        img = _to_float32(data[img_key])  # (H, W)
+        
+        if var_key in data:
+            var = _to_float32(data[var_key])
+            rms = _safe_sqrt_var(var)
+        else:
+            rms = np.ones_like(img) * np.nanstd(img)
+        
+        return img, rms
+    
+    def _get_available_bands(self, pair_info: dict) -> List[str]:
+        """Check which bands have valid data for this tile."""
         available = []
         
-        # Check Rubin
-        rubin_path = self.rubin_dir / f"{tile_id}.npz"
-        if rubin_path.exists():
-            data = np.load(rubin_path)
-            img = data['image'] if 'image' in data else data[list(data.keys())[0]]
-            for i, band in enumerate(self.rubin_bands):
-                if i < img.shape[0]:
-                    # Check if band has valid data (not all NaN or zero)
-                    band_data = img[i]
-                    if np.isfinite(band_data).sum() > 0.5 * band_data.size:
+        # Check Rubin bands
+        try:
+            data = np.load(pair_info['rubin_path'], mmap_mode='r' if self.mmap else None, allow_pickle=True)
+            rubin_img = data['img']
+            for i, band in enumerate(RUBIN_BANDS):
+                if i < rubin_img.shape[0]:
+                    band_data = rubin_img[i]
+                    # Check if band has valid data
+                    if np.isfinite(band_data).sum() > 0.3 * band_data.size:
                         available.append(band)
+        except Exception as e:
+            pass
         
-        # Check Euclid
-        euclid_path = self.euclid_dir / f"{tile_id}.npz"
-        if euclid_path.exists():
-            data = np.load(euclid_path)
-            img = data['image'] if 'image' in data else data[list(data.keys())[0]]
-            for i, band in enumerate(self.euclid_bands):
-                if i < img.shape[0]:
-                    band_data = img[i]
-                    if np.isfinite(band_data).sum() > 0.5 * band_data.size:
-                        available.append(band)
+        # Check Euclid bands
+        if pair_info['has_euclid']:
+            try:
+                data = np.load(pair_info['euclid_path'], mmap_mode='r' if self.mmap else None, allow_pickle=True)
+                for band, band_key in zip(EUCLID_BANDS, EUCLID_BAND_KEYS):
+                    img_key = f'img_{band_key}'
+                    if img_key in data:
+                        band_data = data[img_key]
+                        if np.isfinite(band_data).sum() > 0.3 * band_data.size:
+                            available.append(band)
+            except Exception as e:
+                pass
         
         return available
     
-    def _center_crop(self, image: np.ndarray, rms: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-        """Center crop to patch_size"""
+    def _center_crop_or_pad(self, image: np.ndarray, rms: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        """Center crop or pad to patch_size."""
         H, W = image.shape
+        target = self.patch_size
         
         # Pad if needed
-        if H < self.patch_size or W < self.patch_size:
-            pad_h = max(0, self.patch_size - H)
-            pad_w = max(0, self.patch_size - W)
+        if H < target or W < target:
+            pad_h = max(0, target - H)
+            pad_w = max(0, target - W)
             image = np.pad(image, ((pad_h//2, pad_h - pad_h//2), (pad_w//2, pad_w - pad_w//2)),
                           mode='reflect')
             rms = np.pad(rms, ((pad_h//2, pad_h - pad_h//2), (pad_w//2, pad_w - pad_w//2)),
                         mode='reflect')
             H, W = image.shape
         
-        start_h = (H - self.patch_size) // 2
-        start_w = (W - self.patch_size) // 2
+        # Center crop
+        start_h = (H - target) // 2
+        start_w = (W - target) // 2
         
-        return (image[start_h:start_h+self.patch_size, start_w:start_w+self.patch_size],
-                rms[start_h:start_h+self.patch_size, start_w:start_w+self.patch_size])
+        return (image[start_h:start_h+target, start_w:start_w+target],
+                rms[start_h:start_h+target, start_w:start_w+target])
     
     def _augment(self, img1: np.ndarray, rms1: np.ndarray, 
                  img2: np.ndarray, rms2: np.ndarray) -> Tuple:
-        """Apply same augmentation to both views"""
-        # Random rotation
+        """Apply same augmentation to both views."""
         k = self.rng.randint(4)
         img1 = np.rot90(img1, k).copy()
         rms1 = np.rot90(rms1, k).copy()
         img2 = np.rot90(img2, k).copy()
         rms2 = np.rot90(rms2, k).copy()
         
-        # Random flip
         if self.rng.rand() > 0.5:
             img1 = np.flip(img1, axis=0).copy()
             rms1 = np.flip(rms1, axis=0).copy()
@@ -292,36 +313,57 @@ class JAISPPerBandDataset(Dataset):
         
         return img1, rms1, img2, rms2
     
+    def _load_band(self, pair_info: dict, band: str) -> Tuple[np.ndarray, np.ndarray]:
+        """Load a band (either Rubin or Euclid)."""
+        if band.startswith('rubin'):
+            return self._load_rubin_band(pair_info['rubin_path'], band)
+        else:
+            img, rms = self._load_euclid_band(pair_info['euclid_path'], band)
+            if img is None:
+                raise ValueError(f"Band {band} not available")
+            return img, rms
+    
     def __len__(self):
-        return len(self.tiles)
+        return len(self.pairs)
     
     def __getitem__(self, idx: int) -> Dict:
-        tile_id = self.tiles[idx]
+        pair_info = self.pairs[idx]
         
         # Get available bands for this tile
-        available = self._get_available_bands(tile_id)
+        available = self._get_available_bands(pair_info)
         
         if len(available) < 2:
-            # Fallback: try to at least get something
-            available = self.all_bands[:2]
+            # Fallback: use first two Rubin bands
+            available = RUBIN_BANDS[:2]
         
         # Sample band pair
         band1, band2 = self.sampler.sample_pair(available)
         
-        # Load bands
-        try:
-            img1, rms1 = self._load_band(tile_id, band1)
-            img2, rms2 = self._load_band(tile_id, band2)
-        except Exception as e:
-            # Fallback to first available
-            print(f"Warning: Failed to load {band1}/{band2} for {tile_id}: {e}")
-            img1, rms1 = self._load_band(tile_id, available[0])
-            img2, rms2 = self._load_band(tile_id, available[1] if len(available) > 1 else available[0])
+        if band1 is None:
             band1, band2 = available[0], available[1] if len(available) > 1 else available[0]
         
-        # Center crop (handle different sizes)
-        img1, rms1 = self._center_crop(img1, rms1)
-        img2, rms2 = self._center_crop(img2, rms2)
+        # Load bands
+        try:
+            img1, rms1 = self._load_band(pair_info, band1)
+            img2, rms2 = self._load_band(pair_info, band2)
+        except Exception as e:
+            # Fallback
+            print(f"Warning: Failed to load {band1}/{band2} for {pair_info['tile_id']}: {e}")
+            img1, rms1 = self._load_rubin_band(pair_info['rubin_path'], RUBIN_BANDS[0])
+            img2, rms2 = self._load_rubin_band(pair_info['rubin_path'], RUBIN_BANDS[1])
+            band1, band2 = RUBIN_BANDS[0], RUBIN_BANDS[1]
+        
+        # Handle NaNs
+        img1 = np.nan_to_num(img1, nan=0.0)
+        img2 = np.nan_to_num(img2, nan=0.0)
+        rms1 = np.nan_to_num(rms1, nan=1.0)
+        rms2 = np.nan_to_num(rms2, nan=1.0)
+        rms1 = np.maximum(rms1, 1e-10)
+        rms2 = np.maximum(rms2, 1e-10)
+        
+        # Center crop/pad
+        img1, rms1 = self._center_crop_or_pad(img1, rms1)
+        img2, rms2 = self._center_crop_or_pad(img2, rms2)
         
         # Augment
         if self.augment:
@@ -334,18 +376,18 @@ class JAISPPerBandDataset(Dataset):
         rms2 = rms2[np.newaxis, ...]
         
         return {
-            'view1_image': torch.from_numpy(img1),
-            'view1_rms': torch.from_numpy(rms1),
+            'view1_image': torch.from_numpy(img1.copy()),
+            'view1_rms': torch.from_numpy(rms1.copy()),
             'view1_band': band1,
-            'view2_image': torch.from_numpy(img2),
-            'view2_rms': torch.from_numpy(rms2),
+            'view2_image': torch.from_numpy(img2.copy()),
+            'view2_rms': torch.from_numpy(rms2.copy()),
             'view2_band': band2,
-            'tile_id': tile_id
+            'tile_id': pair_info['tile_id']
         }
     
     def get_band_names(self) -> List[str]:
-        """Return all band names for model initialization"""
-        return self.all_bands
+        """Return all band names for model initialization."""
+        return ALL_BANDS
 
 
 def make_loader(rubin_dir: str,
@@ -353,7 +395,7 @@ def make_loader(rubin_dir: str,
                 batch_size: int = 4,
                 num_workers: int = 4,
                 **kwargs) -> Tuple[Dataset, DataLoader]:
-    """Create dataset and dataloader"""
+    """Create dataset and dataloader."""
     
     dataset = JAISPPerBandDataset(
         rubin_dir=rubin_dir,
@@ -381,31 +423,30 @@ def make_loader(rubin_dir: str,
 class JAISPMultiViewDataset(JAISPPerBandDataset):
     """
     Extension that can return 3+ views at once for multi-way consistency.
-    
-    Useful for stronger constraints: "all N views of the same patch should
-    map to similar representations"
     """
     def __init__(self, *args, n_views: int = 3, **kwargs):
         super().__init__(*args, **kwargs)
         self.n_views = n_views
     
     def __getitem__(self, idx: int) -> Dict:
-        tile_id = self.tiles[idx]
-        available = self._get_available_bands(tile_id)
+        pair_info = self.pairs[idx]
+        available = self._get_available_bands(pair_info)
         
-        # Sample n_views bands
         n = min(self.n_views, len(available))
         if n < 2:
             n = 2
-            available = self.all_bands[:2]
+            available = RUBIN_BANDS[:2]
         
         bands = list(self.rng.choice(available, n, replace=False))
         
         views = []
         for band in bands:
             try:
-                img, rms = self._load_band(tile_id, band)
-                img, rms = self._center_crop(img, rms)
+                img, rms = self._load_band(pair_info, band)
+                img = np.nan_to_num(img, nan=0.0)
+                rms = np.nan_to_num(rms, nan=1.0)
+                rms = np.maximum(rms, 1e-10)
+                img, rms = self._center_crop_or_pad(img, rms)
                 views.append({'image': img, 'rms': rms, 'band': band})
             except:
                 continue
@@ -426,11 +467,10 @@ class JAISPMultiViewDataset(JAISPPerBandDataset):
                     v['image'] = np.flip(v['image'], axis=1).copy()
                     v['rms'] = np.flip(v['rms'], axis=1).copy()
         
-        # Format output
-        result = {'tile_id': tile_id, 'n_views': len(views)}
+        result = {'tile_id': pair_info['tile_id'], 'n_views': len(views)}
         for i, v in enumerate(views):
-            result[f'view{i+1}_image'] = torch.from_numpy(v['image'][np.newaxis, ...])
-            result[f'view{i+1}_rms'] = torch.from_numpy(v['rms'][np.newaxis, ...])
+            result[f'view{i+1}_image'] = torch.from_numpy(v['image'][np.newaxis, ...].copy())
+            result[f'view{i+1}_rms'] = torch.from_numpy(v['rms'][np.newaxis, ...].copy())
             result[f'view{i+1}_band'] = v['band']
         
         return result
