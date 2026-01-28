@@ -10,6 +10,7 @@ from tqdm import tqdm
 import wandb
 import matplotlib.pyplot as plt
 from collections import defaultdict
+import gc
 
 from jaisp_foundation_v4 import JAISPFoundationV4, create_optimizer, create_scheduler
 from jaisp_dataset_v4 import make_loader, BAND_WAVELENGTHS, ALL_BANDS
@@ -64,154 +65,184 @@ class JAISPTrainerV4:
         self.band_tracker = defaultdict(int)
         self.wandb_project = wandb_project
         self.wandb_name = wandb_name
-    
+
     def visualize(self, batch, outputs, epoch, step):
-        """Visualization"""
-        fig = plt.figure(figsize=(20, 12))
+        """
+        Memory-efficient visualization with robust shape handling.
+        """
+        with torch.no_grad():
+            def prepare_2d(data):
+                # Handle list (variable res) vs Tensor
+                x = data[0] if isinstance(data, list) else data
+                # CPU + Float + Squeeze unit dims
+                x = x.detach().cpu().float().numpy().squeeze()
+                # If still 3D (e.g. C, H, W), take first channel
+                if x.ndim == 3:
+                    x = x[0]
+                return x
+
+            img1 = prepare_2d(batch['view1_image'])
+            img2 = prepare_2d(batch['view2_image'])
+            
+            w1 = prepare_2d(outputs['weights1'])
+            w2 = prepare_2d(outputs['weights2'])
+            
+            z1 = outputs['z1'][0].detach().cpu().float().numpy()
+            z2 = outputs['z2'][0].detach().cpu().float().numpy()
+            
+            loss_dict = {
+                'total': outputs['loss'].item(),
+                'align': outputs['align_loss'].item(),
+                'var': outputs['var_loss'].item(),
+                'cov': outputs['cov_loss'].item(),
+                'tok_sim': outputs.get('token_sim', 0),
+                'glob_sim': outputs.get('global_sim', 0)
+            }
+
+        band1, band2 = outputs.get('band1', 'V1'), outputs.get('band2', 'V2')
         
-        img1 = batch['view1_image'][0, 0].cpu().numpy()
-        img2 = batch['view2_image'][0, 0].cpu().numpy()
-        band1, band2 = outputs['band1'], outputs['band2']
-        w1 = outputs['weights1'][0, 0].cpu().numpy()
-        w2 = outputs['weights2'][0, 0].cpu().numpy()
-        z1 = outputs['z1'][0].cpu().numpy()
-        z2 = outputs['z2'][0].cpu().numpy()
-        gs = outputs['grid_size']
+        # --- Robust grid-size inference ---
+        def _infer_gs_from_weights_or_tokens(w, z):
+            # 1) If weights are already 2D, use that
+            if isinstance(w, np.ndarray) and w.ndim == 2:
+                return (w.shape[0], w.shape[1])
+        
+            # 2) If z is [N, D], infer square-ish grid
+            if isinstance(z, np.ndarray) and z.ndim == 2:
+                N = z.shape[0]
+                s = int(np.sqrt(N))
+                if s * s == N:
+                    return (s, s)
+                # fallback: try best rectangle close to square
+                # (keeps visualization from crashing even if non-square)
+                h = s
+                w_ = max(1, N // max(1, h))
+                return (h, w_)
+        
+            # last resort
+            return (1, 1)
+        
+        gs1 = outputs.get('grid_size1') or outputs.get('grid_hw1')
+        gs2 = outputs.get('grid_size2') or outputs.get('grid_hw2')
+        
+        if gs1 is None:
+            gs1 = _infer_gs_from_weights_or_tokens(w1, z1)
+        if gs2 is None:
+            gs2 = _infer_gs_from_weights_or_tokens(w2, z2)
+        
+        # ensure tuples of ints (for reshape / interpolate)
+        gs1 = (int(gs1[0]), int(gs1[1]))
+        gs2 = (int(gs2[0]), int(gs2[1]))
+
+
+        fig = plt.figure(figsize=(24, 16))
         
         def norm(x):
             p1, p99 = np.nanpercentile(x, [1, 99])
             return np.clip((x - p1) / (p99 - p1 + 1e-10), 0, 1)
-        
-        # Row 1: Images and weights
-        ax = plt.subplot(3, 4, 1)
+
+        # Row 1: Images and Weights
+        ax = plt.subplot(4, 4, 1)
         ax.imshow(norm(img1), origin='lower', cmap='gray')
-        ax.set_title(f'{band1}', fontsize=11, weight='bold')
+        ax.set_title(f'V1: {band1}\n{img1.shape}', fontsize=10, weight='bold')
         ax.axis('off')
-        
-        ax = plt.subplot(3, 4, 2)
+
+        ax = plt.subplot(4, 4, 2)
         ax.imshow(w1, origin='lower', cmap='hot')
-        ax.set_title('Weights (V1)', fontsize=11)
+        ax.set_title(f'Weights V1\nGrid: {gs1}', fontsize=10)
         ax.axis('off')
-        
-        ax = plt.subplot(3, 4, 3)
+
+        ax = plt.subplot(4, 4, 3)
         ax.imshow(norm(img2), origin='lower', cmap='gray')
-        ax.set_title(f'{band2}', fontsize=11, weight='bold')
+        ax.set_title(f'V2: {band2}\n{img2.shape}', fontsize=10, weight='bold')
         ax.axis('off')
-        
-        ax = plt.subplot(3, 4, 4)
+
+        ax = plt.subplot(4, 4, 4)
         ax.imshow(w2, origin='lower', cmap='hot')
-        ax.set_title('Weights (V2)', fontsize=11)
+        ax.set_title(f'Weights V2\nGrid: {gs2}', fontsize=10)
         ax.axis('off')
-        
-        # Row 2: Embedding analysis
-        ax = plt.subplot(3, 4, 5)
+
+        # Row 2: Latents
         z1_norm = z1 / (np.linalg.norm(z1, axis=-1, keepdims=True) + 1e-10)
         z2_norm = z2 / (np.linalg.norm(z2, axis=-1, keepdims=True) + 1e-10)
-        sim = (z1_norm * z2_norm).sum(axis=-1).reshape(gs)
-        im = ax.imshow(sim, origin='lower', cmap='RdBu_r', vmin=-1, vmax=1)
+
+        ax = plt.subplot(4, 4, 5)
+        act1 = np.linalg.norm(z1, axis=-1).reshape(gs1)
+        im = ax.imshow(act1, origin='lower', cmap='viridis')
         plt.colorbar(im, ax=ax, fraction=0.046)
-        ax.set_title(f'Token Sim (μ={sim.mean():.3f})', fontsize=11)
-        
-        ax = plt.subplot(3, 4, 6)
-        ax.hist(sim.flatten(), bins=50, alpha=0.7, edgecolor='black')
-        ax.axvline(sim.mean(), color='r', linestyle='--')
-        ax.set_xlabel('Similarity')
-        ax.set_title('Token Sim Distribution', fontsize=11)
-        ax.grid(alpha=0.3)
-        
-        ax = plt.subplot(3, 4, 7)
-        var1 = z1.var(axis=0)
-        var2 = z2.var(axis=0)
-        ax.plot(np.sort(var1)[::-1], alpha=0.7, label='V1')
-        ax.plot(np.sort(var2)[::-1], alpha=0.7, label='V2')
-        ax.axhline(1.0, color='r', linestyle='--', alpha=0.5)
+        ax.set_title('Activation Norm (V1)')
+
+        ax = plt.subplot(4, 4, 6)
+        act2 = np.linalg.norm(z2, axis=-1).reshape(gs2)
+        im = ax.imshow(act2, origin='lower', cmap='viridis')
+        plt.colorbar(im, ax=ax, fraction=0.046)
+        ax.set_title('Activation Norm (V2)')
+
+        ax = plt.subplot(4, 4, 7)
+        target_gs = (max(gs1[0], gs2[0]), max(gs1[1], gs2[1]))
+        z1_t = torch.from_numpy(z1_norm).reshape(1, gs1[0], gs1[1], -1).permute(0, 3, 1, 2)
+        z2_t = torch.from_numpy(z2_norm).reshape(1, gs2[0], gs2[1], -1).permute(0, 3, 1, 2)
+        z1_interp = F.interpolate(z1_t, size=target_gs, mode='bilinear', align_corners=False)
+        z2_interp = F.interpolate(z2_t, size=target_gs, mode='bilinear', align_corners=False)
+        sim_map = (z1_interp * z2_interp).sum(dim=1).squeeze(0).numpy()
+        im = ax.imshow(sim_map, origin='lower', cmap='RdBu_r', vmin=-1, vmax=1)
+        plt.colorbar(im, ax=ax, fraction=0.046)
+        ax.set_title(f'Spatial Sim Map\nAvg: {sim_map.mean():.3f}')
+
+        ax = plt.subplot(4, 4, 8)
+        ax.hist(sim_map.flatten(), bins=50, alpha=0.7, color='purple')
+        ax.set_title('Similarity Distribution')
+
+        # Row 3: Stats
+        ax = plt.subplot(4, 4, 9)
+        ax.plot(np.sort(z1.var(axis=0))[::-1], label='V1')
+        ax.plot(np.sort(z2.var(axis=0))[::-1], label='V2')
         ax.set_yscale('log')
-        ax.set_xlabel('Dimension')
-        ax.set_ylabel('Variance')
+        ax.set_title('Per-Dim Variance')
         ax.legend()
-        ax.set_title('Per-dim Variance', fontsize=11)
-        ax.grid(alpha=0.3)
-        
-        # Weight-activation correlation
-        ax = plt.subplot(3, 4, 8)
-        w1_down = F.interpolate(
-            torch.from_numpy(w1).unsqueeze(0).unsqueeze(0),
-            size=gs, mode='bilinear'
-        ).numpy().flatten()
-        act1 = np.linalg.norm(z1, axis=-1)
-        ax.scatter(w1_down, act1, alpha=0.5, s=10)
-        corr = np.corrcoef(w1_down, act1)[0, 1]
-        ax.set_xlabel('Info Weight')
-        ax.set_ylabel('Embedding Norm')
-        ax.set_title(f'Weight-Act Corr: {corr:.3f}', fontsize=11)
-        ax.grid(alpha=0.3)
-        
-        # Row 3: More diagnostics
-        # Band usage
-        ax = plt.subplot(3, 4, 9)
-        bands = list(self.band_tracker.keys())
-        counts = [self.band_tracker[b] for b in bands]
-        colors = ['#E74C3C' if 'rubin' in b else '#3498DB' for b in bands]
-        ax.barh(range(len(bands)), counts, color=colors, alpha=0.7)
-        ax.set_yticks(range(len(bands)))
-        ax.set_yticklabels([b.split('_')[1] for b in bands], fontsize=8)
-        ax.set_xlabel('Count')
-        ax.set_title('Band Usage', fontsize=11)
-        
-        # Embedding covariance
-        ax = plt.subplot(3, 4, 10)
-        z_flat = z1 - z1.mean(axis=0)
-        cov = (z_flat.T @ z_flat) / (z_flat.shape[0] - 1)
-        n_show = min(32, cov.shape[0])
-        im = ax.imshow(cov[:n_show, :n_show], cmap='RdBu_r', aspect='auto')
-        plt.colorbar(im, ax=ax, fraction=0.046)
-        ax.set_title('Embedding Covariance', fontsize=11)
-        
-        # Summary
-        ax = plt.subplot(3, 4, 11)
-        ax.axis('off')
-        wl1 = BAND_WAVELENGTHS.get(band1, 0)
-        wl2 = BAND_WAVELENGTHS.get(band2, 0)
-        summary = f"""Epoch {epoch}
-{'='*25}
 
-Bands: {band1} ↔ {band2}
-λ gap: {abs(wl1-wl2)} nm
+        def plot_corr(w, act, gs, subplot_idx, title):
+            ax_c = plt.subplot(4, 4, subplot_idx)
+            w_down = F.interpolate(torch.from_numpy(w).view(1,1,*w.shape), size=gs, mode='bilinear').numpy().flatten()
+            ax_c.scatter(w_down, act.flatten(), alpha=0.3, s=5)
+            corr = np.corrcoef(w_down, act.flatten())[0, 1]
+            ax_c.set_title(f'{title} Corr: {corr:.3f}')
+            return corr
 
-Loss: {outputs['loss'].item():.4f}
-  Align: {outputs['align_loss'].item():.4f}
-  Var:   {outputs['var_loss'].item():.4f}
-  Cov:   {outputs['cov_loss'].item():.4f}
+        corr1 = plot_corr(w1, act1, gs1, 10, 'V1')
+        corr2 = plot_corr(w2, act2, gs2, 11, 'V2')
 
-Similarities:
-  Token: {outputs['token_sim']:.3f}
-  Global: {outputs['global_sim']:.3f}
-  Global (weighted): {outputs['global_sim_weighted']:.3f}
+        ax = plt.subplot(4, 4, 12)
+        z_cent = z1 - z1.mean(axis=0)
+        cov = (z_cent.T @ z_cent) / (z_cent.shape[0] - 1)
+        ax.imshow(cov[:64, :64], cmap='RdBu_r', vmin=-0.5, vmax=0.5)
+        ax.set_title('Covariance (First 64 dims)')
 
-Weight-Act Corr: {corr:.3f}
-"""
-        ax.text(0.05, 0.95, summary, fontsize=9, family='monospace',
-               va='top', transform=ax.transAxes)
-        
-        # UMAP if available
-        ax = plt.subplot(3, 4, 12)
+        # Row 4: UMAP & Summary
+        ax_umap = plt.subplot(4, 4, 14)
         try:
             from umap import UMAP
-            combined = np.vstack([z1_norm[:100], z2_norm[:100]])
-            reducer = UMAP(n_neighbors=15, min_dist=0.1, random_state=42)
-            emb = reducer.fit_transform(combined)
-            n = z1_norm[:100].shape[0]
-            ax.scatter(emb[:n, 0], emb[:n, 1], c='#E74C3C', alpha=0.5, s=10, label='V1')
-            ax.scatter(emb[n:, 0], emb[n:, 1], c='#3498DB', alpha=0.5, s=10, label='V2')
-            ax.legend()
-            ax.set_title('Token UMAP', fontsize=11)
-        except:
-            ax.text(0.5, 0.5, 'UMAP unavailable', ha='center', va='center')
-        
+            n_samples = 400
+            idx1 = np.random.choice(len(z1_norm), min(len(z1_norm), n_samples), replace=False)
+            idx2 = np.random.choice(len(z2_norm), min(len(z2_norm), n_samples), replace=False)
+            combined = np.vstack([z1_norm[idx1], z2_norm[idx2]])
+            emb = UMAP(n_neighbors=15, min_dist=0.1, n_epochs=200).fit_transform(combined)
+            ax_umap.scatter(emb[:len(idx1), 0], emb[:len(idx1), 1], c='red', s=10, alpha=0.5, label='V1')
+            ax_umap.scatter(emb[len(idx1):, 0], emb[len(idx1):, 1], c='blue', s=10, alpha=0.5, label='V2')
+            ax_umap.legend()
+        except Exception as e:
+            ax_umap.text(0.5, 0.5, f"UMAP Fail", ha='center')
+
+        ax_txt = plt.subplot(4, 4, 15)
+        ax_txt.axis('off')
+        summary = f"EPOCH: {epoch}\nLoss: {loss_dict['total']:.4f}\nAlign: {loss_dict['align']:.4f}\nVar: {loss_dict['var']:.4f}\nCov: {loss_dict['cov']:.4f}\n\nTok Sim: {loss_dict['tok_sim']:.3f}"
+        ax_txt.text(0, 1, summary, family='monospace', verticalalignment='top')
+
         plt.tight_layout()
-        wandb.log({"vis/overview": wandb.Image(fig)}, step=step)
-        plt.close(fig)
-    
+        wandb.log({"vis/overview": wandb.Image(plt.gcf())}, step=step)
+        plt.close('all')
+        gc.collect()
+
     def train(self,
               epochs: int = 100,
               lr: float = 3e-4,
@@ -219,10 +250,10 @@ Weight-Act Corr: {corr:.3f}
               warmup_epochs: int = 10,
               save_freq: int = 10,
               vis_freq: int = 5):
-        
+    
         optimizer = create_optimizer(self.model, lr, weight_decay)
         scheduler = create_scheduler(optimizer, warmup_epochs, epochs)
-        
+    
         wandb.init(
             project=self.wandb_project,
             name=self.wandb_name,
@@ -234,137 +265,131 @@ Weight-Act Corr: {corr:.3f}
                 "n_tiles": len(self.dataset)
             }
         )
-        
+    
+        def _to_float(x, default: float = 0.0) -> float:
+            if x is None:
+                return default
+            if torch.is_tensor(x):
+                return float(x.detach().item())
+            try:
+                return float(x)
+            except Exception:
+                return default
+    
         best_loss = float('inf')
         global_step = 0
-        accum_steps = 4  # Gradient accumulation to simulate batch_size=4
-        
+        accum_steps = 4
+    
         for epoch in range(epochs):
             self.model.train()
             stats = defaultdict(float)
             n_batches = 0
-            
+    
             pbar = tqdm(self.dataloader, desc=f"Epoch {epoch+1}/{epochs}")
-            optimizer.zero_grad()
-            
+            optimizer.zero_grad(set_to_none=True)
+    
             for batch_idx, batch in enumerate(pbar):
+                # Move batch to device
+                if isinstance(batch, dict):
+                    for k in batch:
+                        if isinstance(batch[k], torch.Tensor):
+                            batch[k] = batch[k].to(self.device)
+                        elif isinstance(batch[k], list):
+                            batch[k] = [x.to(self.device) if torch.is_tensor(x) else x for x in batch[k]]
+    
                 outputs = self.model(batch)
-                loss = outputs['loss'] / accum_steps  # Scale loss for accumulation
+    
+                # Robust scalar extraction
+                loss_v  = _to_float(outputs.get('loss', 0.0))
+                align_v = _to_float(outputs.get('align_loss', 0.0))
+                var_v   = _to_float(outputs.get('var_loss', 0.0))
+                cov_v   = _to_float(outputs.get('cov_loss', 0.0))
+                tok_sim = _to_float(outputs.get('token_sim', 0.0))
+                glob_sim = _to_float(outputs.get('global_sim', 0.0))
+                glob_sim_w = _to_float(outputs.get('global_sim_weighted', 0.0))
+    
+                # Backprop with accumulation
+                loss = outputs['loss'] / accum_steps
                 loss.backward()
-                
-                # Step optimizer every accum_steps
-                if (batch_idx + 1) % accum_steps == 0 or (batch_idx + 1) == len(self.dataloader):
-                    grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+    
+                do_step = ((batch_idx + 1) % accum_steps == 0) or ((batch_idx + 1) == len(self.dataloader))
+                if do_step:
+                    _ = torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
                     optimizer.step()
-                    optimizer.zero_grad()
-                else:
-                    grad_norm = torch.tensor(0.0)
-                
-                # Track (use unscaled loss)
-                stats['loss'] += outputs['loss'].item()
-                stats['align'] += outputs['align_loss'].item()
-                stats['var'] += outputs['var_loss'].item()
-                stats['cov'] += outputs['cov_loss'].item()
-                stats['tok_sim'] += outputs['token_sim']
-                stats['glob_sim'] += outputs['global_sim']
-                stats['glob_sim_w'] += outputs['global_sim_weighted']
+                    optimizer.zero_grad(set_to_none=True)
+    
+                # Stats
+                stats['loss'] += loss_v
+                stats['align'] += align_v
+                stats['var'] += var_v
+                stats['cov'] += cov_v
+                stats['tok_sim'] += tok_sim
+                stats['glob_sim'] += glob_sim
+                stats['glob_sim_w'] += glob_sim_w
                 n_batches += 1
-                
-                # Band tracking
-                b1 = outputs['band1']
-                b2 = outputs['band2']
-                self.band_tracker[b1] += 1
-                self.band_tracker[b2] += 1
-                
-                pbar.set_postfix({
-                    'loss': f"{outputs['loss'].item():.3f}",
-                    'tok_sim': f"{outputs['token_sim']:.3f}",
-                    'glob_sim': f"{outputs['global_sim']:.3f}"
-                })
-                
+    
+                # Band usage tracking (guarded)
+                if 'band1' in outputs:
+                    self.band_tracker[outputs['band1']] += 1
+                if 'band2' in outputs:
+                    self.band_tracker[outputs['band2']] += 1
+    
+                # Logging
                 wandb.log({
-                    'train/loss': outputs['loss'].item(),
-                    'train/align_loss': outputs['align_loss'].item(),
-                    'train/var_loss': outputs['var_loss'].item(),
-                    'train/cov_loss': outputs['cov_loss'].item(),
-                    'train/token_sim': outputs['token_sim'],
-                    'train/global_sim': outputs['global_sim'],
-                    'train/global_sim_weighted': outputs['global_sim_weighted'],
-                    'train/grad_norm': grad_norm.item(),
-                    'train/lr': optimizer.param_groups[0]['lr']
+                    'train/loss': loss_v,
+                    'train/align_loss': align_v,
+                    'train/var_loss': var_v,
+                    'train/cov_loss': cov_v,
+                    'train/token_sim': tok_sim,
+                    'train/global_sim': glob_sim,
+                    'train/lr': optimizer.param_groups[0]['lr'],
                 }, step=global_step)
-                
+    
                 global_step += 1
-            
+    
             # Visualization
-            if epoch % vis_freq == 0:
-                try:
-                    self.model.eval()
-                    with torch.no_grad():
-                        vis_batch = next(iter(self.dataloader))
-                        vis_out = self.model(vis_batch)
-                    self.visualize(vis_batch, vis_out, epoch, global_step)
-                    self.model.train()
-                except Exception as e:
-                    print(f"Vis failed: {e}")
-            
-            # Epoch summary
+            if (vis_freq and (epoch % vis_freq == 0)) or (epoch == epochs - 1):
+                print(f"\n>>> Running visualization for Epoch {epoch}...")
+                self.model.eval()
+                vis_batch = next(iter(self.dataloader))
+    
+                # Move vis_batch to device
+                for k in vis_batch:
+                    if isinstance(vis_batch[k], torch.Tensor):
+                        vis_batch[k] = vis_batch[k].to(self.device)
+                    elif isinstance(vis_batch[k], list):
+                        vis_batch[k] = [x.to(self.device) if torch.is_tensor(x) else x for x in vis_batch[k]]
+    
+                with torch.no_grad():
+                    vis_out = self.model(vis_batch)
+                self.visualize(vis_batch, vis_out, epoch, global_step)
+                self.model.train()
+    
+            # Epoch scheduler + checkpoint
             for k in stats:
                 stats[k] /= max(n_batches, 1)
-            
-            print(f"\nEpoch {epoch+1}: loss={stats['loss']:.4f}, "
-                  f"tok_sim={stats['tok_sim']:.3f}, glob_sim={stats['glob_sim']:.3f}")
-            
-            wandb.log({
-                'epoch/loss': stats['loss'],
-                'epoch/token_sim': stats['tok_sim'],
-                'epoch/global_sim': stats['glob_sim'],
-                **{f'band_usage/{b}': c / sum(self.band_tracker.values()) 
-                   for b, c in self.band_tracker.items()}
-            }, step=global_step)
-            
+    
             scheduler.step()
-            
-            # Save
+    
             if (epoch + 1) % save_freq == 0 or stats['loss'] < best_loss:
-                ckpt = {
-                    'epoch': epoch,
-                    'model': self.model.state_dict(),
-                    'optimizer': optimizer.state_dict(),
-                    'loss': stats['loss']
-                }
-                torch.save(ckpt, self.output_dir / f"ckpt_{epoch+1:03d}.pt")
+                ckpt = {'model': self.model.state_dict(), 'loss': stats['loss']}
+                out_path = (self.output_dir / "best.pt") if stats['loss'] < best_loss else (self.output_dir / f"ckpt_{epoch+1:03d}.pt")
+                torch.save(ckpt, out_path)
                 if stats['loss'] < best_loss:
                     best_loss = stats['loss']
-                    torch.save(ckpt, self.output_dir / "best.pt")
-                    print(f"✨ New best: {best_loss:.4f}")
-        
+    
         wandb.finish()
-
 
 def main():
     trainer = JAISPTrainerV4(
         rubin_dir="../data/rubin_tiles_ecdfs",
         euclid_dir="../data/euclid_tiles_ecdfs",
         output_dir="./checkpoints/jaisp_v4",
-        embed_dim=256,
-        proj_dim=256,
-        depth=6,
-        patch_size=16,
-        batch_size=1,  # Reduced due to Euclid 1050x1050 memory requirements
-        num_workers=4,
+        batch_size=1, # Euclid 1050x1050
         wandb_project="JAISP-Foundation-v4",
         wandb_name="v4_native_res"
     )
-    
-    trainer.train(
-        epochs=200,
-        lr=3e-4,
-        warmup_epochs=20,
-        save_freq=20,
-        vis_freq=5
-    )
-
+    trainer.train(epochs=100, vis_freq=5)
 
 if __name__ == "__main__":
     main()
