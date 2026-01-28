@@ -14,6 +14,7 @@ import gc
 
 from jaisp_foundation_v4 import JAISPFoundationV4, create_optimizer, create_scheduler
 from jaisp_dataset_v4 import make_loader, BAND_WAVELENGTHS, ALL_BANDS
+import warnings
 
 
 class JAISPTrainerV4:
@@ -56,8 +57,10 @@ class JAISPTrainerV4:
             proj_dim=proj_dim,
             depth=depth,
             patch_size=patch_size,
-            temperature=0.1
+            shift_px=2,
+            shift_temp=0.07,
         ).to(self.device)
+
         
         n_params = sum(p.numel() for p in self.model.parameters())
         print(f"Parameters: {n_params:,} ({n_params/1e6:.2f}M)")
@@ -250,7 +253,7 @@ class JAISPTrainerV4:
               warmup_epochs: int = 10,
               save_freq: int = 10,
               vis_freq: int = 5):
-    
+
         optimizer = create_optimizer(self.model, lr, weight_decay)
         scheduler = create_scheduler(optimizer, warmup_epochs, epochs)
     
@@ -261,6 +264,9 @@ class JAISPTrainerV4:
                 "arch": "v4-direct-alignment-native-res",
                 "epochs": epochs,
                 "lr": lr,
+                "ema_m": 0.996,
+                "shift_px": getattr(self.model.align_loss, "shift_px", None),
+                "shift_temp": getattr(self.model.align_loss, "shift_temp", None),
                 "embed_dim": self.model.embed_dim,
                 "n_tiles": len(self.dataset)
             }
@@ -282,6 +288,11 @@ class JAISPTrainerV4:
     
         for epoch in range(epochs):
             self.model.train()
+            # keep teacher in eval so BN stats don't drift
+            self.model.teacher_stems.eval()
+            self.model.teacher_encoder.eval()
+            self.model.teacher_projector.eval()
+
             stats = defaultdict(float)
             n_batches = 0
     
@@ -317,6 +328,9 @@ class JAISPTrainerV4:
                     _ = torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
                     optimizer.step()
                     optimizer.zero_grad(set_to_none=True)
+
+                    # EMA teacher update (REQUIRED)
+                    self.model.update_teacher(m=0.996)
     
                 # Stats
                 stats['loss'] += loss_v
@@ -364,6 +378,11 @@ class JAISPTrainerV4:
                     vis_out = self.model(vis_batch)
                 self.visualize(vis_batch, vis_out, epoch, global_step)
                 self.model.train()
+                # keep teacher in eval so BN stats don't drift
+                self.model.teacher_stems.eval()
+                self.model.teacher_encoder.eval()
+                self.model.teacher_projector.eval()
+
     
             # Epoch scheduler + checkpoint
             for k in stats:
@@ -381,14 +400,22 @@ class JAISPTrainerV4:
         wandb.finish()
 
 def main():
+    import warnings
+    warnings.filterwarnings(
+        "ignore",
+        category=FutureWarning,
+        message=".*force_all_finite.*"
+    )
+
     trainer = JAISPTrainerV4(
         rubin_dir="../data/rubin_tiles_ecdfs",
         euclid_dir="../data/euclid_tiles_ecdfs",
         output_dir="./checkpoints/jaisp_v4",
-        batch_size=1, # Euclid 1050x1050
+        batch_size=1,
         wandb_project="JAISP-Foundation-v4",
         wandb_name="v4_native_res"
     )
+
     trainer.train(epochs=100, vis_freq=5)
 
 if __name__ == "__main__":
