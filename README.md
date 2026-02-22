@@ -55,15 +55,10 @@ Dataset behavior (current):
 
 ## Diagnostics and Validation
 
-Initial model checks are documented in:
-- `models/testing_model.ipynb`
-
-Notebook diagnostics include:
-- masked prediction similarity checks
-- token-level cross-view correspondence maps
-- source-aware position-encoding tests
-
-These are used to verify that embeddings are cross-view consistent and spatially meaningful.
+Model diagnostics and exploratory evaluations are kept in the `models/` folder
+(notably notebooks and training/evaluation scripts).  
+The exact experiments may evolve over time, while the high-level goal remains:
+verify cross-view consistency and spatial reliability of the learned embeddings.
 
 ---
 
@@ -72,12 +67,8 @@ These are used to verify that embeddings are cross-view consistent and spatially
 On top of the v5 foundation model, a downstream reconstruction pipeline is now included in:
 - `models/reconstruction/`
 
-It adds:
-- multi-band `k->1` masked reconstruction (including `9->1` scenarios)
-- mixed masking strategies (random/object-aware/hard)
-- a reconstruction head with training + W&B monitoring
-
-This is a downstream head, separate from foundation pretraining.
+This is a downstream head stack (separate from foundation pretraining) for
+masked-region reconstruction and related experiments.
 
 ---
 
