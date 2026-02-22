@@ -193,35 +193,58 @@ def _norm_for_display(img_2d: np.ndarray) -> np.ndarray:
     return x
 
 
+def _mask_bbox(mask_2d: np.ndarray, margin: int = 12) -> Tuple[int, int, int, int]:
+    h, w = mask_2d.shape
+    ys, xs = np.where(mask_2d > 0.5)
+    if ys.size == 0:
+        return 0, h, 0, w
+    y0 = max(0, int(ys.min()) - margin)
+    y1 = min(h, int(ys.max()) + 1 + margin)
+    x0 = max(0, int(xs.min()) - margin)
+    x1 = min(w, int(xs.max()) + 1 + margin)
+    return y0, y1, x0, x1
+
+
 def _make_preview_image(preview: Dict, epoch: int):
     import matplotlib.pyplot as plt
 
-    target = _norm_for_display(preview["target"])
-    masked = _norm_for_display(preview["masked"])
-    pred = _norm_for_display(preview["pred"])
-    err = _norm_for_display(np.abs(preview["pred"] - preview["target"]))
+    target_raw = np.asarray(preview["target"], dtype=np.float32)
+    masked_raw = np.asarray(preview["masked"], dtype=np.float32)
+    pred_raw = np.asarray(preview["pred"], dtype=np.float32)
     mask = np.asarray(preview["mask"], dtype=np.float32)
 
-    fig, axes = plt.subplots(1, 5, figsize=(16, 3.2))
-    axes[0].imshow(target, cmap="gray")
-    axes[0].set_title("Target")
-    axes[1].imshow(masked, cmap="gray")
-    axes[1].set_title("Masked Input")
-    axes[2].imshow(pred, cmap="gray")
-    axes[2].set_title("Prediction")
-    axes[3].imshow(mask, cmap="gray", vmin=0, vmax=1)
-    axes[3].set_title("Mask")
-    axes[4].imshow(err, cmap="magma")
-    axes[4].set_title("|Pred-Target|")
+    # True inpainting visualization: keep observed pixels and replace only masked area.
+    inpainted_raw = target_raw * (1.0 - mask) + pred_raw * mask
+    err_raw = np.abs(inpainted_raw - target_raw) * mask
 
-    for ax in axes:
-        ax.axis("off")
+    y0, y1, x0, x1 = _mask_bbox(mask, margin=12)
+
+    panels = [
+        ("Target", target_raw, "gray"),
+        ("Masked Input", masked_raw, "gray"),
+        ("Raw Prediction", pred_raw, "gray"),
+        ("Inpainted", inpainted_raw, "gray"),
+        ("|Error| in Mask", err_raw, "magma"),
+    ]
+
+    fig, axes = plt.subplots(2, 5, figsize=(18, 7))
+    for c, (title, arr, cmap) in enumerate(panels):
+        arr_full = _norm_for_display(arr)
+        arr_zoom = _norm_for_display(arr[y0:y1, x0:x1])
+
+        axes[0, c].imshow(arr_full, cmap=cmap)
+        axes[0, c].set_title(title, fontsize=10)
+        axes[0, c].axis("off")
+
+        axes[1, c].imshow(arr_zoom, cmap=cmap)
+        axes[1, c].set_title(f"{title} (masked zoom)", fontsize=10)
+        axes[1, c].axis("off")
 
     title = (
         f"Epoch {epoch} | target={preview['target_band']} | "
         f"context={','.join(preview['context_bands'])} | mask={preview['mask_type']}"
     )
-    fig.suptitle(title, fontsize=10)
+    fig.suptitle(title, fontsize=11)
     fig.tight_layout()
     img = wandb.Image(fig)
     plt.close(fig)
@@ -572,7 +595,7 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--mask-hard", type=float, default=0.10)
     parser.add_argument("--mask-value", type=float, default=0.0)
 
-    parser.add_argument("--unmasked-weight", type=float, default=0.10)
+    parser.add_argument("--unmasked-weight", type=float, default=0.0)
     parser.add_argument("--predict-noise-units", dest="predict_noise_units", action="store_true")
     parser.add_argument("--predict-raw-target", dest="predict_noise_units", action="store_false")
     parser.set_defaults(predict_noise_units=True)

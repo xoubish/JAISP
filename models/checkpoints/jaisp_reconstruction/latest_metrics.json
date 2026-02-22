@@ -1,13 +1,13 @@
 {
-  "loss_total": 120.18301792385884,
-  "loss_masked": 119.02923731276921,
-  "loss_unmasked": 11.537834555945462,
-  "psnr_masked": -19.249237474054098,
+  "loss_total": 2.828411679611438,
+  "loss_masked": 2.7325901463627815,
+  "loss_unmasked": 0.9582154857408669,
+  "psnr_masked": 13.738838384548822,
   "mask_frac": 0.03364801327309882,
   "context_count_mean": 5.222222222222222,
   "samples": 144,
   "lr_head": 1e-06,
-  "epoch_time_sec": 45.57588863372803,
+  "epoch_time_sec": 45.402116537094116,
   "mask_counts": {
     "random": 73,
     "object": 59,
