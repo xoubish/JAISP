@@ -1,0 +1,16 @@
+{
+  "loss_total": 120.18301792385884,
+  "loss_masked": 119.02923731276921,
+  "loss_unmasked": 11.537834555945462,
+  "psnr_masked": -19.249237474054098,
+  "mask_frac": 0.03364801327309882,
+  "context_count_mean": 5.222222222222222,
+  "samples": 144,
+  "lr_head": 1e-06,
+  "epoch_time_sec": 45.57588863372803,
+  "mask_counts": {
+    "random": 73,
+    "object": 59,
+    "hard": 12
+  }
+}
