@@ -85,6 +85,7 @@ def encode_target_and_context(
     context_bands: List[str],
     device: torch.device,
     freeze_backbone: bool,
+    use_projector_tokens: bool,
 ) -> Tuple[torch.Tensor, torch.Tensor, Tuple[int, int]]:
     """
     Returns:
@@ -96,19 +97,29 @@ def encode_target_and_context(
     def _encode(image: torch.Tensor, rms: torch.Tensor, band: str):
         image = image.unsqueeze(0).to(device)  # [1,1,H,W]
         rms = rms.unsqueeze(0).to(device)
+        if use_projector_tokens:
+            if freeze_backbone:
+                with torch.no_grad():
+                    out = backbone.encode(image, rms, band)
+            else:
+                out = backbone.encode(image, rms, band)
+            return out["z"], out["grid_size"]
+
         if freeze_backbone:
             with torch.no_grad():
-                return backbone.encode(image, rms, band)
-        return backbone.encode(image, rms, band)
+                feat = backbone.stems[band](image, rms)
+                tokens, grid_size = backbone.encoder(feat)
+        else:
+            feat = backbone.stems[band](image, rms)
+            tokens, grid_size = backbone.encoder(feat)
+        return tokens, grid_size
 
-    out_target = _encode(target_masked, target_rms, target_band)
-    target_tokens = out_target["z"]
-    target_grid = out_target["grid_size"]
+    target_tokens, target_grid = _encode(target_masked, target_rms, target_band)
 
     aligned_context = []
     for img, rms, band in zip(context_images, context_rms, context_bands):
-        out = _encode(img, rms, str(band))
-        ctx = interpolate_tokens(out["z"], out["grid_size"], target_grid)
+        ctx_tokens, ctx_grid = _encode(img, rms, str(band))
+        ctx = interpolate_tokens(ctx_tokens, ctx_grid, target_grid)
         aligned_context.append(ctx)
 
     if aligned_context:
@@ -122,13 +133,21 @@ def encode_target_and_context(
 def compute_losses(
     pred: torch.Tensor,
     target_image: torch.Tensor,
+    target_rms: torch.Tensor,
     pixel_mask: torch.Tensor,
     unmasked_weight: float,
+    predict_noise_units: bool,
+    target_clamp_min: float,
+    target_clamp_max: float,
 ) -> Dict[str, torch.Tensor]:
     """Compute masked and optional unmasked L1 losses on predicted image."""
     h_pred, w_pred = pred.shape[-2], pred.shape[-1]
 
     target_crop = target_image[:, :h_pred, :w_pred].unsqueeze(0).to(pred.device)  # [1,1,H,W]
+    rms_crop = target_rms[:, :h_pred, :w_pred].unsqueeze(0).to(pred.device)
+    if predict_noise_units:
+        target_crop = target_crop / (rms_crop + 1e-10)
+    target_crop = target_crop.clamp(min=float(target_clamp_min), max=float(target_clamp_max))
     mask_crop = pixel_mask[:, :h_pred, :w_pred].unsqueeze(0).to(pred.device)
 
     abs_err = (pred - target_crop).abs()
@@ -140,8 +159,16 @@ def compute_losses(
     loss_unmasked = (abs_err * (1.0 - mask_crop)).sum() / unmasked_den
     loss_total = loss_masked + float(unmasked_weight) * loss_unmasked
 
-    mse_masked = ((pred - target_crop) ** 2 * mask_crop).sum() / masked_den
-    psnr_masked = 10.0 * torch.log10(1.0 / (mse_masked + 1e-8))
+    sq_err = ((pred - target_crop) ** 2) * mask_crop
+    mse_masked = sq_err.sum() / masked_den
+    vals = target_crop[mask_crop > 0.5]
+    if vals.numel() > 16:
+        p01 = torch.quantile(vals, 0.01)
+        p99 = torch.quantile(vals, 0.99)
+        dyn = (p99 - p01).clamp(min=1e-3)
+    else:
+        dyn = torch.tensor(1.0, device=pred.device)
+    psnr_masked = 20.0 * torch.log10(dyn) - 10.0 * torch.log10(mse_masked + 1e-8)
 
     return {
         "loss_total": loss_total,
@@ -231,7 +258,7 @@ def train(args: argparse.Namespace) -> None:
     )
 
     head = MaskedReconstructionHead(
-        embed_dim=args.proj_dim,
+        embed_dim=(args.proj_dim if args.use_projector_tokens else args.embed_dim),
         patch_size=args.patch_size,
         depth=args.head_depth,
         num_heads=args.head_heads,
@@ -267,6 +294,10 @@ def train(args: argparse.Namespace) -> None:
     print(
         f"Context bands per sample: [{args.min_context}, {args.max_context}] | "
         f"mask mix random/object/hard = {args.mask_random:.2f}/{args.mask_object:.2f}/{args.mask_hard:.2f}"
+    )
+    print(
+        f"Reconstruction tokens: {'projector(z)' if args.use_projector_tokens else 'encoder(pre-projector)'} | "
+        f"target space: {'noise units (image/rms)' if args.predict_noise_units else 'raw image units'}"
     )
 
     wandb_run = None
@@ -348,6 +379,7 @@ def train(args: argparse.Namespace) -> None:
                         context_bands=context_bands,
                         device=device,
                         freeze_backbone=args.freeze_backbone,
+                        use_projector_tokens=args.use_projector_tokens,
                     )
 
                     token_mask = to_token_mask(pixel_mask, target_grid)
@@ -361,8 +393,12 @@ def train(args: argparse.Namespace) -> None:
                     metrics = compute_losses(
                         pred=pred,
                         target_image=target_image,
+                        target_rms=target_rms,
                         pixel_mask=pixel_mask,
                         unmasked_weight=args.unmasked_weight,
+                        predict_noise_units=args.predict_noise_units,
+                        target_clamp_min=args.target_clamp_min,
+                        target_clamp_max=args.target_clamp_max,
                     )
 
                     sample_losses.append(metrics["loss_total"])
@@ -384,7 +420,14 @@ def train(args: argparse.Namespace) -> None:
                         preview = {
                             "target": target_image[:, :h_pred, :w_pred].detach().cpu().numpy()[0],
                             "masked": target_masked[:, :h_pred, :w_pred].detach().cpu().numpy()[0],
-                            "pred": pred.detach().cpu().numpy()[0, 0],
+                            "pred": (
+                                pred.detach().cpu().numpy()[0, 0]
+                                if not args.predict_noise_units
+                                else (
+                                    pred.detach().cpu().numpy()[0, 0]
+                                    * target_rms[:, :h_pred, :w_pred].detach().cpu().numpy()[0]
+                                )
+                            ),
                             "mask": pixel_mask[:, :h_pred, :w_pred].detach().cpu().numpy()[0],
                             "target_band": target_band,
                             "context_bands": context_bands,
@@ -512,6 +555,7 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--proj-dim", type=int, default=256)
     parser.add_argument("--depth", type=int, default=6)
     parser.add_argument("--patch-size", type=int, default=16)
+    parser.add_argument("--use-projector-tokens", action="store_true", default=False)
 
     parser.add_argument("--head-depth", type=int, default=2)
     parser.add_argument("--head-heads", type=int, default=8)
@@ -529,6 +573,11 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--mask-value", type=float, default=0.0)
 
     parser.add_argument("--unmasked-weight", type=float, default=0.10)
+    parser.add_argument("--predict-noise-units", dest="predict_noise_units", action="store_true")
+    parser.add_argument("--predict-raw-target", dest="predict_noise_units", action="store_false")
+    parser.set_defaults(predict_noise_units=True)
+    parser.add_argument("--target-clamp-min", type=float, default=-10.0)
+    parser.add_argument("--target-clamp-max", type=float, default=100.0)
     parser.add_argument("--save-every", type=int, default=5)
 
     parser.add_argument("--seed", type=int, default=42)
