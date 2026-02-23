@@ -51,10 +51,9 @@ def encode_band_with_stem(
     return {
         "tokens": tokens,
         "grid_size": grid_size,
-        "stem_feat": stem_feat if freeze_backbone else stem_feat.detach(),
-        # When backbone is trainable, we still detach stem_feat for the skip
-        # connections — gradients flow through tokens, not through pixel skips.
-        # This prevents the decoder from "cheating" by just copying stem features.
+        "stem_feat": stem_feat.half() if freeze_backbone else stem_feat.detach().half(),
+        # float16 for stem skip connections halves memory (~140MB vs ~280MB per Euclid band).
+        # These are detached anyway — no gradients flow through pixel skips.
     }
 
 

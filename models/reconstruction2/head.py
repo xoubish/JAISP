@@ -164,21 +164,28 @@ class ContextAggregator(nn.Module):
             return torch.zeros(B, C, target_hw[0], target_hw[1], device=device)
 
         H, W = int(target_hw[0]), int(target_hw[1])
-        resampled = []
+
+        # Pass 1: compute attention scores only (small tensors [B,1,H,W] each).
+        scores = []
         for feat in context_feats:
-            resampled.append(
-                F.interpolate(feat, size=(H, W), mode="bilinear", align_corners=False)
-            )
+            r = F.interpolate(feat.float(), size=(H, W), mode="bilinear", align_corners=False)
+            scores.append(self.score_net(r))                         # [B, 1, H, W]
+            # r is discarded here — not stored
 
-        stacked = torch.stack(resampled, dim=1)  # [B, K, C, H, W]
-        B, K, C, _, _ = stacked.shape
+        score_stack = torch.stack(scores, dim=1)                     # [B, K, 1, H, W]
+        weights = torch.softmax(score_stack, dim=1)
+        del scores, score_stack
 
-        # Compute per-pixel attention scores across K context bands.
-        flat = stacked.view(B * K, C, H, W)
-        scores = self.score_net(flat).view(B, K, 1, H, W)       # [B, K, 1, H, W]
-        weights = torch.softmax(scores, dim=1)
+        # Pass 2: resample again and accumulate weighted sum one band at a time.
+        aggregated = None
+        for k, feat in enumerate(context_feats):
+            r = F.interpolate(feat.float(), size=(H, W), mode="bilinear", align_corners=False)
+            wr = weights[:, k] * r                                   # [B, 1, H, W] * [B, C, H, W]
+            if aggregated is None:
+                aggregated = wr
+            else:
+                aggregated = aggregated + wr
 
-        aggregated = (weights * stacked).sum(dim=1)              # [B, C, H, W]
         return aggregated
 
 
@@ -381,17 +388,19 @@ class ResolutionAwareReconstructionHead(nn.Module):
 
         # --- Aggregate context stem features at target native resolution ---
         H_tgt, W_tgt = int(target_hw[0]), int(target_hw[1])
+        # Stems may be float16 for memory; aggregator casts to float32 one at a time.
         ctx_agg = self.context_agg(context_stem_feats, (H_tgt, W_tgt))
 
         # --- Mask the target stem features (zero inside hole) ---
+        target_stem_f32 = target_stem_feat.float()
         if pixel_mask is not None:
             # pixel_mask: [B,1,H,W] with 1=masked.  We zero out masked regions.
             pm = pixel_mask
-            if pm.shape[-2] != target_stem_feat.shape[-2] or pm.shape[-1] != target_stem_feat.shape[-1]:
-                pm = F.interpolate(pm, size=target_stem_feat.shape[-2:], mode="nearest")
-            target_stem_masked = target_stem_feat * (1.0 - pm)
+            if pm.shape[-2] != target_stem_f32.shape[-2] or pm.shape[-1] != target_stem_f32.shape[-1]:
+                pm = F.interpolate(pm, size=target_stem_f32.shape[-2:], mode="nearest")
+            target_stem_masked = target_stem_f32 * (1.0 - pm)
         else:
-            target_stem_masked = target_stem_feat
+            target_stem_masked = target_stem_f32
 
         # Provide mask for decoder (default to zeros = no mask info).
         if pixel_mask is None:
