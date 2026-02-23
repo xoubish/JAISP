@@ -1,4 +1,4 @@
-#python train_masked_reconstruction.py --rubin-dir ../data/rubin_tiles_ecdfs --euclid-dir ../data/euclid_tiles_ecdfs
+#python erain_masked_reconstruction.py --rubin-dir ../data/rubin_tiles_ecdfs --euclid-dir ../data/euclid_tiles_ecdfs
 
 import argparse
 import json
