@@ -1,5 +1,3 @@
-#python erain_masked_reconstruction.py --rubin-dir ../data/rubin_tiles_ecdfs --euclid-dir ../data/euclid_tiles_ecdfs
-
 import argparse
 import json
 import random
@@ -330,7 +328,7 @@ def _make_preview_image(preview: Dict, epoch: int):
 
 def evaluate_fixed_validation(
     backbone: JAISPFoundationV5,
-    head: MaskedReconstructionHead,
+    head: ResolutionAwareReconstructionHead,
     val_loader,
     args: argparse.Namespace,
     device: torch.device,
@@ -894,7 +892,7 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--backbone-ckpt", type=str, default="models/checkpoints/jaisp_v5/best.pt")
 
     parser.add_argument("--epochs", type=int, default=30)
-    parser.add_argument("--batch-size", type=int, default=1)
+    parser.add_argument("--batch-size", type=int, default=2)
     parser.add_argument("--num-workers", type=int, default=4)
 
     parser.add_argument("--lr", type=float, default=3e-4)
