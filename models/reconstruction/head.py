@@ -60,6 +60,12 @@ class MaskedReconstructionHead(nn.Module):
         self.embed_dim = int(embed_dim)
         self.patch_size = int(patch_size)
 
+        # Learn token-wise context fusion instead of plain averaging over context bands.
+        self.context_score = nn.Sequential(
+            nn.Linear(self.embed_dim * 2, self.embed_dim),
+            nn.GELU(),
+            nn.Linear(self.embed_dim, 1),
+        )
         self.context_proj = nn.Linear(self.embed_dim, self.embed_dim)
         self.mask_token = nn.Parameter(torch.zeros(1, 1, self.embed_dim))
 
@@ -99,7 +105,26 @@ class MaskedReconstructionHead(nn.Module):
         if token_mask.dim() != 2:
             raise ValueError(f"token_mask must be [B,N], got {tuple(token_mask.shape)}")
 
-        x = target_tokens + self.context_proj(context_tokens)
+        # Accept either [B,N,D] or [B,K,N,D] context tokens.
+        if context_tokens.dim() == 3:
+            context_tokens = context_tokens.unsqueeze(1)
+        if context_tokens.dim() != 4:
+            raise ValueError(f"context_tokens must be [B,N,D] or [B,K,N,D], got {tuple(context_tokens.shape)}")
+
+        bsz, kctx, ntok, dim = context_tokens.shape
+        if target_tokens.shape[0] != bsz or target_tokens.shape[1] != ntok or target_tokens.shape[2] != dim:
+            raise ValueError(
+                "Token shape mismatch: "
+                f"target={tuple(target_tokens.shape)}, context={tuple(context_tokens.shape)}"
+            )
+
+        target_rep = target_tokens.unsqueeze(1).expand(-1, kctx, -1, -1)  # [B,K,N,D]
+        score_in = torch.cat([target_rep, context_tokens], dim=-1)  # [B,K,N,2D]
+        scores = self.context_score(score_in).squeeze(-1)  # [B,K,N]
+        weights = torch.softmax(scores, dim=1)
+        fused_context = (weights.unsqueeze(-1) * context_tokens).sum(dim=1)  # [B,N,D]
+
+        x = target_tokens + self.context_proj(fused_context)
         x = x + token_mask.unsqueeze(-1) * self.mask_token
 
         for block in self.blocks:

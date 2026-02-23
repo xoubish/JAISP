@@ -1,16 +1,21 @@
 {
-  "loss_total": 2.828411679611438,
-  "loss_masked": 2.7325901463627815,
-  "loss_unmasked": 0.9582154857408669,
-  "psnr_masked": 13.738838384548822,
-  "mask_frac": 0.03364801327309882,
-  "context_count_mean": 5.222222222222222,
+  "loss_total": 4.882580224838522,
+  "loss_masked": 4.882580224838522,
+  "loss_unmasked": 1.2764969271504216,
+  "psnr_masked": 11.78855069478353,
+  "mask_frac": 0.02710825503648569,
+  "context_count_mean": 4.763888888888889,
   "samples": 144,
-  "lr_head": 1e-06,
-  "epoch_time_sec": 45.402116537094116,
+  "lr_head": 0.0002991810233575568,
+  "epoch_time_sec": 104.3425190448761,
   "mask_counts": {
-    "random": 73,
-    "object": 59,
-    "hard": 12
-  }
+    "random": 90,
+    "object": 54,
+    "hard": 0
+  },
+  "val_loss_masked": 3.0295159332454205,
+  "val_psnr_masked": 11.104162216186523,
+  "val_mask_frac": 0.03567489713896066,
+  "val_context_count_mean": 5.875,
+  "val_samples": 16
 }

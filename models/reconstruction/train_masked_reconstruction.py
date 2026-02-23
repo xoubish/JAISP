@@ -3,7 +3,7 @@ import json
 import random
 import time
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -75,6 +75,54 @@ def to_token_mask(pixel_mask: torch.Tensor, grid_size: Tuple[int, int]) -> torch
     return tm.view(1, -1)
 
 
+def _normalize_mask_probs(p_random: float, p_object: float, p_hard: float) -> Dict[str, float]:
+    pr = float(p_random)
+    po = float(p_object)
+    ph = float(p_hard)
+    total = pr + po + ph
+    if total <= 0:
+        return {"random": 1.0, "object": 0.0, "hard": 0.0}
+    return {"random": pr / total, "object": po / total, "hard": ph / total}
+
+
+def get_epoch_mask_probs(args: argparse.Namespace, epoch: int) -> Dict[str, float]:
+    target = _normalize_mask_probs(args.mask_random, args.mask_object, args.mask_hard)
+    if args.no_mask_curriculum:
+        return target
+
+    n_curr = max(1, int(args.curriculum_epochs))
+    alpha = min(1.0, max(0.0, float(epoch - 1) / float(n_curr)))
+    hard_now = target["hard"] * alpha
+    remaining = max(0.0, 1.0 - hard_now)
+
+    base_non_hard = target["random"] + target["object"]
+    if base_non_hard <= 1e-10:
+        return {"random": remaining, "object": 0.0, "hard": hard_now}
+
+    scale = remaining / base_non_hard
+    return {
+        "random": target["random"] * scale,
+        "object": target["object"] * scale,
+        "hard": hard_now,
+    }
+
+
+def build_mask_with_seed(
+    image: torch.Tensor,
+    probs: Dict[str, float],
+    seed: Optional[int] = None,
+) -> Tuple[torch.Tensor, str]:
+    if seed is None:
+        return build_mask(image, probs)
+
+    devices = [image.device] if image.is_cuda else []
+    with torch.random.fork_rng(devices=devices):
+        torch.manual_seed(int(seed))
+        if image.is_cuda:
+            torch.cuda.manual_seed_all(int(seed))
+        return build_mask(image, probs)
+
+
 def encode_target_and_context(
     backbone: JAISPFoundationV5,
     target_masked: torch.Tensor,
@@ -90,7 +138,7 @@ def encode_target_and_context(
     """
     Returns:
       target_tokens: [1,N,D]
-      context_tokens: [1,N,D] (aggregated and aligned to target grid)
+      context_tokens: [1,K,N,D] (aligned per context band to target grid)
       target_grid: (Ht, Wt)
     """
 
@@ -123,9 +171,16 @@ def encode_target_and_context(
         aligned_context.append(ctx)
 
     if aligned_context:
-        context_tokens = torch.stack(aligned_context, dim=0).mean(dim=0)
+        context_tokens = torch.stack(aligned_context, dim=1)  # [1,K,N,D]
     else:
-        context_tokens = torch.zeros_like(target_tokens)
+        context_tokens = torch.zeros(
+            target_tokens.shape[0],
+            1,
+            target_tokens.shape[1],
+            target_tokens.shape[2],
+            device=target_tokens.device,
+            dtype=target_tokens.dtype,
+        )
 
     return target_tokens, context_tokens, target_grid
 
@@ -139,6 +194,8 @@ def compute_losses(
     predict_noise_units: bool,
     target_clamp_min: float,
     target_clamp_max: float,
+    source_loss_weight: float,
+    source_snr_threshold: float,
 ) -> Dict[str, torch.Tensor]:
     """Compute masked and optional unmasked L1 losses on predicted image."""
     h_pred, w_pred = pred.shape[-2], pred.shape[-1]
@@ -155,7 +212,14 @@ def compute_losses(
     masked_den = mask_crop.sum().clamp(min=1.0)
     unmasked_den = (1.0 - mask_crop).sum().clamp(min=1.0)
 
-    loss_masked = (abs_err * mask_crop).sum() / masked_den
+    # Source-weighted masked loss: emphasize high-SNR/source pixels in masked region.
+    src_weight = 1.0 + float(source_loss_weight) * torch.sigmoid(
+        (target_crop.abs() - float(source_snr_threshold)) * 2.0
+    )
+    weighted_mask = mask_crop * src_weight
+    weighted_den = weighted_mask.sum().clamp(min=1.0)
+
+    loss_masked = (abs_err * weighted_mask).sum() / weighted_den
     loss_unmasked = (abs_err * (1.0 - mask_crop)).sum() / unmasked_den
     loss_total = loss_masked + float(unmasked_weight) * loss_unmasked
 
@@ -251,6 +315,140 @@ def _make_preview_image(preview: Dict, epoch: int):
     return img
 
 
+def evaluate_fixed_validation(
+    backbone: JAISPFoundationV5,
+    head: MaskedReconstructionHead,
+    val_loader,
+    args: argparse.Namespace,
+    device: torch.device,
+    val_mask_probs: Dict[str, float],
+) -> Tuple[Optional[Dict[str, float]], Optional[Dict]]:
+    # Reset validation dataset RNG so band/context sampling stays fixed across epochs.
+    ds = val_loader.dataset
+    if hasattr(ds, "dataset"):  # handle Subset if used later
+        ds = ds.dataset
+    if hasattr(ds, "rng"):
+        ds.rng = np.random.RandomState(int(args.val_seed))
+
+    agg = {
+        "loss_total": 0.0,
+        "loss_masked": 0.0,
+        "loss_unmasked": 0.0,
+        "psnr_masked": 0.0,
+        "mask_frac": 0.0,
+        "context_count_sum": 0.0,
+        "num_samples": 0,
+    }
+    preview = None
+
+    head.eval()
+    backbone.eval()
+    with torch.no_grad():
+        for bidx, batch in enumerate(val_loader):
+            if args.val_max_batches > 0 and bidx >= args.val_max_batches:
+                break
+
+            bsz = len(batch["target_band"])
+            for i in range(bsz):
+                target_band = str(batch["target_band"][i])
+                if target_band not in backbone.band_names:
+                    continue
+
+                target_image = batch["target_image"][i].float().to(device)
+                target_rms = batch["target_rms"][i].float().to(device)
+
+                context_images = [x.float().to(device) for x in batch["context_images"][i]]
+                context_rms = [x.float().to(device) for x in batch["context_rms"][i]]
+                context_bands = [str(x) for x in batch["context_bands"][i]]
+                valid = [j for j, b in enumerate(context_bands) if b in backbone.band_names]
+                if not valid:
+                    continue
+                context_images = [context_images[j] for j in valid]
+                context_rms = [context_rms[j] for j in valid]
+                context_bands = [context_bands[j] for j in valid]
+
+                sample_seed = int(args.val_seed + bidx * 1009 + i * 37)
+                pixel_mask, mask_type = build_mask_with_seed(target_image, val_mask_probs, seed=sample_seed)
+                target_masked = target_image * (1.0 - pixel_mask) + args.mask_value * pixel_mask
+
+                target_tokens, context_tokens, target_grid = encode_target_and_context(
+                    backbone=backbone,
+                    target_masked=target_masked,
+                    target_rms=target_rms,
+                    target_band=target_band,
+                    context_images=context_images,
+                    context_rms=context_rms,
+                    context_bands=context_bands,
+                    device=device,
+                    freeze_backbone=args.freeze_backbone,
+                    use_projector_tokens=args.use_projector_tokens,
+                )
+
+                token_mask = to_token_mask(pixel_mask, target_grid)
+                pred = head(
+                    target_tokens=target_tokens,
+                    context_tokens=context_tokens,
+                    token_mask=token_mask,
+                    grid_size=target_grid,
+                )
+
+                metrics = compute_losses(
+                    pred=pred,
+                    target_image=target_image,
+                    target_rms=target_rms,
+                    pixel_mask=pixel_mask,
+                    unmasked_weight=args.unmasked_weight,
+                    predict_noise_units=args.predict_noise_units,
+                    target_clamp_min=args.target_clamp_min,
+                    target_clamp_max=args.target_clamp_max,
+                    source_loss_weight=args.source_loss_weight,
+                    source_snr_threshold=args.source_snr_threshold,
+                )
+
+                agg["loss_total"] += float(metrics["loss_total"].detach().item())
+                agg["loss_masked"] += float(metrics["loss_masked"].detach().item())
+                agg["loss_unmasked"] += float(metrics["loss_unmasked"].detach().item())
+                agg["psnr_masked"] += float(metrics["psnr_masked"].detach().item())
+                agg["mask_frac"] += float(metrics["mask_frac"].detach().item())
+                agg["context_count_sum"] += len(context_bands)
+                agg["num_samples"] += 1
+
+                if preview is None:
+                    h_pred, w_pred = pred.shape[-2], pred.shape[-1]
+                    preview = {
+                        "target": target_image[:, :h_pred, :w_pred].detach().cpu().numpy()[0],
+                        "masked": target_masked[:, :h_pred, :w_pred].detach().cpu().numpy()[0],
+                        "pred": (
+                            pred.detach().cpu().numpy()[0, 0]
+                            if not args.predict_noise_units
+                            else (
+                                pred.detach().cpu().numpy()[0, 0]
+                                * target_rms[:, :h_pred, :w_pred].detach().cpu().numpy()[0]
+                            )
+                        ),
+                        "mask": pixel_mask[:, :h_pred, :w_pred].detach().cpu().numpy()[0],
+                        "target_band": target_band,
+                        "context_bands": context_bands,
+                        "mask_type": mask_type,
+                    }
+
+    n = agg["num_samples"]
+    if n <= 0:
+        return None, preview
+    return (
+        {
+            "loss_total": agg["loss_total"] / n,
+            "loss_masked": agg["loss_masked"] / n,
+            "loss_unmasked": agg["loss_unmasked"] / n,
+            "psnr_masked": agg["psnr_masked"] / n,
+            "mask_frac": agg["mask_frac"] / n,
+            "context_count_mean": agg["context_count_sum"] / n,
+            "samples": n,
+        },
+        preview,
+    )
+
+
 def train(args: argparse.Namespace) -> None:
     seed_everything(args.seed)
 
@@ -267,6 +465,18 @@ def train(args: argparse.Namespace) -> None:
         drop_last=True,
         augment=not args.no_augment,
         seed=args.seed,
+        min_context_bands=args.min_context,
+        max_context_bands=args.max_context,
+    )
+    _, val_loader = make_reconstruction_loader(
+        rubin_dir=args.rubin_dir,
+        euclid_dir=args.euclid_dir,
+        batch_size=args.val_batch_size,
+        num_workers=args.val_num_workers,
+        shuffle=False,
+        drop_last=False,
+        augment=False,
+        seed=args.val_seed,
         min_context_bands=args.min_context,
         max_context_bands=args.max_context,
     )
@@ -306,21 +516,23 @@ def train(args: argparse.Namespace) -> None:
     optimizer = torch.optim.AdamW(param_groups, weight_decay=args.weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max(1, args.epochs), eta_min=1e-6)
 
-    mask_probs = {
-        "random": args.mask_random,
-        "object": args.mask_object,
-        "hard": args.mask_hard,
-    }
+    target_mask_probs = _normalize_mask_probs(args.mask_random, args.mask_object, args.mask_hard)
 
     print(f"Device: {device}")
     print(f"Tiles: {len(dataset)}, steps/epoch: {len(loader)}")
     print(
         f"Context bands per sample: [{args.min_context}, {args.max_context}] | "
-        f"mask mix random/object/hard = {args.mask_random:.2f}/{args.mask_object:.2f}/{args.mask_hard:.2f}"
+        "target mask mix random/object/hard = "
+        f"{target_mask_probs['random']:.2f}/{target_mask_probs['object']:.2f}/{target_mask_probs['hard']:.2f}"
     )
     print(
         f"Reconstruction tokens: {'projector(z)' if args.use_projector_tokens else 'encoder(pre-projector)'} | "
         f"target space: {'noise units (image/rms)' if args.predict_noise_units else 'raw image units'}"
+    )
+    print(
+        "Source weighting: "
+        f"weight={args.source_loss_weight:.2f}, snr_threshold={args.source_snr_threshold:.2f} | "
+        f"mask curriculum={'off' if args.no_mask_curriculum else f'on ({args.curriculum_epochs} epochs)'}"
     )
 
     wandb_run = None
@@ -351,6 +563,7 @@ def train(args: argparse.Namespace) -> None:
             head.train()
             if not args.freeze_backbone:
                 backbone.eval()
+            epoch_mask_probs = get_epoch_mask_probs(args, epoch)
 
             agg = {
                 "loss_total": 0.0,
@@ -388,7 +601,7 @@ def train(args: argparse.Namespace) -> None:
                     context_rms = [context_rms[j] for j in valid]
                     context_bands = [context_bands[j] for j in valid]
 
-                    pixel_mask, mask_type = build_mask(target_image, mask_probs)
+                    pixel_mask, mask_type = build_mask_with_seed(target_image, epoch_mask_probs, seed=None)
                     mask_type_counts[mask_type] = mask_type_counts.get(mask_type, 0) + 1
                     target_masked = target_image * (1.0 - pixel_mask) + args.mask_value * pixel_mask
 
@@ -422,6 +635,8 @@ def train(args: argparse.Namespace) -> None:
                         predict_noise_units=args.predict_noise_units,
                         target_clamp_min=args.target_clamp_min,
                         target_clamp_max=args.target_clamp_max,
+                        source_loss_weight=args.source_loss_weight,
+                        source_snr_threshold=args.source_snr_threshold,
                     )
 
                     sample_losses.append(metrics["loss_total"])
@@ -485,6 +700,24 @@ def train(args: argparse.Namespace) -> None:
             if len(optimizer.param_groups) > 1:
                 epoch_metrics["lr_backbone"] = optimizer.param_groups[1]["lr"]
 
+            val_metrics = None
+            val_preview = None
+            if args.val_every > 0 and (epoch % args.val_every == 0):
+                val_metrics, val_preview = evaluate_fixed_validation(
+                    backbone=backbone,
+                    head=head,
+                    val_loader=val_loader,
+                    args=args,
+                    device=device,
+                    val_mask_probs=target_mask_probs,
+                )
+                if val_metrics is not None:
+                    epoch_metrics["val_loss_masked"] = val_metrics["loss_masked"]
+                    epoch_metrics["val_psnr_masked"] = val_metrics["psnr_masked"]
+                    epoch_metrics["val_mask_frac"] = val_metrics["mask_frac"]
+                    epoch_metrics["val_context_count_mean"] = val_metrics["context_count_mean"]
+                    epoch_metrics["val_samples"] = val_metrics["samples"]
+
             print(
                 f"Epoch {epoch:03d} | "
                 f"loss={epoch_metrics['loss_total']:.4f} "
@@ -493,32 +726,54 @@ def train(args: argparse.Namespace) -> None:
                 f"mask_frac={epoch_metrics['mask_frac']:.3f} "
                 f"context_mean={epoch_metrics['context_count_mean']:.2f} "
                 f"samples={epoch_metrics['samples']} "
-                f"t={epoch_metrics['epoch_time_sec']:.1f}s"
+                f"t={epoch_metrics['epoch_time_sec']:.1f}s "
+                f"mask_mix={epoch_mask_probs['random']:.2f}/{epoch_mask_probs['object']:.2f}/{epoch_mask_probs['hard']:.2f}"
             )
+            if val_metrics is not None:
+                print(
+                    f"           val_masked={val_metrics['loss_masked']:.4f} "
+                    f"val_psnr_masked={val_metrics['psnr_masked']:.2f} "
+                    f"val_samples={val_metrics['samples']}"
+                )
 
             if wandb_run is not None:
-                mask_total = max(1, sum(mask_type_counts.values()))
                 wb = {
-                    "train/loss_total": epoch_metrics["loss_total"],
                     "train/loss_masked": epoch_metrics["loss_masked"],
-                    "train/loss_unmasked": epoch_metrics["loss_unmasked"],
                     "train/psnr_masked": epoch_metrics["psnr_masked"],
                     "train/mask_frac": epoch_metrics["mask_frac"],
                     "train/context_count_mean": epoch_metrics["context_count_mean"],
-                    "train/samples": epoch_metrics["samples"],
                     "train/lr_head": epoch_metrics["lr_head"],
-                    "train/epoch_time_sec": epoch_metrics["epoch_time_sec"],
-                    "train/mask_count_random": mask_type_counts["random"],
-                    "train/mask_count_object": mask_type_counts["object"],
-                    "train/mask_count_hard": mask_type_counts["hard"],
-                    "train/mask_frac_random": mask_type_counts["random"] / mask_total,
-                    "train/mask_frac_object": mask_type_counts["object"] / mask_total,
-                    "train/mask_frac_hard": mask_type_counts["hard"] / mask_total,
+                    "train/mask_frac_random_curriculum": epoch_mask_probs["random"],
+                    "train/mask_frac_object_curriculum": epoch_mask_probs["object"],
+                    "train/mask_frac_hard_curriculum": epoch_mask_probs["hard"],
                 }
                 if "lr_backbone" in epoch_metrics:
                     wb["train/lr_backbone"] = epoch_metrics["lr_backbone"]
+                if val_metrics is not None:
+                    wb["val/loss_masked_fixed"] = val_metrics["loss_masked"]
+                    wb["val/psnr_masked_fixed"] = val_metrics["psnr_masked"]
+                    wb["val/mask_frac_fixed"] = val_metrics["mask_frac"]
+                    wb["val/context_count_mean_fixed"] = val_metrics["context_count_mean"]
+                if args.wandb_log_detailed:
+                    mask_total = max(1, sum(mask_type_counts.values()))
+                    wb.update(
+                        {
+                            "train/loss_total": epoch_metrics["loss_total"],
+                            "train/loss_unmasked": epoch_metrics["loss_unmasked"],
+                            "train/samples": epoch_metrics["samples"],
+                            "train/epoch_time_sec": epoch_metrics["epoch_time_sec"],
+                            "train/mask_count_random": mask_type_counts["random"],
+                            "train/mask_count_object": mask_type_counts["object"],
+                            "train/mask_count_hard": mask_type_counts["hard"],
+                            "train/mask_frac_random": mask_type_counts["random"] / mask_total,
+                            "train/mask_frac_object": mask_type_counts["object"] / mask_total,
+                            "train/mask_frac_hard": mask_type_counts["hard"] / mask_total,
+                        }
+                    )
                 if preview is not None:
                     wb["train/preview"] = _make_preview_image(preview, epoch)
+                if val_preview is not None:
+                    wb["val/preview"] = _make_preview_image(val_preview, epoch)
                 wandb_run.log(wb, step=epoch)
 
             ckpt = {
@@ -536,11 +791,19 @@ def train(args: argparse.Namespace) -> None:
             last_path = out_dir / "last_reconstruction.pt"
             torch.save(ckpt, last_path)
 
-            if epoch_metrics["loss_total"] < best_loss:
-                best_loss = epoch_metrics["loss_total"]
+            score = (
+                val_metrics["loss_masked"]
+                if val_metrics is not None
+                else epoch_metrics["loss_masked"]
+            )
+            if score < best_loss:
+                best_loss = score
                 torch.save(ckpt, out_dir / "best_reconstruction.pt")
                 if wandb_run is not None:
-                    wandb_run.summary["best_loss_total"] = float(best_loss)
+                    wandb_run.summary["best_score"] = float(best_loss)
+                    wandb_run.summary["best_score_name"] = (
+                        "val/loss_masked_fixed" if val_metrics is not None else "train/loss_masked"
+                    )
                     wandb_run.summary["best_epoch"] = int(epoch)
 
             if args.save_every > 0 and epoch % args.save_every == 0:
@@ -563,7 +826,7 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--rubin-dir", type=str, required=True)
     parser.add_argument("--euclid-dir", type=str, required=True)
     parser.add_argument("--output-dir", type=str, default="checkpoints/jaisp_reconstruction")
-    parser.add_argument("--backbone-ckpt", type=str, default="checkpoints/jaisp_v5/best.pt")
+    parser.add_argument("--backbone-ckpt", type=str, default="models/checkpoints/jaisp_v5/best.pt")
 
     parser.add_argument("--epochs", type=int, default=30)
     parser.add_argument("--batch-size", type=int, default=2)
@@ -596,12 +859,22 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--mask-value", type=float, default=0.0)
 
     parser.add_argument("--unmasked-weight", type=float, default=0.0)
+    parser.add_argument("--source-loss-weight", type=float, default=1.5)
+    parser.add_argument("--source-snr-threshold", type=float, default=2.0)
     parser.add_argument("--predict-noise-units", dest="predict_noise_units", action="store_true")
     parser.add_argument("--predict-raw-target", dest="predict_noise_units", action="store_false")
     parser.set_defaults(predict_noise_units=True)
     parser.add_argument("--target-clamp-min", type=float, default=-10.0)
     parser.add_argument("--target-clamp-max", type=float, default=100.0)
     parser.add_argument("--save-every", type=int, default=5)
+    parser.add_argument("--no-mask-curriculum", action="store_true")
+    parser.add_argument("--curriculum-epochs", type=int, default=8)
+
+    parser.add_argument("--val-every", type=int, default=1)
+    parser.add_argument("--val-max-batches", type=int, default=16)
+    parser.add_argument("--val-batch-size", type=int, default=1)
+    parser.add_argument("--val-num-workers", type=int, default=0)
+    parser.add_argument("--val-seed", type=int, default=12345)
 
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", type=str, default="")
@@ -616,6 +889,7 @@ def build_argparser() -> argparse.ArgumentParser:
         choices=["online", "offline", "disabled"],
     )
     parser.add_argument("--wandb-log-images-every", type=int, default=1)
+    parser.add_argument("--wandb-log-detailed", action="store_true")
 
     return parser
 
