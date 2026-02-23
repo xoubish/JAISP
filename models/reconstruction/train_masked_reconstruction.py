@@ -185,6 +185,43 @@ def encode_target_and_context(
     return target_tokens, context_tokens, target_grid
 
 
+def _masked_ssim_loss(pred: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    # Local SSIM over 3x3 neighborhoods.
+    c1 = 0.01 * 0.01
+    c2 = 0.03 * 0.03
+    mu_x = F.avg_pool2d(pred, kernel_size=3, stride=1, padding=1)
+    mu_y = F.avg_pool2d(target, kernel_size=3, stride=1, padding=1)
+    sigma_x = F.avg_pool2d(pred * pred, kernel_size=3, stride=1, padding=1) - mu_x * mu_x
+    sigma_y = F.avg_pool2d(target * target, kernel_size=3, stride=1, padding=1) - mu_y * mu_y
+    sigma_xy = F.avg_pool2d(pred * target, kernel_size=3, stride=1, padding=1) - mu_x * mu_y
+
+    num = (2.0 * mu_x * mu_y + c1) * (2.0 * sigma_xy + c2)
+    den = (mu_x * mu_x + mu_y * mu_y + c1) * (sigma_x + sigma_y + c2)
+    ssim_map = (num / (den + 1e-8)).clamp(-1.0, 1.0)
+    loss_map = 0.5 * (1.0 - ssim_map)
+
+    den_mask = mask.sum().clamp(min=1.0)
+    return (loss_map * mask).sum() / den_mask
+
+
+def _masked_gradient_loss(pred: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    # Horizontal gradients.
+    gx_pred = pred[:, :, :, 1:] - pred[:, :, :, :-1]
+    gx_tgt = target[:, :, :, 1:] - target[:, :, :, :-1]
+    mx = mask[:, :, :, 1:] * mask[:, :, :, :-1]
+    den_x = mx.sum().clamp(min=1.0)
+    lx = (gx_pred - gx_tgt).abs().mul(mx).sum() / den_x
+
+    # Vertical gradients.
+    gy_pred = pred[:, :, 1:, :] - pred[:, :, :-1, :]
+    gy_tgt = target[:, :, 1:, :] - target[:, :, :-1, :]
+    my = mask[:, :, 1:, :] * mask[:, :, :-1, :]
+    den_y = my.sum().clamp(min=1.0)
+    ly = (gy_pred - gy_tgt).abs().mul(my).sum() / den_y
+
+    return 0.5 * (lx + ly)
+
+
 def compute_losses(
     pred: torch.Tensor,
     target_image: torch.Tensor,
@@ -196,6 +233,8 @@ def compute_losses(
     target_clamp_max: float,
     source_loss_weight: float,
     source_snr_threshold: float,
+    ssim_weight: float,
+    grad_weight: float,
 ) -> Dict[str, torch.Tensor]:
     """Compute masked and optional unmasked L1 losses on predicted image."""
     h_pred, w_pred = pred.shape[-2], pred.shape[-1]
@@ -221,7 +260,14 @@ def compute_losses(
 
     loss_masked = (abs_err * weighted_mask).sum() / weighted_den
     loss_unmasked = (abs_err * (1.0 - mask_crop)).sum() / unmasked_den
-    loss_total = loss_masked + float(unmasked_weight) * loss_unmasked
+    loss_ssim = _masked_ssim_loss(pred, target_crop, mask_crop)
+    loss_grad = _masked_gradient_loss(pred, target_crop, mask_crop)
+    loss_total = (
+        loss_masked
+        + float(unmasked_weight) * loss_unmasked
+        + float(ssim_weight) * loss_ssim
+        + float(grad_weight) * loss_grad
+    )
 
     sq_err = ((pred - target_crop) ** 2) * mask_crop
     mse_masked = sq_err.sum() / masked_den
@@ -238,9 +284,31 @@ def compute_losses(
         "loss_total": loss_total,
         "loss_masked": loss_masked,
         "loss_unmasked": loss_unmasked,
+        "loss_ssim": loss_ssim,
+        "loss_grad": loss_grad,
         "psnr_masked": psnr_masked,
         "mask_frac": mask_crop.mean(),
     }
+
+
+def build_masked_inputs(
+    target_image: torch.Tensor,
+    target_rms: torch.Tensor,
+    pixel_mask: torch.Tensor,
+    args: argparse.Namespace,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    # Raw-space masked image for backbone encoding.
+    target_masked_raw = target_image * (1.0 - pixel_mask) + args.mask_value * pixel_mask
+
+    # Model-space masked image for residual/inpaint decoding.
+    if args.predict_noise_units:
+        target_model = target_image / (target_rms + 1e-10)
+    else:
+        target_model = target_image
+    target_model = target_model.clamp(min=float(args.target_clamp_min), max=float(args.target_clamp_max))
+    target_masked_model = target_model * (1.0 - pixel_mask) + args.mask_value * pixel_mask
+
+    return target_masked_raw, target_masked_model
 
 
 def _norm_for_display(img_2d: np.ndarray) -> np.ndarray:
@@ -274,20 +342,20 @@ def _make_preview_image(preview: Dict, epoch: int):
 
     target_raw = np.asarray(preview["target"], dtype=np.float32)
     masked_raw = np.asarray(preview["masked"], dtype=np.float32)
+    token_raw = np.asarray(preview["token_inpaint"], dtype=np.float32)
     pred_raw = np.asarray(preview["pred"], dtype=np.float32)
     mask = np.asarray(preview["mask"], dtype=np.float32)
 
-    # True inpainting visualization: keep observed pixels and replace only masked area.
-    inpainted_raw = target_raw * (1.0 - mask) + pred_raw * mask
-    err_raw = np.abs(inpainted_raw - target_raw) * mask
+    # Predicted maps are already inpainted in masked region (outside mask is unchanged by design).
+    err_raw = np.abs(pred_raw - target_raw) * mask
 
     y0, y1, x0, x1 = _mask_bbox(mask, margin=12)
 
     panels = [
         ("Target", target_raw, "gray"),
         ("Masked Input", masked_raw, "gray"),
-        ("Raw Prediction", pred_raw, "gray"),
-        ("Inpainted", inpainted_raw, "gray"),
+        ("Token Inpaint", token_raw, "gray"),
+        ("Refined Inpaint", pred_raw, "gray"),
         ("|Error| in Mask", err_raw, "magma"),
     ]
 
@@ -334,6 +402,8 @@ def evaluate_fixed_validation(
         "loss_total": 0.0,
         "loss_masked": 0.0,
         "loss_unmasked": 0.0,
+        "loss_ssim": 0.0,
+        "loss_grad": 0.0,
         "psnr_masked": 0.0,
         "mask_frac": 0.0,
         "context_count_sum": 0.0,
@@ -369,11 +439,16 @@ def evaluate_fixed_validation(
 
                 sample_seed = int(args.val_seed + bidx * 1009 + i * 37)
                 pixel_mask, mask_type = build_mask_with_seed(target_image, val_mask_probs, seed=sample_seed)
-                target_masked = target_image * (1.0 - pixel_mask) + args.mask_value * pixel_mask
+                target_masked_raw, target_masked_model = build_masked_inputs(
+                    target_image=target_image,
+                    target_rms=target_rms,
+                    pixel_mask=pixel_mask,
+                    args=args,
+                )
 
                 target_tokens, context_tokens, target_grid = encode_target_and_context(
                     backbone=backbone,
-                    target_masked=target_masked,
+                    target_masked=target_masked_raw,
                     target_rms=target_rms,
                     target_band=target_band,
                     context_images=context_images,
@@ -385,15 +460,18 @@ def evaluate_fixed_validation(
                 )
 
                 token_mask = to_token_mask(pixel_mask, target_grid)
-                pred = head(
+                head_out = head(
                     target_tokens=target_tokens,
                     context_tokens=context_tokens,
                     token_mask=token_mask,
                     grid_size=target_grid,
+                    masked_input=target_masked_model.unsqueeze(0),
+                    pixel_mask=pixel_mask.unsqueeze(0),
                 )
+                pred_model = head_out["pred"]
 
                 metrics = compute_losses(
-                    pred=pred,
+                    pred=pred_model,
                     target_image=target_image,
                     target_rms=target_rms,
                     pixel_mask=pixel_mask,
@@ -403,29 +481,33 @@ def evaluate_fixed_validation(
                     target_clamp_max=args.target_clamp_max,
                     source_loss_weight=args.source_loss_weight,
                     source_snr_threshold=args.source_snr_threshold,
+                    ssim_weight=args.ssim_weight,
+                    grad_weight=args.grad_weight,
                 )
 
                 agg["loss_total"] += float(metrics["loss_total"].detach().item())
                 agg["loss_masked"] += float(metrics["loss_masked"].detach().item())
                 agg["loss_unmasked"] += float(metrics["loss_unmasked"].detach().item())
+                agg["loss_ssim"] += float(metrics["loss_ssim"].detach().item())
+                agg["loss_grad"] += float(metrics["loss_grad"].detach().item())
                 agg["psnr_masked"] += float(metrics["psnr_masked"].detach().item())
                 agg["mask_frac"] += float(metrics["mask_frac"].detach().item())
                 agg["context_count_sum"] += len(context_bands)
                 agg["num_samples"] += 1
 
                 if preview is None:
-                    h_pred, w_pred = pred.shape[-2], pred.shape[-1]
+                    h_pred, w_pred = pred_model.shape[-2], pred_model.shape[-1]
+                    token_pred = head_out["token_inpaint"].detach().cpu().numpy()[0, 0]
+                    refined_pred = pred_model.detach().cpu().numpy()[0, 0]
+                    if args.predict_noise_units:
+                        rms_np = target_rms[:, :h_pred, :w_pred].detach().cpu().numpy()[0]
+                        token_pred = token_pred * rms_np
+                        refined_pred = refined_pred * rms_np
                     preview = {
                         "target": target_image[:, :h_pred, :w_pred].detach().cpu().numpy()[0],
-                        "masked": target_masked[:, :h_pred, :w_pred].detach().cpu().numpy()[0],
-                        "pred": (
-                            pred.detach().cpu().numpy()[0, 0]
-                            if not args.predict_noise_units
-                            else (
-                                pred.detach().cpu().numpy()[0, 0]
-                                * target_rms[:, :h_pred, :w_pred].detach().cpu().numpy()[0]
-                            )
-                        ),
+                        "masked": target_masked_raw[:, :h_pred, :w_pred].detach().cpu().numpy()[0],
+                        "token_inpaint": token_pred,
+                        "pred": refined_pred,
                         "mask": pixel_mask[:, :h_pred, :w_pred].detach().cpu().numpy()[0],
                         "target_band": target_band,
                         "context_bands": context_bands,
@@ -440,6 +522,8 @@ def evaluate_fixed_validation(
             "loss_total": agg["loss_total"] / n,
             "loss_masked": agg["loss_masked"] / n,
             "loss_unmasked": agg["loss_unmasked"] / n,
+            "loss_ssim": agg["loss_ssim"] / n,
+            "loss_grad": agg["loss_grad"] / n,
             "psnr_masked": agg["psnr_masked"] / n,
             "mask_frac": agg["mask_frac"] / n,
             "context_count_mean": agg["context_count_sum"] / n,
@@ -532,6 +616,7 @@ def train(args: argparse.Namespace) -> None:
     print(
         "Source weighting: "
         f"weight={args.source_loss_weight:.2f}, snr_threshold={args.source_snr_threshold:.2f} | "
+        f"aux losses ssim={args.ssim_weight:.3f}, grad={args.grad_weight:.3f} | "
         f"mask curriculum={'off' if args.no_mask_curriculum else f'on ({args.curriculum_epochs} epochs)'}"
     )
 
@@ -569,6 +654,8 @@ def train(args: argparse.Namespace) -> None:
                 "loss_total": 0.0,
                 "loss_masked": 0.0,
                 "loss_unmasked": 0.0,
+                "loss_ssim": 0.0,
+                "loss_grad": 0.0,
                 "psnr_masked": 0.0,
                 "mask_frac": 0.0,
                 "num_samples": 0,
@@ -603,11 +690,16 @@ def train(args: argparse.Namespace) -> None:
 
                     pixel_mask, mask_type = build_mask_with_seed(target_image, epoch_mask_probs, seed=None)
                     mask_type_counts[mask_type] = mask_type_counts.get(mask_type, 0) + 1
-                    target_masked = target_image * (1.0 - pixel_mask) + args.mask_value * pixel_mask
+                    target_masked_raw, target_masked_model = build_masked_inputs(
+                        target_image=target_image,
+                        target_rms=target_rms,
+                        pixel_mask=pixel_mask,
+                        args=args,
+                    )
 
                     target_tokens, context_tokens, target_grid = encode_target_and_context(
                         backbone=backbone,
-                        target_masked=target_masked,
+                        target_masked=target_masked_raw,
                         target_rms=target_rms,
                         target_band=target_band,
                         context_images=context_images,
@@ -619,15 +711,18 @@ def train(args: argparse.Namespace) -> None:
                     )
 
                     token_mask = to_token_mask(pixel_mask, target_grid)
-                    pred = head(
+                    head_out = head(
                         target_tokens=target_tokens,
                         context_tokens=context_tokens,
                         token_mask=token_mask,
                         grid_size=target_grid,
+                        masked_input=target_masked_model.unsqueeze(0),
+                        pixel_mask=pixel_mask.unsqueeze(0),
                     )
+                    pred_model = head_out["pred"]
 
                     metrics = compute_losses(
-                        pred=pred,
+                        pred=pred_model,
                         target_image=target_image,
                         target_rms=target_rms,
                         pixel_mask=pixel_mask,
@@ -637,12 +732,16 @@ def train(args: argparse.Namespace) -> None:
                         target_clamp_max=args.target_clamp_max,
                         source_loss_weight=args.source_loss_weight,
                         source_snr_threshold=args.source_snr_threshold,
+                        ssim_weight=args.ssim_weight,
+                        grad_weight=args.grad_weight,
                     )
 
                     sample_losses.append(metrics["loss_total"])
                     agg["loss_total"] += float(metrics["loss_total"].detach().item())
                     agg["loss_masked"] += float(metrics["loss_masked"].detach().item())
                     agg["loss_unmasked"] += float(metrics["loss_unmasked"].detach().item())
+                    agg["loss_ssim"] += float(metrics["loss_ssim"].detach().item())
+                    agg["loss_grad"] += float(metrics["loss_grad"].detach().item())
                     agg["psnr_masked"] += float(metrics["psnr_masked"].detach().item())
                     agg["mask_frac"] += float(metrics["mask_frac"].detach().item())
                     agg["num_samples"] += 1
@@ -654,18 +753,18 @@ def train(args: argparse.Namespace) -> None:
                         and args.wandb_log_images_every > 0
                         and epoch % args.wandb_log_images_every == 0
                     ):
-                        h_pred, w_pred = pred.shape[-2], pred.shape[-1]
+                        h_pred, w_pred = pred_model.shape[-2], pred_model.shape[-1]
+                        token_pred = head_out["token_inpaint"].detach().cpu().numpy()[0, 0]
+                        refined_pred = pred_model.detach().cpu().numpy()[0, 0]
+                        if args.predict_noise_units:
+                            rms_np = target_rms[:, :h_pred, :w_pred].detach().cpu().numpy()[0]
+                            token_pred = token_pred * rms_np
+                            refined_pred = refined_pred * rms_np
                         preview = {
                             "target": target_image[:, :h_pred, :w_pred].detach().cpu().numpy()[0],
-                            "masked": target_masked[:, :h_pred, :w_pred].detach().cpu().numpy()[0],
-                            "pred": (
-                                pred.detach().cpu().numpy()[0, 0]
-                                if not args.predict_noise_units
-                                else (
-                                    pred.detach().cpu().numpy()[0, 0]
-                                    * target_rms[:, :h_pred, :w_pred].detach().cpu().numpy()[0]
-                                )
-                            ),
+                            "masked": target_masked_raw[:, :h_pred, :w_pred].detach().cpu().numpy()[0],
+                            "token_inpaint": token_pred,
+                            "pred": refined_pred,
                             "mask": pixel_mask[:, :h_pred, :w_pred].detach().cpu().numpy()[0],
                             "target_band": target_band,
                             "context_bands": context_bands,
@@ -689,6 +788,8 @@ def train(args: argparse.Namespace) -> None:
                 "loss_total": agg["loss_total"] / n,
                 "loss_masked": agg["loss_masked"] / n,
                 "loss_unmasked": agg["loss_unmasked"] / n,
+                "loss_ssim": agg["loss_ssim"] / n,
+                "loss_grad": agg["loss_grad"] / n,
                 "psnr_masked": agg["psnr_masked"] / n,
                 "mask_frac": agg["mask_frac"] / n,
                 "context_count_mean": agg["context_count_sum"] / n,
@@ -713,6 +814,8 @@ def train(args: argparse.Namespace) -> None:
                 )
                 if val_metrics is not None:
                     epoch_metrics["val_loss_masked"] = val_metrics["loss_masked"]
+                    epoch_metrics["val_loss_ssim"] = val_metrics["loss_ssim"]
+                    epoch_metrics["val_loss_grad"] = val_metrics["loss_grad"]
                     epoch_metrics["val_psnr_masked"] = val_metrics["psnr_masked"]
                     epoch_metrics["val_mask_frac"] = val_metrics["mask_frac"]
                     epoch_metrics["val_context_count_mean"] = val_metrics["context_count_mean"]
@@ -754,12 +857,17 @@ def train(args: argparse.Namespace) -> None:
                     wb["val/psnr_masked_fixed"] = val_metrics["psnr_masked"]
                     wb["val/mask_frac_fixed"] = val_metrics["mask_frac"]
                     wb["val/context_count_mean_fixed"] = val_metrics["context_count_mean"]
+                    if args.wandb_log_detailed:
+                        wb["val/loss_ssim_fixed"] = val_metrics["loss_ssim"]
+                        wb["val/loss_grad_fixed"] = val_metrics["loss_grad"]
                 if args.wandb_log_detailed:
                     mask_total = max(1, sum(mask_type_counts.values()))
                     wb.update(
                         {
                             "train/loss_total": epoch_metrics["loss_total"],
                             "train/loss_unmasked": epoch_metrics["loss_unmasked"],
+                            "train/loss_ssim": epoch_metrics["loss_ssim"],
+                            "train/loss_grad": epoch_metrics["loss_grad"],
                             "train/samples": epoch_metrics["samples"],
                             "train/epoch_time_sec": epoch_metrics["epoch_time_sec"],
                             "train/mask_count_random": mask_type_counts["random"],
@@ -861,6 +969,8 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--unmasked-weight", type=float, default=0.0)
     parser.add_argument("--source-loss-weight", type=float, default=1.5)
     parser.add_argument("--source-snr-threshold", type=float, default=2.0)
+    parser.add_argument("--ssim-weight", type=float, default=0.10)
+    parser.add_argument("--grad-weight", type=float, default=0.05)
     parser.add_argument("--predict-noise-units", dest="predict_noise_units", action="store_true")
     parser.add_argument("--predict-raw-target", dest="predict_noise_units", action="store_false")
     parser.set_defaults(predict_noise_units=True)

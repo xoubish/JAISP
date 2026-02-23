@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Tuple
+from typing import Dict, Optional, Tuple
 
 
 def interpolate_tokens(
@@ -73,7 +73,16 @@ class MaskedReconstructionHead(nn.Module):
             [TransformerBlock(self.embed_dim, num_heads=num_heads, mlp_ratio=mlp_ratio) for _ in range(depth)]
         )
         self.norm = nn.LayerNorm(self.embed_dim)
+        # Token decoder predicts residual patches.
         self.patch_decoder = nn.Linear(self.embed_dim, self.patch_size * self.patch_size)
+        # Pixel-space refinement to suppress block artifacts in masked region.
+        self.refine_net = nn.Sequential(
+            nn.Conv2d(2, 32, kernel_size=3, padding=1),
+            nn.GELU(),
+            nn.Conv2d(32, 32, kernel_size=3, padding=1),
+            nn.GELU(),
+            nn.Conv2d(32, 1, kernel_size=3, padding=1),
+        )
 
         self._init_weights()
 
@@ -91,7 +100,9 @@ class MaskedReconstructionHead(nn.Module):
         context_tokens: torch.Tensor,
         token_mask: torch.Tensor,
         grid_size: Tuple[int, int],
-    ) -> torch.Tensor:
+        masked_input: Optional[torch.Tensor] = None,
+        pixel_mask: Optional[torch.Tensor] = None,
+    ) -> Dict[str, torch.Tensor]:
         """
         Args:
             target_tokens: [B, N, D]
@@ -100,7 +111,10 @@ class MaskedReconstructionHead(nn.Module):
             grid_size: (H_tokens, W_tokens)
 
         Returns:
-            Predicted target image on patch grid: [B, 1, H_tokens*patch, W_tokens*patch]
+            Dict with:
+              - residual: decoded residual map [B,1,H,W]
+              - token_inpaint: masked_input + residual*mask (or residual if no masked_input/mask provided)
+              - pred: refined inpainted output [B,1,H,W]
         """
         if token_mask.dim() != 2:
             raise ValueError(f"token_mask must be [B,N], got {tuple(token_mask.shape)}")
@@ -131,7 +145,7 @@ class MaskedReconstructionHead(nn.Module):
             x = block(x)
 
         x = self.norm(x)
-        patch_pixels = self.patch_decoder(x)  # [B,N,P*P]
+        patch_pixels = self.patch_decoder(x)  # [B,N,P*P] residual patches
 
         bsz, _, _ = patch_pixels.shape
         ht, wt = int(grid_size[0]), int(grid_size[1])
@@ -139,4 +153,17 @@ class MaskedReconstructionHead(nn.Module):
 
         patch_pixels = patch_pixels.view(bsz, ht, wt, p, p)
         patch_pixels = patch_pixels.permute(0, 1, 3, 2, 4).contiguous()
-        return patch_pixels.view(bsz, 1, ht * p, wt * p)
+        residual = patch_pixels.view(bsz, 1, ht * p, wt * p)
+
+        if masked_input is None or pixel_mask is None:
+            return {"residual": residual, "token_inpaint": residual, "pred": residual}
+
+        h_out, w_out = residual.shape[-2], residual.shape[-1]
+        x_masked = masked_input[:, :, :h_out, :w_out]
+        m = pixel_mask[:, :, :h_out, :w_out]
+
+        token_inpaint = x_masked + residual * m
+        refine_delta = self.refine_net(torch.cat([token_inpaint, m], dim=1))
+        pred = token_inpaint + refine_delta * m
+
+        return {"residual": residual, "token_inpaint": token_inpaint, "pred": pred}
