@@ -886,10 +886,10 @@ def train(args: argparse.Namespace) -> None:
 def build_argparser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Train JAISP masked reconstruction head (multi-band k->1).")
 
-    parser.add_argument("--rubin-dir", type=str, required=True)
-    parser.add_argument("--euclid-dir", type=str, required=True)
+    parser.add_argument("--rubin-dir", type=str, default="../data/rubin_tiles_ecdfs")
+    parser.add_argument("--euclid-dir", type=str, default="../data/euclid_tiles_ecdfs")
     parser.add_argument("--output-dir", type=str, default="checkpoints/jaisp_reconstruction")
-    parser.add_argument("--backbone-ckpt", type=str, default="models/checkpoints/jaisp_v5/best.pt")
+    parser.add_argument("--backbone-ckpt", type=str, default="checkpoints/jaisp_v5/best.pt")
 
     parser.add_argument("--epochs", type=int, default=30)
     parser.add_argument("--batch-size", type=int, default=2)
