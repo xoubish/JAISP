@@ -1,0 +1,25 @@
+{
+  "loss_total": 17.57030604696936,
+  "loss_masked": 17.322615574010545,
+  "loss_unmasked": 0.0,
+  "loss_ssim": 0.494195972258846,
+  "loss_grad": 3.9654187959515386,
+  "psnr_masked": 2.7504912258850203,
+  "mask_frac": 0.026432742280626878,
+  "context_count_mean": 4.583333333333333,
+  "samples": 144,
+  "lr_head": 0.0002991810233575568,
+  "epoch_time_sec": 16.332595586776733,
+  "mask_counts": {
+    "random": 76,
+    "object": 68,
+    "hard": 0
+  },
+  "val_loss_masked": 3.9939298070967197,
+  "val_loss_ssim": 0.49628165923058987,
+  "val_loss_grad": 1.750760991126299,
+  "val_psnr_masked": 4.247836261987686,
+  "val_mask_frac": 0.035326079931110144,
+  "val_context_count_mean": 5.875,
+  "val_samples": 16
+}
