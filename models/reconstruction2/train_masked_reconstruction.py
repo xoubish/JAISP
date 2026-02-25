@@ -2,6 +2,7 @@ import argparse
 import json
 import random
 import time
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -551,6 +552,10 @@ def train(args: argparse.Namespace) -> None:
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max(1, args.epochs), eta_min=1e-6)
 
     target_mask_probs = _normalize_mask_probs(args.mask_random, args.mask_object, args.mask_hard)
+    accum_steps = max(1, int(args.grad_accum_steps))
+    use_amp = bool(args.amp) and (device.type == "cuda")
+    amp_dtype = torch.float16 if args.amp_dtype == "float16" else torch.bfloat16
+    scaler = torch.cuda.amp.GradScaler(enabled=use_amp and amp_dtype == torch.float16)
 
     print(f"Device: {device}")
     print(f"Tiles: {len(dataset)}, steps/epoch: {len(loader)}")
@@ -568,6 +573,11 @@ def train(args: argparse.Namespace) -> None:
         f"weight={args.source_loss_weight:.2f}, snr_threshold={args.source_snr_threshold:.2f} | "
         f"aux losses ssim={args.ssim_weight:.3f}, grad={args.grad_weight:.3f} | "
         f"mask curriculum={'off' if args.no_mask_curriculum else f'on ({args.curriculum_epochs} epochs)'}"
+    )
+    print(
+        f"Train precision: {'AMP' if use_amp else 'fp32'}"
+        + (f" ({args.amp_dtype})" if use_amp else "")
+        + f" | grad_accum_steps={accum_steps}"
     )
 
     wandb_run = None
@@ -613,9 +623,10 @@ def train(args: argparse.Namespace) -> None:
             }
             mask_type_counts = {"random": 0, "object": 0, "hard": 0}
             preview = None
+            accum_counter = 0
+            optimizer.zero_grad(set_to_none=True)
 
             for batch in loader:
-                optimizer.zero_grad(set_to_none=True)
                 sample_losses = []
 
                 bsz = len(batch["target_band"])
@@ -663,33 +674,39 @@ def train(args: argparse.Namespace) -> None:
 
                     target_hw = (int(target_image.shape[-2]), int(target_image.shape[-1]))
                     token_mask = to_token_mask(pixel_mask, target_grid)
-                    head_out = head(
-                        target_tokens=target_tokens,
-                        context_tokens=context_tokens,
-                        token_mask=token_mask,
-                        grid_size=target_grid,
-                        target_hw=target_hw,
-                        target_stem_feat=target_stem_feat,
-                        context_stem_feats=context_stem_feats,
-                        masked_input=target_masked_model.unsqueeze(0),
-                        pixel_mask=pixel_mask.unsqueeze(0),
+                    ac = (
+                        torch.autocast(device_type="cuda", dtype=amp_dtype)
+                        if use_amp
+                        else nullcontext()
                     )
-                    pred_model = head_out["pred"]
+                    with ac:
+                        head_out = head(
+                            target_tokens=target_tokens,
+                            context_tokens=context_tokens,
+                            token_mask=token_mask,
+                            grid_size=target_grid,
+                            target_hw=target_hw,
+                            target_stem_feat=target_stem_feat,
+                            context_stem_feats=context_stem_feats,
+                            masked_input=target_masked_model.unsqueeze(0),
+                            pixel_mask=pixel_mask.unsqueeze(0),
+                        )
+                        pred_model = head_out["pred"]
 
-                    metrics = compute_losses(
-                        pred=pred_model,
-                        target_image=target_image,
-                        target_rms=target_rms,
-                        pixel_mask=pixel_mask,
-                        unmasked_weight=args.unmasked_weight,
-                        predict_noise_units=args.predict_noise_units,
-                        target_clamp_min=args.target_clamp_min,
-                        target_clamp_max=args.target_clamp_max,
-                        source_loss_weight=args.source_loss_weight,
-                        source_snr_threshold=args.source_snr_threshold,
-                        ssim_weight=args.ssim_weight,
-                        grad_weight=args.grad_weight,
-                    )
+                        metrics = compute_losses(
+                            pred=pred_model,
+                            target_image=target_image,
+                            target_rms=target_rms,
+                            pixel_mask=pixel_mask,
+                            unmasked_weight=args.unmasked_weight,
+                            predict_noise_units=args.predict_noise_units,
+                            target_clamp_min=args.target_clamp_min,
+                            target_clamp_max=args.target_clamp_max,
+                            source_loss_weight=args.source_loss_weight,
+                            source_snr_threshold=args.source_snr_threshold,
+                            ssim_weight=args.ssim_weight,
+                            grad_weight=args.grad_weight,
+                        )
 
                     sample_losses.append(metrics["loss_total"])
                     agg["loss_total"] += float(metrics["loss_total"].detach().item())
@@ -730,10 +747,37 @@ def train(args: argparse.Namespace) -> None:
                     continue
 
                 loss = torch.stack(sample_losses).mean()
-                loss.backward()
+                scaled_loss = loss / float(accum_steps)
+                if scaler.is_enabled():
+                    scaler.scale(scaled_loss).backward()
+                else:
+                    scaled_loss.backward()
+
+                accum_counter += 1
+                if accum_counter % accum_steps == 0:
+                    if args.grad_clip > 0:
+                        if scaler.is_enabled():
+                            scaler.unscale_(optimizer)
+                        torch.nn.utils.clip_grad_norm_(head.parameters(), max_norm=args.grad_clip)
+                    if scaler.is_enabled():
+                        scaler.step(optimizer)
+                        scaler.update()
+                    else:
+                        optimizer.step()
+                    optimizer.zero_grad(set_to_none=True)
+                    global_step += 1
+
+            if accum_counter % accum_steps != 0:
                 if args.grad_clip > 0:
+                    if scaler.is_enabled():
+                        scaler.unscale_(optimizer)
                     torch.nn.utils.clip_grad_norm_(head.parameters(), max_norm=args.grad_clip)
-                optimizer.step()
+                if scaler.is_enabled():
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    optimizer.step()
+                optimizer.zero_grad(set_to_none=True)
                 global_step += 1
 
             scheduler.step()
@@ -899,6 +943,9 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--backbone-lr", type=float, default=3e-5)
     parser.add_argument("--weight-decay", type=float, default=0.05)
     parser.add_argument("--grad-clip", type=float, default=1.0)
+    parser.add_argument("--grad-accum-steps", type=int, default=1)
+    parser.add_argument("--amp", action="store_true")
+    parser.add_argument("--amp-dtype", type=str, default="float16", choices=["float16", "bfloat16"])
 
     parser.add_argument("--embed-dim", type=int, default=256)
     parser.add_argument("--proj-dim", type=int, default=256)

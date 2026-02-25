@@ -518,12 +518,21 @@ def main():
         euclid_dir="../data/euclid_tiles_ecdfs",
         output_dir="./checkpoints/jaisp_v5",
         batch_size=1,
-        num_workers=0,  # debug-friendly; bump later
+        num_workers=4,
         wandb_project="JAISP-Foundation-v5",
-        wandb_name="v5_strict_position_encoding"
+        wandb_name="v5_strict_position_encoding_goodrun"
     )
 
-    trainer.train(epochs=200, vis_freq=5, accum_steps=4, ema_m=0.996)
+    trainer.train(
+        epochs=60,
+        lr=3e-4,
+        weight_decay=0.05,
+        warmup_epochs=10,
+        save_freq=5,
+        vis_freq=5,
+        ema_m=0.996,
+        accum_steps=4,
+    )
 
 
 if __name__ == "__main__":
