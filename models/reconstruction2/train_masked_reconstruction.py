@@ -166,6 +166,56 @@ def _masked_gradient_loss(pred: torch.Tensor, target: torch.Tensor, mask: torch.
     return 0.5 * (lx + ly)
 
 
+def _masked_mean_and_std(
+    x: torch.Tensor,
+    mask: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Per-sample masked mean/std for [B,1,H,W] tensors."""
+    den = mask.sum(dim=(1, 2, 3)).clamp(min=1.0)
+    mean = (x * mask).sum(dim=(1, 2, 3)) / den
+    var = ((x - mean.view(-1, 1, 1, 1)) ** 2 * mask).sum(dim=(1, 2, 3)) / den
+    std = torch.sqrt(var.clamp(min=1e-8))
+    return mean, std
+
+
+def _masked_flux_conservation_loss(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    source_mask: torch.Tensor,
+    min_pixels: float,
+) -> torch.Tensor:
+    """Relative source-flux mismatch over masked source pixels."""
+    pix = source_mask.sum(dim=(1, 2, 3))
+    flux_pred = (pred * source_mask).sum(dim=(1, 2, 3))
+    flux_tgt = (target * source_mask).sum(dim=(1, 2, 3))
+
+    rel_err = (flux_pred - flux_tgt).abs() / (flux_tgt.abs() + 1.0)
+    valid = (pix >= float(min_pixels)).float()
+    den = valid.sum().clamp(min=1.0)
+    return (rel_err * valid).sum() / den
+
+
+def _masked_background_stats_loss(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    bg_mask: torch.Tensor,
+    min_pixels: float,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Match masked-background mean and std between prediction and target."""
+    pix = bg_mask.sum(dim=(1, 2, 3))
+    pred_mean, pred_std = _masked_mean_and_std(pred, bg_mask)
+    tgt_mean, tgt_std = _masked_mean_and_std(target, bg_mask)
+
+    mean_err = (pred_mean - tgt_mean).abs()
+    std_err = (pred_std - tgt_std).abs()
+    valid = (pix >= float(min_pixels)).float()
+    den = valid.sum().clamp(min=1.0)
+
+    loss_bg_mean = (mean_err * valid).sum() / den
+    loss_bg_std = (std_err * valid).sum() / den
+    return loss_bg_mean + loss_bg_std, loss_bg_mean, loss_bg_std
+
+
 def compute_losses(
     pred: torch.Tensor,
     target_image: torch.Tensor,
@@ -179,6 +229,11 @@ def compute_losses(
     source_snr_threshold: float,
     ssim_weight: float,
     grad_weight: float,
+    flux_loss_weight: float,
+    bg_stat_loss_weight: float,
+    bg_snr_threshold: float,
+    flux_min_pixels: float,
+    bg_min_pixels: float,
 ) -> Dict[str, torch.Tensor]:
     """Compute masked and optional unmasked L1 losses on predicted image."""
     h_pred, w_pred = pred.shape[-2], pred.shape[-1]
@@ -206,11 +261,32 @@ def compute_losses(
     loss_unmasked = (abs_err * (1.0 - mask_crop)).sum() / unmasked_den
     loss_ssim = _masked_ssim_loss(pred, target_crop, mask_crop)
     loss_grad = _masked_gradient_loss(pred, target_crop, mask_crop)
+
+    # Explicit source-flux conservation over masked high-SNR target pixels.
+    src_flux_mask = mask_crop * (target_crop > float(source_snr_threshold)).float()
+    loss_flux = _masked_flux_conservation_loss(
+        pred=pred,
+        target=target_crop,
+        source_mask=src_flux_mask,
+        min_pixels=flux_min_pixels,
+    )
+
+    # Explicit masked-background statistics matching (low-SNR region).
+    bg_mask = mask_crop * (target_crop.abs() <= float(bg_snr_threshold)).float()
+    loss_bg_stat, loss_bg_mean, loss_bg_std = _masked_background_stats_loss(
+        pred=pred,
+        target=target_crop,
+        bg_mask=bg_mask,
+        min_pixels=bg_min_pixels,
+    )
+
     loss_total = (
         loss_masked
         + float(unmasked_weight) * loss_unmasked
         + float(ssim_weight) * loss_ssim
         + float(grad_weight) * loss_grad
+        + float(flux_loss_weight) * loss_flux
+        + float(bg_stat_loss_weight) * loss_bg_stat
     )
 
     sq_err = ((pred - target_crop) ** 2) * mask_crop
@@ -230,6 +306,10 @@ def compute_losses(
         "loss_unmasked": loss_unmasked,
         "loss_ssim": loss_ssim,
         "loss_grad": loss_grad,
+        "loss_flux": loss_flux,
+        "loss_bg_stat": loss_bg_stat,
+        "loss_bg_mean": loss_bg_mean,
+        "loss_bg_std": loss_bg_std,
         "psnr_masked": psnr_masked,
         "mask_frac": mask_crop.mean(),
     }
@@ -348,6 +428,10 @@ def evaluate_fixed_validation(
         "loss_unmasked": 0.0,
         "loss_ssim": 0.0,
         "loss_grad": 0.0,
+        "loss_flux": 0.0,
+        "loss_bg_stat": 0.0,
+        "loss_bg_mean": 0.0,
+        "loss_bg_std": 0.0,
         "psnr_masked": 0.0,
         "mask_frac": 0.0,
         "context_count_sum": 0.0,
@@ -432,6 +516,11 @@ def evaluate_fixed_validation(
                     source_snr_threshold=args.source_snr_threshold,
                     ssim_weight=args.ssim_weight,
                     grad_weight=args.grad_weight,
+                    flux_loss_weight=args.flux_loss_weight,
+                    bg_stat_loss_weight=args.bg_stat_loss_weight,
+                    bg_snr_threshold=args.bg_snr_threshold,
+                    flux_min_pixels=args.flux_min_pixels,
+                    bg_min_pixels=args.bg_min_pixels,
                 )
 
                 agg["loss_total"] += float(metrics["loss_total"].detach().item())
@@ -439,6 +528,10 @@ def evaluate_fixed_validation(
                 agg["loss_unmasked"] += float(metrics["loss_unmasked"].detach().item())
                 agg["loss_ssim"] += float(metrics["loss_ssim"].detach().item())
                 agg["loss_grad"] += float(metrics["loss_grad"].detach().item())
+                agg["loss_flux"] += float(metrics["loss_flux"].detach().item())
+                agg["loss_bg_stat"] += float(metrics["loss_bg_stat"].detach().item())
+                agg["loss_bg_mean"] += float(metrics["loss_bg_mean"].detach().item())
+                agg["loss_bg_std"] += float(metrics["loss_bg_std"].detach().item())
                 agg["psnr_masked"] += float(metrics["psnr_masked"].detach().item())
                 agg["mask_frac"] += float(metrics["mask_frac"].detach().item())
                 agg["context_count_sum"] += len(context_bands)
@@ -473,6 +566,10 @@ def evaluate_fixed_validation(
             "loss_unmasked": agg["loss_unmasked"] / n,
             "loss_ssim": agg["loss_ssim"] / n,
             "loss_grad": agg["loss_grad"] / n,
+            "loss_flux": agg["loss_flux"] / n,
+            "loss_bg_stat": agg["loss_bg_stat"] / n,
+            "loss_bg_mean": agg["loss_bg_mean"] / n,
+            "loss_bg_std": agg["loss_bg_std"] / n,
             "psnr_masked": agg["psnr_masked"] / n,
             "mask_frac": agg["mask_frac"] / n,
             "context_count_mean": agg["context_count_sum"] / n,
@@ -571,6 +668,9 @@ def train(args: argparse.Namespace) -> None:
     print(
         "Source weighting: "
         f"weight={args.source_loss_weight:.2f}, snr_threshold={args.source_snr_threshold:.2f} | "
+        "extra losses "
+        f"flux={args.flux_loss_weight:.3f}, bg_stat={args.bg_stat_loss_weight:.3f} "
+        f"(bg_snr<={args.bg_snr_threshold:.2f}) | "
         f"aux losses ssim={args.ssim_weight:.3f}, grad={args.grad_weight:.3f} | "
         f"mask curriculum={'off' if args.no_mask_curriculum else f'on ({args.curriculum_epochs} epochs)'}"
     )
@@ -579,6 +679,7 @@ def train(args: argparse.Namespace) -> None:
         + (f" ({args.amp_dtype})" if use_amp else "")
         + f" | grad_accum_steps={accum_steps}"
     )
+    print(f"Best-checkpoint metric: {args.model_selection}")
 
     wandb_run = None
     if args.wandb_mode != "disabled":
@@ -616,6 +717,10 @@ def train(args: argparse.Namespace) -> None:
                 "loss_unmasked": 0.0,
                 "loss_ssim": 0.0,
                 "loss_grad": 0.0,
+                "loss_flux": 0.0,
+                "loss_bg_stat": 0.0,
+                "loss_bg_mean": 0.0,
+                "loss_bg_std": 0.0,
                 "psnr_masked": 0.0,
                 "mask_frac": 0.0,
                 "num_samples": 0,
@@ -706,6 +811,11 @@ def train(args: argparse.Namespace) -> None:
                             source_snr_threshold=args.source_snr_threshold,
                             ssim_weight=args.ssim_weight,
                             grad_weight=args.grad_weight,
+                            flux_loss_weight=args.flux_loss_weight,
+                            bg_stat_loss_weight=args.bg_stat_loss_weight,
+                            bg_snr_threshold=args.bg_snr_threshold,
+                            flux_min_pixels=args.flux_min_pixels,
+                            bg_min_pixels=args.bg_min_pixels,
                         )
 
                     sample_losses.append(metrics["loss_total"])
@@ -714,6 +824,10 @@ def train(args: argparse.Namespace) -> None:
                     agg["loss_unmasked"] += float(metrics["loss_unmasked"].detach().item())
                     agg["loss_ssim"] += float(metrics["loss_ssim"].detach().item())
                     agg["loss_grad"] += float(metrics["loss_grad"].detach().item())
+                    agg["loss_flux"] += float(metrics["loss_flux"].detach().item())
+                    agg["loss_bg_stat"] += float(metrics["loss_bg_stat"].detach().item())
+                    agg["loss_bg_mean"] += float(metrics["loss_bg_mean"].detach().item())
+                    agg["loss_bg_std"] += float(metrics["loss_bg_std"].detach().item())
                     agg["psnr_masked"] += float(metrics["psnr_masked"].detach().item())
                     agg["mask_frac"] += float(metrics["mask_frac"].detach().item())
                     agg["num_samples"] += 1
@@ -789,6 +903,10 @@ def train(args: argparse.Namespace) -> None:
                 "loss_unmasked": agg["loss_unmasked"] / n,
                 "loss_ssim": agg["loss_ssim"] / n,
                 "loss_grad": agg["loss_grad"] / n,
+                "loss_flux": agg["loss_flux"] / n,
+                "loss_bg_stat": agg["loss_bg_stat"] / n,
+                "loss_bg_mean": agg["loss_bg_mean"] / n,
+                "loss_bg_std": agg["loss_bg_std"] / n,
                 "psnr_masked": agg["psnr_masked"] / n,
                 "mask_frac": agg["mask_frac"] / n,
                 "context_count_mean": agg["context_count_sum"] / n,
@@ -812,9 +930,14 @@ def train(args: argparse.Namespace) -> None:
                     val_mask_probs=target_mask_probs,
                 )
                 if val_metrics is not None:
+                    epoch_metrics["val_loss_total"] = val_metrics["loss_total"]
                     epoch_metrics["val_loss_masked"] = val_metrics["loss_masked"]
                     epoch_metrics["val_loss_ssim"] = val_metrics["loss_ssim"]
                     epoch_metrics["val_loss_grad"] = val_metrics["loss_grad"]
+                    epoch_metrics["val_loss_flux"] = val_metrics["loss_flux"]
+                    epoch_metrics["val_loss_bg_stat"] = val_metrics["loss_bg_stat"]
+                    epoch_metrics["val_loss_bg_mean"] = val_metrics["loss_bg_mean"]
+                    epoch_metrics["val_loss_bg_std"] = val_metrics["loss_bg_std"]
                     epoch_metrics["val_psnr_masked"] = val_metrics["psnr_masked"]
                     epoch_metrics["val_mask_frac"] = val_metrics["mask_frac"]
                     epoch_metrics["val_context_count_mean"] = val_metrics["context_count_mean"]
@@ -824,6 +947,8 @@ def train(args: argparse.Namespace) -> None:
                 f"Epoch {epoch:03d} | "
                 f"loss={epoch_metrics['loss_total']:.4f} "
                 f"masked={epoch_metrics['loss_masked']:.4f} "
+                f"flux={epoch_metrics['loss_flux']:.4f} "
+                f"bg={epoch_metrics['loss_bg_stat']:.4f} "
                 f"psnr_masked={epoch_metrics['psnr_masked']:.2f} "
                 f"mask_frac={epoch_metrics['mask_frac']:.3f} "
                 f"context_mean={epoch_metrics['context_count_mean']:.2f} "
@@ -833,7 +958,10 @@ def train(args: argparse.Namespace) -> None:
             )
             if val_metrics is not None:
                 print(
-                    f"           val_masked={val_metrics['loss_masked']:.4f} "
+                    f"           val_total={val_metrics['loss_total']:.4f} "
+                    f"val_masked={val_metrics['loss_masked']:.4f} "
+                    f"val_flux={val_metrics['loss_flux']:.4f} "
+                    f"val_bg={val_metrics['loss_bg_stat']:.4f} "
                     f"val_psnr_masked={val_metrics['psnr_masked']:.2f} "
                     f"val_samples={val_metrics['samples']}"
                 )
@@ -841,6 +969,8 @@ def train(args: argparse.Namespace) -> None:
             if wandb_run is not None:
                 wb = {
                     "train/loss_masked": epoch_metrics["loss_masked"],
+                    "train/loss_flux": epoch_metrics["loss_flux"],
+                    "train/loss_bg_stat": epoch_metrics["loss_bg_stat"],
                     "train/psnr_masked": epoch_metrics["psnr_masked"],
                     "train/mask_frac": epoch_metrics["mask_frac"],
                     "train/context_count_mean": epoch_metrics["context_count_mean"],
@@ -852,13 +982,18 @@ def train(args: argparse.Namespace) -> None:
                 if "lr_backbone" in epoch_metrics:
                     wb["train/lr_backbone"] = epoch_metrics["lr_backbone"]
                 if val_metrics is not None:
+                    wb["val/loss_total_fixed"] = val_metrics["loss_total"]
                     wb["val/loss_masked_fixed"] = val_metrics["loss_masked"]
+                    wb["val/loss_flux_fixed"] = val_metrics["loss_flux"]
+                    wb["val/loss_bg_stat_fixed"] = val_metrics["loss_bg_stat"]
                     wb["val/psnr_masked_fixed"] = val_metrics["psnr_masked"]
                     wb["val/mask_frac_fixed"] = val_metrics["mask_frac"]
                     wb["val/context_count_mean_fixed"] = val_metrics["context_count_mean"]
                     if args.wandb_log_detailed:
                         wb["val/loss_ssim_fixed"] = val_metrics["loss_ssim"]
                         wb["val/loss_grad_fixed"] = val_metrics["loss_grad"]
+                        wb["val/loss_bg_mean_fixed"] = val_metrics["loss_bg_mean"]
+                        wb["val/loss_bg_std_fixed"] = val_metrics["loss_bg_std"]
                 if args.wandb_log_detailed:
                     mask_total = max(1, sum(mask_type_counts.values()))
                     wb.update(
@@ -867,6 +1002,8 @@ def train(args: argparse.Namespace) -> None:
                             "train/loss_unmasked": epoch_metrics["loss_unmasked"],
                             "train/loss_ssim": epoch_metrics["loss_ssim"],
                             "train/loss_grad": epoch_metrics["loss_grad"],
+                            "train/loss_bg_mean": epoch_metrics["loss_bg_mean"],
+                            "train/loss_bg_std": epoch_metrics["loss_bg_std"],
                             "train/samples": epoch_metrics["samples"],
                             "train/epoch_time_sec": epoch_metrics["epoch_time_sec"],
                             "train/mask_count_random": mask_type_counts["random"],
@@ -898,18 +1035,33 @@ def train(args: argparse.Namespace) -> None:
             last_path = out_dir / "last_reconstruction.pt"
             torch.save(ckpt, last_path)
 
-            score = (
-                val_metrics["loss_masked"]
-                if val_metrics is not None
-                else epoch_metrics["loss_masked"]
-            )
+            if val_metrics is not None:
+                score = (
+                    val_metrics["loss_total"]
+                    if args.model_selection == "total"
+                    else val_metrics["loss_masked"]
+                )
+            else:
+                score = (
+                    epoch_metrics["loss_total"]
+                    if args.model_selection == "total"
+                    else epoch_metrics["loss_masked"]
+                )
             if score < best_loss:
                 best_loss = score
                 torch.save(ckpt, out_dir / "best_reconstruction.pt")
                 if wandb_run is not None:
                     wandb_run.summary["best_score"] = float(best_loss)
                     wandb_run.summary["best_score_name"] = (
-                        "val/loss_masked_fixed" if val_metrics is not None else "train/loss_masked"
+                        (
+                            "val/loss_total_fixed"
+                            if (val_metrics is not None and args.model_selection == "total")
+                            else "val/loss_masked_fixed"
+                        )
+                        if val_metrics is not None
+                        else (
+                            "train/loss_total" if args.model_selection == "total" else "train/loss_masked"
+                        )
                     )
                     wandb_run.summary["best_epoch"] = int(epoch)
 
@@ -975,6 +1127,11 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--source-snr-threshold", type=float, default=2.0)
     parser.add_argument("--ssim-weight", type=float, default=0.10)
     parser.add_argument("--grad-weight", type=float, default=0.05)
+    parser.add_argument("--flux-loss-weight", type=float, default=0.0)
+    parser.add_argument("--bg-stat-loss-weight", type=float, default=0.0)
+    parser.add_argument("--bg-snr-threshold", type=float, default=1.5)
+    parser.add_argument("--flux-min-pixels", type=float, default=16.0)
+    parser.add_argument("--bg-min-pixels", type=float, default=128.0)
     parser.add_argument("--predict-noise-units", dest="predict_noise_units", action="store_true")
     parser.add_argument("--predict-raw-target", dest="predict_noise_units", action="store_false")
     parser.set_defaults(predict_noise_units=True)
@@ -989,6 +1146,13 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--val-batch-size", type=int, default=1)
     parser.add_argument("--val-num-workers", type=int, default=0)
     parser.add_argument("--val-seed", type=int, default=12345)
+    parser.add_argument(
+        "--model-selection",
+        type=str,
+        default="masked",
+        choices=["masked", "total"],
+        help="Metric used to choose best checkpoint (masked=masked L1, total=full weighted objective).",
+    )
 
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", type=str, default="")
