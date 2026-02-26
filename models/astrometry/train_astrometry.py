@@ -32,7 +32,7 @@ if str(SCRIPT_DIR) not in sys.path:
 from jaisp_dataset_v4 import ALL_BANDS
 from jaisp_foundation_v5 import JAISPFoundationV5
 
-from head import AstrometryConcordanceHead, PIXEL_SCALES, interpolate_tokens
+from head import AstrometryConcordanceHead
 from dataset import make_astrometry_loader
 from offsets import apply_offset_to_image, resample_offset_to_grid
 
@@ -73,7 +73,7 @@ def load_backbone(device, checkpoint_path, embed_dim, proj_dim, depth, patch_siz
 # ---------------------------------------------------------------------------
 
 def encode_band(backbone, image, rms, band, device, freeze):
-    """Encode a single band, return tokens + grid size."""
+    """Encode a single band, return stem features + tokens + token-grid size."""
     image = image.unsqueeze(0).to(device)  # [1, 1, H, W]
     rms = rms.unsqueeze(0).to(device)
     if freeze:
@@ -83,7 +83,7 @@ def encode_band(backbone, image, rms, band, device, freeze):
     else:
         feat = backbone.stems[band](image, rms)
         tokens, grid_size = backbone.encoder(feat)
-    return tokens, grid_size
+    return feat, tokens, grid_size
 
 
 # ---------------------------------------------------------------------------
@@ -236,6 +236,11 @@ def train(args):
         refine_hidden=args.refine_hidden,
         refine_depth=args.refine_depth,
         patch_size=args.patch_size,
+        use_stem_refine=args.use_stem_refine,
+        stem_channels=args.stem_channels,
+        stem_hidden=args.stem_hidden,
+        stem_depth=args.stem_depth,
+        stem_stride=args.stem_stride,
     ).to(device)
 
     n_params = sum(p.numel() for p in head.parameters())
@@ -302,11 +307,11 @@ def train(args):
                     )  # [1, 1, H_r, W_r]
 
                     # Encode both bands.
-                    rubin_tokens, rubin_grid = encode_band(
+                    rubin_feat, rubin_tokens, rubin_grid = encode_band(
                         backbone, rubin_shifted.squeeze(0), rubin_rms,
                         rubin_band, device, freeze=True,
                     )
-                    vis_tokens, vis_grid = encode_band(
+                    vis_feat, vis_tokens, vis_grid = encode_band(
                         backbone, vis_img, vis_rms,
                         "euclid_VIS", device, freeze=True,
                     )
@@ -320,6 +325,8 @@ def train(args):
                         vis_grid=vis_grid,
                         vis_image_hw=(H_vis, W_vis),
                         vis_pixel_scale=vis_pixel_scale,
+                        rubin_stem=rubin_feat if args.use_stem_refine else None,
+                        vis_stem=vis_feat if args.use_stem_refine else None,
                     )
 
                     # Ground truth on the same grid as predictions.
@@ -440,7 +447,7 @@ def build_parser():
 
     p.add_argument("--rubin-dir", type=str, required=True)
     p.add_argument("--euclid-dir", type=str, required=True)
-    p.add_argument("--output-dir", type=str, default="checkpoints/jaisp_astrometry")
+    p.add_argument("--output-dir", type=str, default="models/checkpoints/jaisp_astrometry")
     p.add_argument("--backbone-ckpt", type=str, default="models/checkpoints/jaisp_v5/best.pt")
 
     p.add_argument("--epochs", type=int, default=50)
@@ -459,6 +466,16 @@ def build_parser():
     p.add_argument("--softmax-temp", type=float, default=0.1)
     p.add_argument("--refine-hidden", type=int, default=32)
     p.add_argument("--refine-depth", type=int, default=4)
+    p.add_argument("--use-stem-refine", action="store_true",
+                   help="Add higher-resolution residual refinement from stem features.")
+    p.add_argument("--stem-channels", type=int, default=64,
+                   help="Stem feature channel count (must match backbone stem output).")
+    p.add_argument("--stem-hidden", type=int, default=32,
+                   help="Hidden width for stem residual refiner CNN.")
+    p.add_argument("--stem-depth", type=int, default=4,
+                   help="Depth for stem residual refiner CNN.")
+    p.add_argument("--stem-stride", type=int, default=4,
+                   help="Output stride (in VIS pixels) for stem-space refinement grid.")
 
     p.add_argument("--max-offset", type=float, default=0.5,
                    help="Max synthetic offset amplitude in arcseconds")

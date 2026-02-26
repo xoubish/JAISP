@@ -74,6 +74,11 @@ def load_head(device, args):
         refine_hidden=head_args.get("refine_hidden", 32),
         refine_depth=head_args.get("refine_depth", 4),
         patch_size=head_args.get("patch_size", args.patch_size),
+        use_stem_refine=head_args.get("use_stem_refine", False),
+        stem_channels=head_args.get("stem_channels", 64),
+        stem_hidden=head_args.get("stem_hidden", 32),
+        stem_depth=head_args.get("stem_depth", 4),
+        stem_stride=head_args.get("stem_stride", 4),
     ).to(device)
     head.load_state_dict(ckpt["head"])
     head.eval()
@@ -86,7 +91,7 @@ def encode_band(backbone, image, rms, band, device):
     with torch.no_grad():
         feat = backbone.stems[band](image, rms)
         tokens, grid_size = backbone.encoder(feat)
-    return tokens, grid_size
+    return feat, tokens, grid_size
 
 
 @torch.no_grad()
@@ -114,8 +119,8 @@ def predict_tile(
     vis_t = torch.from_numpy(vis_img[None].copy()).float().to(device)
     vis_rms_t = torch.from_numpy(vis_rms[None].copy()).float().to(device)
 
-    rubin_tokens, rubin_grid = encode_band(backbone, rubin_t, rubin_rms_t, rubin_band, device)
-    vis_tokens, vis_grid = encode_band(backbone, vis_t, vis_rms_t, "euclid_VIS", device)
+    rubin_feat, rubin_tokens, rubin_grid = encode_band(backbone, rubin_t, rubin_rms_t, rubin_band, device)
+    vis_feat, vis_tokens, vis_grid = encode_band(backbone, vis_t, vis_rms_t, "euclid_VIS", device)
 
     H_vis, W_vis = vis_img.shape[-2], vis_img.shape[-1]
     out = head(
@@ -126,6 +131,8 @@ def predict_tile(
         vis_image_hw=(H_vis, W_vis),
         vis_pixel_scale=PIXEL_SCALES["euclid_VIS"],
         mesh_step=dstep,
+        rubin_stem=rubin_feat,
+        vis_stem=vis_feat,
     )
 
     return {
@@ -145,7 +152,7 @@ def make_concordance_hdu(
     rubin_band: str,
     tile_id: str,
     vis_wcs_header=None,
-) -> fits.ImageHDU:
+) -> "fits.ImageHDU":
     """Create a FITS ImageHDU for a concordance offset field."""
     hdu = fits.ImageHDU(data=data.astype(np.float32), name=extname)
     hdu.header["DSTEP"] = (dstep, "Mesh sampling step in VIS pixels")
@@ -246,6 +253,11 @@ def main():
     parser.add_argument("--depth", type=int, default=6)
     parser.add_argument("--patch-size", type=int, default=16)
     parser.add_argument("--search-radius", type=int, default=3)
+    parser.add_argument("--use-stem-refine", action="store_true")
+    parser.add_argument("--stem-channels", type=int, default=64)
+    parser.add_argument("--stem-hidden", type=int, default=32)
+    parser.add_argument("--stem-depth", type=int, default=4)
+    parser.add_argument("--stem-stride", type=int, default=4)
     parser.add_argument("--device", type=str, default="")
     args = parser.parse_args()
 

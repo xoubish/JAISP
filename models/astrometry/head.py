@@ -182,6 +182,51 @@ class SmoothRefineNet(nn.Module):
         return self.net(x)
 
 
+class StemResidualRefineNet(nn.Module):
+    """
+    Refine coarse offsets using stem features at a higher-resolution grid.
+
+    Inputs:
+      - rubin_feat: [B, C, H, W] Rubin stem features (resampled to common grid)
+      - vis_feat:   [B, C, H, W] VIS stem features (resampled to common grid)
+      - coarse_dra: [B, 1, H, W] coarse ΔRA* in arcsec
+      - coarse_ddec:[B, 1, H, W] coarse ΔDec in arcsec
+
+    Output:
+      - residual: [B, 2, H, W] additive correction in arcsec
+    """
+
+    def __init__(self, stem_channels: int = 64, hidden: int = 32, depth: int = 4):
+        super().__init__()
+        in_ch = 3 * stem_channels + 2  # rubin, vis, difference, coarse dra/ddec
+        layers = [nn.Conv2d(in_ch, hidden, 3, padding=1), nn.GELU()]
+        for _ in range(depth - 2):
+            layers += [nn.Conv2d(hidden, hidden, 3, padding=1), nn.GELU()]
+        layers += [nn.Conv2d(hidden, 2, 3, padding=1)]
+        self.net = nn.Sequential(*layers)
+        self._init_weights()
+
+    def _init_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, nonlinearity="linear")
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+        # Keep initial behavior close to coarse prediction.
+        nn.init.zeros_(self.net[-1].weight)
+        nn.init.zeros_(self.net[-1].bias)
+
+    def forward(
+        self,
+        rubin_feat: torch.Tensor,
+        vis_feat: torch.Tensor,
+        coarse_dra: torch.Tensor,
+        coarse_ddec: torch.Tensor,
+    ) -> torch.Tensor:
+        x = torch.cat([rubin_feat, vis_feat, rubin_feat - vis_feat, coarse_dra, coarse_ddec], dim=1)
+        return self.net(x)
+
+
 # ---------------------------------------------------------------------------
 # Main head
 # ---------------------------------------------------------------------------
@@ -204,11 +249,18 @@ class AstrometryConcordanceHead(nn.Module):
         refine_depth: int = 4,
         patch_size: int = 16,
         learnable_temperature: bool = True,
+        use_stem_refine: bool = False,
+        stem_channels: int = 64,
+        stem_hidden: int = 32,
+        stem_depth: int = 4,
+        stem_stride: int = 4,
     ):
         super().__init__()
         self.embed_dim = embed_dim
         self.search_radius = search_radius
         self.patch_size = patch_size
+        self.use_stem_refine = bool(use_stem_refine)
+        self.stem_stride = max(1, int(stem_stride))
         S = 2 * search_radius + 1
 
         # Learnable temperature for soft-argmax.
@@ -223,6 +275,13 @@ class AstrometryConcordanceHead(nn.Module):
             hidden=refine_hidden,
             depth=refine_depth,
         )
+        self.stem_refine = None
+        if self.use_stem_refine:
+            self.stem_refine = StemResidualRefineNet(
+                stem_channels=stem_channels,
+                hidden=stem_hidden,
+                depth=stem_depth,
+            )
 
     @property
     def temperature(self) -> torch.Tensor:
@@ -237,6 +296,8 @@ class AstrometryConcordanceHead(nn.Module):
         vis_image_hw: Tuple[int, int],
         vis_pixel_scale: float = 0.1,
         mesh_step: Optional[int] = None,
+        rubin_stem: Optional[torch.Tensor] = None,
+        vis_stem: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
         """
         Args:
@@ -248,6 +309,8 @@ class AstrometryConcordanceHead(nn.Module):
             vis_pixel_scale: arcsec/pixel for VIS (default 0.1)
             mesh_step:    if set, upsample output to this mesh spacing in VIS pixels
                           (e.g. mesh_step=8 → output every 8 VIS pixels)
+            rubin_stem: optional Rubin stem feature map [B, C, H_r, W_r]
+            vis_stem: optional VIS stem feature map [B, C, H_v, W_v]
 
         Returns:
             dict with:
@@ -291,6 +354,24 @@ class AstrometryConcordanceHead(nn.Module):
         dra = refined_offsets[:, 1:2] * sky_per_token_x    # dx → ΔRA*
         ddec = refined_offsets[:, 0:1] * sky_per_token_y    # dy → ΔDec
 
+        # --- Optional high-resolution residual refinement in stem feature space ---
+        stem_residual = None
+        if self.use_stem_refine:
+            if rubin_stem is None or vis_stem is None:
+                raise ValueError("use_stem_refine=True requires rubin_stem and vis_stem inputs.")
+
+            refine_h = max(1, H_vis // self.stem_stride)
+            refine_w = max(1, W_vis // self.stem_stride)
+            rubin_refine = F.interpolate(rubin_stem, size=(refine_h, refine_w), mode="bilinear", align_corners=False)
+            vis_refine = F.interpolate(vis_stem, size=(refine_h, refine_w), mode="bilinear", align_corners=False)
+
+            coarse_dra = F.interpolate(dra, size=(refine_h, refine_w), mode="bilinear", align_corners=False)
+            coarse_ddec = F.interpolate(ddec, size=(refine_h, refine_w), mode="bilinear", align_corners=False)
+
+            stem_residual = self.stem_refine(rubin_refine, vis_refine, coarse_dra, coarse_ddec)
+            dra = coarse_dra + stem_residual[:, 0:1]
+            ddec = coarse_ddec + stem_residual[:, 1:2]
+
         # --- Optional mesh upsampling ---
         if mesh_step is not None and mesh_step > 0:
             mesh_h = max(1, H_vis // mesh_step)
@@ -306,4 +387,5 @@ class AstrometryConcordanceHead(nn.Module):
             "confidence": confidence,
             "corr_volume": corr,
             "refined_offsets_tokens": refined_offsets,
+            "stem_residual": stem_residual,
         }

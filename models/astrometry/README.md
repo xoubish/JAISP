@@ -30,6 +30,9 @@ Rubin band tokens [B, N_r, D]     VIS tokens [B, N_v, D]
                        │
           ΔRA*, ΔDec [B, 1, H, W]
                        │
+     optional stem-space residual refine
+     (higher resolution, configurable stride)
+                       │
          optional mesh upsample (DSTEP)
 ```
 
@@ -38,6 +41,7 @@ Key design choices:
 - **Soft-argmax** provides differentiable sub-pixel precision from the correlation peak.
 - **Learnable temperature** controls the sharpness of the soft-argmax peak, adapting to the correlation landscape.
 - **Large-kernel refinement CNN** (5×5 convolutions) enforces spatial smoothness — astrometric distortions are low-frequency by nature.
+- **Optional stem-space refinement** adds a higher-resolution residual correction using native stem feature maps from Rubin and VIS.
 - **Smoothness loss** explicitly penalizes high-frequency structure in the predicted field.
 
 ## Self-Supervised Training
@@ -61,6 +65,7 @@ A curriculum ramps offset complexity: constant → affine → smooth sinusoidal 
 | `dataset.py` | `AstrometryDataset` — always pairs Rubin band with VIS |
 | `train_astrometry.py` | Training loop with curriculum + wandb logging |
 | `export_fits.py` | Inference + FITS export following concordance spec |
+| `run_posttrain_checks.py` | One-call single-tile export + eval(+1/-1) + summary |
 
 ## Quick Start
 
@@ -70,11 +75,25 @@ A curriculum ramps offset complexity: constant → affine → smooth sinusoidal 
 python3 models/astrometry/train_astrometry.py \
     --rubin-dir data/rubin_tiles_ecdfs \
     --euclid-dir data/euclid_tiles_ecdfs \
-    --backbone-ckpt checkpoints/jaisp_v5/best.pt \
-    --output-dir checkpoints/jaisp_astrometry \
+    --backbone-ckpt models/checkpoints/jaisp_v5/best.pt \
+    --output-dir models/checkpoints/jaisp_astrometry \
     --epochs 50 \
     --batch-size 2 \
     --max-offset 0.5
+```
+
+### Train With Stem-Space Refinement
+
+```bash
+python3 models/astrometry/train_astrometry.py \
+    --rubin-dir data/rubin_tiles_ecdfs \
+    --euclid-dir data/euclid_tiles_ecdfs \
+    --backbone-ckpt models/checkpoints/jaisp_v5/best.pt \
+    --output-dir models/checkpoints/jaisp_astrometry_stem \
+    --epochs 50 \
+    --batch-size 2 \
+    --use-stem-refine \
+    --stem-stride 2
 ```
 
 ### Smoke test
@@ -83,8 +102,8 @@ python3 models/astrometry/train_astrometry.py \
 python3 models/astrometry/train_astrometry.py \
     --rubin-dir data/rubin_tiles_ecdfs \
     --euclid-dir data/euclid_tiles_ecdfs \
-    --backbone-ckpt checkpoints/jaisp_v5/best.pt \
-    --output-dir checkpoints/jaisp_astrometry_smoke \
+    --backbone-ckpt models/checkpoints/jaisp_v5/best.pt \
+    --output-dir models/checkpoints/jaisp_astrometry_smoke \
     --epochs 3 \
     --batch-size 1 \
     --num-workers 0 \
@@ -95,12 +114,83 @@ python3 models/astrometry/train_astrometry.py \
 
 ```bash
 python3 models/astrometry/export_fits.py \
-    --backbone-ckpt checkpoints/jaisp_v5/best.pt \
-    --head-ckpt checkpoints/jaisp_astrometry/best_astrometry.pt \
+    --backbone-ckpt models/checkpoints/jaisp_v5/best.pt \
+    --head-ckpt models/checkpoints/jaisp_astrometry/best_astrometry.pt \
     --rubin-dir data/rubin_tiles_ecdfs \
     --euclid-dir data/euclid_tiles_ecdfs \
     --output concordance_ecdfs.fits \
     --dstep 8
+```
+
+### One-Call Post-Train Sanity Check
+
+Runs single-tile export and both sign conventions (`+1`, `-1`) automatically.
+
+```bash
+python3 models/astrometry/run_posttrain_checks.py \
+    --head-ckpt models/checkpoints/jaisp_astrometry_50ep/best_astrometry.pt
+```
+
+If `--head-ckpt` is omitted, it auto-selects the most recently modified
+`models/checkpoints/jaisp_astrometry*/best_astrometry.pt`.
+
+Outputs are written to `models/checkpoints/astrometry_postcheck/`:
+- `concordance_*.fits`
+- `eval_*_signp1.json`
+- `eval_*_signm1.json`
+- `summary_*.json`
+
+Notebook shortcut: `models/astrometry/inspect_concordance_fits.ipynb` now includes a
+`Post-Train Auto Check` section that runs this script and loads the latest summary.
+
+### Evaluate Matched-Source Residuals (mas)
+
+Use this to compare your robust source-matching baseline against concordance-corrected positions.
+It reports one-to-one greedy matches, MAD-clipped metrics, and centered scatter metrics in mas.
+When concordance is applied, it now also reports a **fixed-pair** view (same before-match pairs,
+then before/after offsets on those exact pairs) to reduce rematching bias.
+
+```bash
+python3 models/astrometry/evaluate_catalog_astrometry.py \
+    --ref-catalog path/to/euclid_vis_sources.fits \
+    --cand-catalog path/to/rubin_r_sources.fits \
+    --ref-ra-col ra --ref-dec-col dec \
+    --cand-ra-col ra --cand-dec-col dec \
+    --max-sep-arcsec 0.1 \
+    --clip-sigma 3.5
+```
+
+No external source catalogs needed (auto-detect from tile images):
+
+```bash
+python3 models/astrometry/evaluate_catalog_astrometry.py \
+    --auto-from-tiles \
+    --rubin-tile data/rubin_tiles_ecdfs/tile_x00000_y00000.npz \
+    --euclid-tile data/euclid_tiles_ecdfs/tile_x00000_y00000_euclid.npz \
+    --rubin-band r \
+    --euclid-band VIS \
+    --concordance-fits concordance_ecdfs.fits \
+    --max-sep-arcsec 0.1 \
+    --clip-sigma 3.5 \
+    --output-json models/checkpoints/astrometry_eval_auto_r.json
+```
+
+With concordance correction from FITS:
+
+```bash
+python3 models/astrometry/evaluate_catalog_astrometry.py \
+    --ref-catalog path/to/euclid_vis_sources.fits \
+    --cand-catalog path/to/rubin_r_sources_with_xy.fits \
+    --ref-ra-col ra --ref-dec-col dec \
+    --cand-ra-col ra --cand-dec-col dec \
+    --cand-x-col x --cand-y-col y \
+    --concordance-fits concordance_ecdfs.fits \
+    --tile-id tile_x00000_y00000 \
+    --band-key r \
+    --xy-space vis \
+    --max-sep-arcsec 0.1 \
+    --clip-sigma 3.5 \
+    --output-json models/checkpoints/astrometry_eval_r.json
 ```
 
 ## Key Arguments
@@ -112,6 +202,8 @@ python3 models/astrometry/export_fits.py \
 | `--softmax-temp` | 0.1 | Initial temperature (learnable) |
 | `--smooth-weight` | 0.1 | Gradient penalty weight on predicted field |
 | `--curriculum-epochs` | 10 | Ramp from constant → smooth offsets |
+| `--use-stem-refine` | off | Enable higher-resolution residual correction from stem features |
+| `--stem-stride` | 4 | VIS-pixel stride of stem-refinement grid (1 = native VIS resolution) |
 | `--dstep` | 8 | Mesh sampling in VIS pixels for FITS export |
 
 ## Metrics
