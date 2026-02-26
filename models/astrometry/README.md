@@ -65,7 +65,6 @@ A curriculum ramps offset complexity: constant → affine → smooth sinusoidal 
 | `dataset.py` | `AstrometryDataset` — always pairs Rubin band with VIS |
 | `train_astrometry.py` | Training loop with curriculum + wandb logging |
 | `export_fits.py` | Inference + FITS export following concordance spec |
-| `run_posttrain_checks.py` | One-call single-tile export + eval(+1/-1) + summary |
 
 ## Quick Start
 
@@ -122,76 +121,11 @@ python3 models/astrometry/export_fits.py \
     --dstep 8
 ```
 
-### One-Call Post-Train Sanity Check
+### Evaluate in Notebook
 
-Runs single-tile export and both sign conventions (`+1`, `-1`) automatically.
-
-```bash
-python3 models/astrometry/run_posttrain_checks.py \
-    --head-ckpt models/checkpoints/jaisp_astrometry_50ep/best_astrometry.pt
-```
-
-If `--head-ckpt` is omitted, it auto-selects the most recently modified
-`models/checkpoints/jaisp_astrometry*/best_astrometry.pt`.
-
-Outputs are written to `models/checkpoints/astrometry_postcheck/`:
-- `concordance_*.fits`
-- `eval_*_signp1.json`
-- `eval_*_signm1.json`
-- `summary_*.json`
-
-Notebook shortcut: `models/astrometry/inspect_concordance_fits.ipynb` now includes a
-`Post-Train Auto Check` section that runs this script and loads the latest summary.
-
-### Evaluate Matched-Source Residuals (mas)
-
-Use this to compare your robust source-matching baseline against concordance-corrected positions.
-It reports one-to-one greedy matches, MAD-clipped metrics, and centered scatter metrics in mas.
-When concordance is applied, it now also reports a **fixed-pair** view (same before-match pairs,
-then before/after offsets on those exact pairs) to reduce rematching bias.
-
-```bash
-python3 models/astrometry/evaluate_catalog_astrometry.py \
-    --ref-catalog path/to/euclid_vis_sources.fits \
-    --cand-catalog path/to/rubin_r_sources.fits \
-    --ref-ra-col ra --ref-dec-col dec \
-    --cand-ra-col ra --cand-dec-col dec \
-    --max-sep-arcsec 0.1 \
-    --clip-sigma 3.5
-```
-
-No external source catalogs needed (auto-detect from tile images):
-
-```bash
-python3 models/astrometry/evaluate_catalog_astrometry.py \
-    --auto-from-tiles \
-    --rubin-tile data/rubin_tiles_ecdfs/tile_x00000_y00000.npz \
-    --euclid-tile data/euclid_tiles_ecdfs/tile_x00000_y00000_euclid.npz \
-    --rubin-band r \
-    --euclid-band VIS \
-    --concordance-fits concordance_ecdfs.fits \
-    --max-sep-arcsec 0.1 \
-    --clip-sigma 3.5 \
-    --output-json models/checkpoints/astrometry_eval_auto_r.json
-```
-
-With concordance correction from FITS:
-
-```bash
-python3 models/astrometry/evaluate_catalog_astrometry.py \
-    --ref-catalog path/to/euclid_vis_sources.fits \
-    --cand-catalog path/to/rubin_r_sources_with_xy.fits \
-    --ref-ra-col ra --ref-dec-col dec \
-    --cand-ra-col ra --cand-dec-col dec \
-    --cand-x-col x --cand-y-col y \
-    --concordance-fits concordance_ecdfs.fits \
-    --tile-id tile_x00000_y00000 \
-    --band-key r \
-    --xy-space vis \
-    --max-sep-arcsec 0.1 \
-    --clip-sigma 3.5 \
-    --output-json models/checkpoints/astrometry_eval_r.json
-```
+Use `models/astrometry/inspect_concordance_fits.ipynb` for post-train evaluation and visual QA.
+The notebook runs the full evaluator flow directly (including sign sweep and fixed-pair metrics),
+so no standalone evaluation command is needed.
 
 ## Key Arguments
 
