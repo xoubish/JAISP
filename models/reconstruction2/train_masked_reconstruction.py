@@ -617,6 +617,7 @@ def evaluate_fixed_validation(
                     context_bands=context_bands,
                     device=device,
                     freeze_backbone=args.freeze_backbone,
+                    train_context_backbone=args.train_context_backbone,
                     use_projector_tokens=args.use_projector_tokens,
                 )
 
@@ -714,6 +715,10 @@ def evaluate_fixed_validation(
 def train(args: argparse.Namespace) -> None:
     seed_everything(args.seed)
 
+    if args.freeze_backbone and args.train_context_backbone:
+        print("Ignoring --train-context-backbone because backbone is frozen.")
+        args.train_context_backbone = False
+
     device = torch.device(args.device if args.device else ("cuda" if torch.cuda.is_available() else "cpu"))
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -774,6 +779,10 @@ def train(args: argparse.Namespace) -> None:
     else:
         backbone.eval()
         print("Backbone is trainable (eval mode kept to stabilize BN with small batch sizes).")
+        print(
+            "Backbone grad paths: "
+            f"target={'on'} | context={'on' if args.train_context_backbone else 'off (memory-saving default)'}"
+        )
 
     param_groups = [{"params": head.parameters(), "lr": args.lr}]
     if not args.freeze_backbone:
@@ -918,6 +927,7 @@ def train(args: argparse.Namespace) -> None:
                         context_bands=context_bands,
                         device=device,
                         freeze_backbone=args.freeze_backbone,
+                        train_context_backbone=args.train_context_backbone,
                         use_projector_tokens=args.use_projector_tokens,
                     )
 
@@ -1226,8 +1236,16 @@ def train(args: argparse.Namespace) -> None:
 def build_argparser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Train JAISP masked reconstruction head (multi-band k->1).")
 
-    parser.add_argument("--rubin-dir", type=str, default="../data/rubin_tiles_ecdfs")
-    parser.add_argument("--euclid-dir", type=str, default="../data/euclid_tiles_ecdfs")
+    parser.add_argument(
+        "--rubin-dir",
+        type=str,
+        default=str(MODELS_DIR.parent / "data" / "rubin_tiles_ecdfs"),
+    )
+    parser.add_argument(
+        "--euclid-dir",
+        type=str,
+        default=str(MODELS_DIR.parent / "data" / "euclid_tiles_ecdfs"),
+    )
     parser.add_argument("--output-dir", type=str, default="checkpoints/jaisp_reconstruction")
     parser.add_argument("--backbone-ckpt", type=str, default="checkpoints/jaisp_v5/best.pt")
 
@@ -1257,6 +1275,11 @@ def build_argparser() -> argparse.ArgumentParser:
 
     parser.add_argument("--freeze-backbone", action="store_true", default=True)
     parser.add_argument("--train-backbone", dest="freeze_backbone", action="store_false")
+    parser.add_argument(
+        "--train-context-backbone",
+        action="store_true",
+        help="When --train-backbone is set, also backprop through context-band backbone encodes (higher memory).",
+    )
 
     parser.add_argument("--min-context", type=int, default=1)
     parser.add_argument("--max-context", type=int, default=9)

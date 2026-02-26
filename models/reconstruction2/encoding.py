@@ -22,7 +22,7 @@ def encode_band_with_stem(
     rms: torch.Tensor,
     band: str,
     device: torch.device,
-    freeze_backbone: bool,
+    compute_grad: bool,
     use_projector_tokens: bool,
 ) -> Dict[str, torch.Tensor]:
     """
@@ -36,22 +36,22 @@ def encode_band_with_stem(
     image = image.unsqueeze(0).to(device)    # [1, 1, H, W]
     rms = rms.unsqueeze(0).to(device)
 
-    if freeze_backbone:
+    if compute_grad:
+        stem_feat = backbone.stems[band](image, rms)
+        tokens, grid_size = backbone.encoder(stem_feat)
+        if use_projector_tokens:
+            tokens = backbone.projector(tokens)
+    else:
         with torch.no_grad():
             stem_feat = backbone.stems[band](image, rms)        # [1, 64, H, W]
             tokens, grid_size = backbone.encoder(stem_feat)
             if use_projector_tokens:
                 tokens = backbone.projector(tokens)
-    else:
-        stem_feat = backbone.stems[band](image, rms)
-        tokens, grid_size = backbone.encoder(stem_feat)
-        if use_projector_tokens:
-            tokens = backbone.projector(tokens)
 
     return {
         "tokens": tokens,
         "grid_size": grid_size,
-        "stem_feat": stem_feat.half() if freeze_backbone else stem_feat.detach().half(),
+        "stem_feat": stem_feat.detach().half(),
         # float16 for stem skip connections halves memory (~140MB vs ~280MB per Euclid band).
         # These are detached anyway — no gradients flow through pixel skips.
     }
@@ -67,7 +67,8 @@ def encode_target_and_context_with_stems(
     context_bands: List[str],
     device: torch.device,
     freeze_backbone: bool,
-    use_projector_tokens: bool,
+    train_context_backbone: bool = False,
+    use_projector_tokens: bool = False,
 ) -> Tuple[
     torch.Tensor,           # target_tokens     [1, N, D]
     torch.Tensor,           # context_tokens    [1, K, N, D]
@@ -78,9 +79,12 @@ def encode_target_and_context_with_stems(
     """
     Like the original encode_target_and_context but also returns stem features.
     """
+    target_compute_grad = not bool(freeze_backbone)
+    context_compute_grad = target_compute_grad and bool(train_context_backbone)
+
     tgt = encode_band_with_stem(
         backbone, target_masked, target_rms, target_band,
-        device, freeze_backbone, use_projector_tokens,
+        device, target_compute_grad, use_projector_tokens,
     )
     target_tokens = tgt["tokens"]
     target_grid = tgt["grid_size"]
@@ -92,7 +96,7 @@ def encode_target_and_context_with_stems(
     for img, rms, band in zip(context_images, context_rms, context_bands):
         ctx = encode_band_with_stem(
             backbone, img, rms, str(band),
-            device, freeze_backbone, use_projector_tokens,
+            device, context_compute_grad, use_projector_tokens,
         )
         # Align context tokens to target token grid (same as before).
         ctx_aligned = interpolate_tokens(ctx["tokens"], ctx["grid_size"], target_grid)
