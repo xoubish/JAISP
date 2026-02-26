@@ -37,6 +37,7 @@ class JAISPMultiBandReconstructionDataset(Dataset):
         euclid_dir: str,
         min_context_bands: int = 1,
         max_context_bands: int = 9,
+        context_policy: str = "all",
         augment: bool = True,
         mmap: bool = True,
         seed: int = 42,
@@ -47,10 +48,17 @@ class JAISPMultiBandReconstructionDataset(Dataset):
         self.euclid_dir = Path(euclid_dir)
         self.min_context_bands = int(min_context_bands)
         self.max_context_bands = int(max_context_bands)
+        self.context_policy = str(context_policy)
         self.augment = bool(augment)
         self.mmap = bool(mmap)
         self.rng = np.random.RandomState(seed)
         self.finite_frac_thresh = float(finite_frac_thresh)
+
+        if self.context_policy not in {"all", "same_survey", "rubin_target_rubin_only"}:
+            raise ValueError(
+                "context_policy must be one of: "
+                "all, same_survey, rubin_target_rubin_only"
+            )
 
         rubin_files = sorted(glob.glob(os.path.join(rubin_dir, "tile_x*_y*.npz")))
         self.tile_ids = [os.path.splitext(os.path.basename(p))[0] for p in rubin_files]
@@ -80,11 +88,39 @@ class JAISPMultiBandReconstructionDataset(Dataset):
         print(
             "  context range: "
             f"[{self.min_context_bands}, {self.max_context_bands}], "
+            f"context_policy={self.context_policy}, "
             f"augment={self.augment}, precompute_available={precompute_available}"
         )
 
     def __len__(self) -> int:
         return len(self.pairs)
+
+    @staticmethod
+    def _is_rubin_band(band: str) -> bool:
+        return str(band).startswith("rubin_")
+
+    @staticmethod
+    def _is_euclid_band(band: str) -> bool:
+        return str(band).startswith("euclid_")
+
+    def _filter_context_candidates(self, target_band: str, candidates: List[str]) -> List[str]:
+        if self.context_policy == "all":
+            return list(candidates)
+
+        target_is_rubin = self._is_rubin_band(target_band)
+        target_is_euclid = self._is_euclid_band(target_band)
+
+        if self.context_policy == "rubin_target_rubin_only":
+            if target_is_rubin:
+                return [b for b in candidates if self._is_rubin_band(b)]
+            return list(candidates)
+
+        # same_survey: enforce survey-matched context candidates.
+        if target_is_rubin:
+            return [b for b in candidates if self._is_rubin_band(b)]
+        if target_is_euclid:
+            return [b for b in candidates if self._is_euclid_band(b)]
+        return list(candidates)
 
     def _finite_frac_ok(self, arr: np.ndarray) -> bool:
         frac = np.isfinite(arr).sum() / float(arr.size)
@@ -171,6 +207,7 @@ class JAISPMultiBandReconstructionDataset(Dataset):
 
         target_band = self.rng.choice(available)
         context_candidates = [b for b in available if b != target_band]
+        context_candidates = self._filter_context_candidates(target_band, context_candidates)
         if not context_candidates:
             context_candidates = [target_band]
 

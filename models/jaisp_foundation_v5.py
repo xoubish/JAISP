@@ -69,8 +69,15 @@ class InformationMap(nn.Module):
 # =============================================================================
 
 class BandStem(nn.Module):
-    def __init__(self, out_channels: int = 64):
+    def __init__(
+        self,
+        out_channels: int = 64,
+        clamp_min: float = -10.0,
+        clamp_max: float = 100.0,
+    ):
         super().__init__()
+        self.clamp_min = float(clamp_min)
+        self.clamp_max = float(clamp_max)
         self.net = nn.Sequential(
             nn.Conv2d(1, 32, 5, padding=2),
             nn.BatchNorm2d(32),
@@ -80,9 +87,13 @@ class BandStem(nn.Module):
             nn.GELU(),
         )
 
+    def set_clamp_range(self, clamp_min: float, clamp_max: float) -> None:
+        self.clamp_min = float(clamp_min)
+        self.clamp_max = float(clamp_max)
+
     def forward(self, image: torch.Tensor, rms: torch.Tensor) -> torch.Tensor:
         x = image / (rms + 1e-10)
-        x = x.clamp(-10, 100)  # robust noise-unit range
+        x = x.clamp(self.clamp_min, self.clamp_max)
         return self.net(x)
 
 
@@ -265,6 +276,8 @@ class JAISPFoundationV5(nn.Module):
     def __init__(self,
                  band_names: List[str],
                  stem_ch: int = 64,
+                 stem_clamp_min: float = -10.0,
+                 stem_clamp_max: float = 100.0,
                  embed_dim: int = 256,
                  proj_dim: int = 256,
                  depth: int = 6,
@@ -282,7 +295,16 @@ class JAISPFoundationV5(nn.Module):
             print(f"⚠️  v5 WARNING: shift_px={shift_px} ignored, forcing to 0 for strict position matching")
 
         # Student
-        self.stems = nn.ModuleDict({name: BandStem(stem_ch) for name in self.band_names})
+        self.stems = nn.ModuleDict(
+            {
+                name: BandStem(
+                    stem_ch,
+                    clamp_min=stem_clamp_min,
+                    clamp_max=stem_clamp_max,
+                )
+                for name in self.band_names
+            }
+        )
         self.info_maps = nn.ModuleDict({name: InformationMap() for name in self.band_names})
         self.encoder = SharedEncoder(stem_ch, self.embed_dim, depth, patch_size)
         self.projector = ProjectionHead(self.embed_dim, self.proj_dim)
@@ -306,6 +328,13 @@ class JAISPFoundationV5(nn.Module):
         self.teacher_encoder = copy.deepcopy(self.encoder)
         self.teacher_projector = copy.deepcopy(self.projector)
         self._freeze_teacher()
+
+    def set_stem_clamp_range(self, clamp_min: float, clamp_max: float, include_teacher: bool = False) -> None:
+        for stem in self.stems.values():
+            stem.set_clamp_range(clamp_min, clamp_max)
+        if include_teacher:
+            for stem in self.teacher_stems.values():
+                stem.set_clamp_range(clamp_min, clamp_max)
 
     def _freeze_teacher(self):
         for m in [self.teacher_stems, self.teacher_encoder, self.teacher_projector]:

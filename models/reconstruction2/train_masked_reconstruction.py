@@ -42,6 +42,8 @@ def seed_everything(seed: int) -> None:
 def load_backbone(
     device: torch.device,
     checkpoint_path: str,
+    stem_clamp_min: float,
+    stem_clamp_max: float,
     embed_dim: int,
     proj_dim: int,
     depth: int,
@@ -50,6 +52,8 @@ def load_backbone(
     model = JAISPFoundationV5(
         band_names=ALL_BANDS,
         stem_ch=64,
+        stem_clamp_min=stem_clamp_min,
+        stem_clamp_max=stem_clamp_max,
         embed_dim=embed_dim,
         proj_dim=proj_dim,
         depth=depth,
@@ -65,6 +69,10 @@ def load_backbone(
         print(f"  missing keys: {len(missing)} | unexpected keys: {len(unexpected)}")
     else:
         print("No backbone checkpoint provided; starting from random initialization.")
+
+    # Ensure stem clamp range is controlled by the reconstruction run arguments.
+    model.set_stem_clamp_range(stem_clamp_min, stem_clamp_max, include_teacher=False)
+    print(f"Backbone stem clamp (noise units): [{stem_clamp_min:.2f}, {stem_clamp_max:.2f}]")
 
     return model
 
@@ -107,6 +115,48 @@ def get_epoch_mask_probs(args: argparse.Namespace, epoch: int) -> Dict[str, floa
         "object": target["object"] * scale,
         "hard": hard_now,
     }
+
+
+def _is_rubin_band(band: str) -> bool:
+    return str(band).startswith("rubin_")
+
+
+def _is_euclid_band(band: str) -> bool:
+    return str(band).startswith("euclid_")
+
+
+def _context_allowed(target_band: str, context_band: str, policy: str) -> bool:
+    if policy == "all":
+        return True
+    if policy == "rubin_target_rubin_only":
+        if _is_rubin_band(target_band):
+            return _is_rubin_band(context_band)
+        return True
+    if policy == "same_survey":
+        if _is_rubin_band(target_band):
+            return _is_rubin_band(context_band)
+        if _is_euclid_band(target_band):
+            return _is_euclid_band(context_band)
+        return True
+    raise ValueError(f"Unknown context policy: {policy}")
+
+
+def _filter_context_by_policy(
+    target_band: str,
+    context_images: List[torch.Tensor],
+    context_rms: List[torch.Tensor],
+    context_bands: List[str],
+    policy: str,
+) -> Tuple[List[torch.Tensor], List[torch.Tensor], List[str]]:
+    if policy == "all":
+        return context_images, context_rms, context_bands
+
+    keep = [j for j, b in enumerate(context_bands) if _context_allowed(target_band, str(b), policy)]
+    return (
+        [context_images[j] for j in keep],
+        [context_rms[j] for j in keep],
+        [str(context_bands[j]) for j in keep],
+    )
 
 
 def build_mask_with_seed(
@@ -335,17 +385,39 @@ def build_masked_inputs(
     return target_masked_raw, target_masked_model
 
 
-def _norm_for_display(img_2d: np.ndarray) -> np.ndarray:
+def _compute_display_limits(
+    arrays: List[np.ndarray],
+    low_pct: float = 1.0,
+    high_pct: float = 99.0,
+) -> Tuple[float, float]:
+    chunks = []
+    for arr in arrays:
+        x = np.asarray(arr, dtype=np.float32)
+        finite = x[np.isfinite(x)]
+        if finite.size > 0:
+            chunks.append(finite)
+
+    if not chunks:
+        return 0.0, 1.0
+
+    vals = np.concatenate(chunks, axis=0)
+    lo, hi = np.percentile(vals, [float(low_pct), float(high_pct)])
+    if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
+        lo = float(vals.min())
+        hi = float(vals.max()) if vals.max() > vals.min() else float(vals.min() + 1.0)
+    return float(lo), float(hi)
+
+
+def _norm_for_display(
+    img_2d: np.ndarray,
+    vmin: Optional[float] = None,
+    vmax: Optional[float] = None,
+) -> np.ndarray:
     x = np.asarray(img_2d, dtype=np.float32)
-    finite = x[np.isfinite(x)]
-    if finite.size == 0:
-        return np.zeros_like(x, dtype=np.float32)
-    p1, p99 = np.percentile(finite, [1, 99])
-    if not np.isfinite(p1) or not np.isfinite(p99) or p99 <= p1:
-        p1 = float(finite.min())
-        p99 = float(finite.max()) if finite.max() > finite.min() else float(finite.min() + 1.0)
-    x = np.nan_to_num(x, nan=p1, posinf=p99, neginf=p1)
-    x = np.clip((x - p1) / (p99 - p1 + 1e-8), 0.0, 1.0)
+    if vmin is None or vmax is None:
+        vmin, vmax = _compute_display_limits([x], low_pct=1.0, high_pct=99.0)
+    x = np.nan_to_num(x, nan=float(vmin), posinf=float(vmax), neginf=float(vmin))
+    x = np.clip((x - float(vmin)) / (float(vmax) - float(vmin) + 1e-8), 0.0, 1.0)
     return x
 
 
@@ -375,24 +447,77 @@ def _make_preview_image(preview: Dict, epoch: int):
 
     y0, y1, x0, x1 = _mask_bbox(mask, margin=12)
 
+    # Shared intensity normalization across image-like panels to preserve photometric comparability.
+    full_lo, full_hi = _compute_display_limits([target_raw], low_pct=0.5, high_pct=99.5)
+    zoom_ref = target_raw[y0:y1, x0:x1]
+    zoom_lo, zoom_hi = _compute_display_limits([zoom_ref], low_pct=0.5, high_pct=99.5)
+
+    err_vals = err_raw[mask > 0.5]
+    if err_vals.size > 0:
+        err_scale = float(np.percentile(err_vals, 99.0))
+        if not np.isfinite(err_scale) or err_scale <= 1e-8:
+            err_scale = float(np.max(err_vals))
+    else:
+        err_scale = 1.0
+    if not np.isfinite(err_scale) or err_scale <= 1e-8:
+        err_scale = 1.0
+
+    # Source-only flux ratio map inside the masked area.
+    mask_bool = mask > 0.5
+    src_mask = np.zeros_like(mask_bool, dtype=bool)
+    if np.any(mask_bool):
+        vals = target_raw[mask_bool]
+        vals = vals[np.isfinite(vals)]
+        if vals.size > 32:
+            med = float(np.median(vals))
+            mad = float(np.median(np.abs(vals - med)))
+            sigma = max(1e-6, 1.4826 * mad)
+            thr = med + 3.0 * sigma
+            src_mask = mask_bool & np.isfinite(target_raw) & np.isfinite(pred_raw) & (target_raw > thr)
+        if src_mask.sum() < 8 and vals.size > 0:
+            thr = float(np.percentile(vals, 90.0))
+            src_mask = mask_bool & np.isfinite(target_raw) & np.isfinite(pred_raw) & (target_raw > thr)
+
+    ratio_map = np.full_like(target_raw, np.nan, dtype=np.float32)
+    ratio_map[src_mask] = pred_raw[src_mask] / (target_raw[src_mask] + 1e-8)
+    ratio_vals = ratio_map[src_mask]
+    if ratio_vals.size > 0:
+        ratio_median = float(np.nanmedian(ratio_vals))
+        ratio_title = f"Flux Ratio (src, med={ratio_median:.2f})"
+    else:
+        ratio_title = "Flux Ratio (src, n/a)"
+
     panels = [
-        ("Target", target_raw, "gray"),
-        ("Masked Input", masked_raw, "gray"),
-        ("Token Inpaint", token_raw, "gray"),
-        ("Refined Inpaint", pred_raw, "gray"),
-        ("|Error| in Mask", err_raw, "magma"),
+        ("Target", target_raw, "gray", "shared"),
+        ("Masked Input", masked_raw, "gray", "shared"),
+        ("Token Inpaint", token_raw, "gray", "shared"),
+        ("Refined Inpaint", pred_raw, "gray", "shared"),
+        ("|Error| in Mask", err_raw, "magma", "error"),
+        (ratio_title, ratio_map, "coolwarm", "ratio"),
     ]
 
-    fig, axes = plt.subplots(2, 5, figsize=(18, 7))
-    for c, (title, arr, cmap) in enumerate(panels):
-        arr_full = _norm_for_display(arr)
-        arr_zoom = _norm_for_display(arr[y0:y1, x0:x1])
+    fig, axes = plt.subplots(2, len(panels), figsize=(3.3 * len(panels), 7))
+    for c, (title, arr, cmap, mode) in enumerate(panels):
+        if mode == "shared":
+            arr_full = _norm_for_display(arr, vmin=full_lo, vmax=full_hi)
+            arr_zoom = _norm_for_display(arr[y0:y1, x0:x1], vmin=zoom_lo, vmax=zoom_hi)
+            axes[0, c].imshow(arr_full, cmap=cmap, vmin=0.0, vmax=1.0)
+            axes[1, c].imshow(arr_zoom, cmap=cmap, vmin=0.0, vmax=1.0)
+        elif mode == "error":
+            arr_full = np.clip(arr / (err_scale + 1e-8), 0.0, 1.0)
+            arr_zoom = np.clip(arr[y0:y1, x0:x1] / (err_scale + 1e-8), 0.0, 1.0)
+            axes[0, c].imshow(arr_full, cmap=cmap, vmin=0.0, vmax=1.0)
+            axes[1, c].imshow(arr_zoom, cmap=cmap, vmin=0.0, vmax=1.0)
+        elif mode == "ratio":
+            ratio_cmap = plt.get_cmap(cmap).copy()
+            ratio_cmap.set_bad(color="black")
+            axes[0, c].imshow(arr, cmap=ratio_cmap, vmin=0.5, vmax=1.5)
+            axes[1, c].imshow(arr[y0:y1, x0:x1], cmap=ratio_cmap, vmin=0.5, vmax=1.5)
+        else:
+            raise ValueError(f"Unknown preview mode: {mode}")
 
-        axes[0, c].imshow(arr_full, cmap=cmap)
         axes[0, c].set_title(title, fontsize=10)
         axes[0, c].axis("off")
-
-        axes[1, c].imshow(arr_zoom, cmap=cmap)
         axes[1, c].set_title(f"{title} (masked zoom)", fontsize=10)
         axes[1, c].axis("off")
 
@@ -458,6 +583,13 @@ def evaluate_fixed_validation(
                 context_images = [x.float().to(device) for x in batch["context_images"][i]]
                 context_rms = [x.float().to(device) for x in batch["context_rms"][i]]
                 context_bands = [str(x) for x in batch["context_bands"][i]]
+                context_images, context_rms, context_bands = _filter_context_by_policy(
+                    target_band=target_band,
+                    context_images=context_images,
+                    context_rms=context_rms,
+                    context_bands=context_bands,
+                    policy=args.context_policy,
+                )
                 valid = [j for j, b in enumerate(context_bands) if b in backbone.band_names]
                 if not valid:
                     continue
@@ -597,6 +729,7 @@ def train(args: argparse.Namespace) -> None:
         seed=args.seed,
         min_context_bands=args.min_context,
         max_context_bands=args.max_context,
+        context_policy=args.context_policy,
     )
     _, val_loader = make_reconstruction_loader(
         rubin_dir=args.rubin_dir,
@@ -609,11 +742,14 @@ def train(args: argparse.Namespace) -> None:
         seed=args.val_seed,
         min_context_bands=args.min_context,
         max_context_bands=args.max_context,
+        context_policy=args.context_policy,
     )
 
     backbone = load_backbone(
         device=device,
         checkpoint_path=args.backbone_ckpt,
+        stem_clamp_min=args.stem_clamp_min,
+        stem_clamp_max=args.stem_clamp_max,
         embed_dim=args.embed_dim,
         proj_dim=args.proj_dim,
         depth=args.depth,
@@ -657,7 +793,8 @@ def train(args: argparse.Namespace) -> None:
     print(f"Device: {device}")
     print(f"Tiles: {len(dataset)}, steps/epoch: {len(loader)}")
     print(
-        f"Context bands per sample: [{args.min_context}, {args.max_context}] | "
+        f"Context bands per sample: [{args.min_context}, {args.max_context}] "
+        f"(policy={args.context_policy}) | "
         "target mask mix random/object/hard = "
         f"{target_mask_probs['random']:.2f}/{target_mask_probs['object']:.2f}/{target_mask_probs['hard']:.2f}"
     )
@@ -746,6 +883,13 @@ def train(args: argparse.Namespace) -> None:
                     context_images = [x.float().to(device) for x in batch["context_images"][i]]
                     context_rms = [x.float().to(device) for x in batch["context_rms"][i]]
                     context_bands = [str(x) for x in batch["context_bands"][i]]
+                    context_images, context_rms, context_bands = _filter_context_by_policy(
+                        target_band=target_band,
+                        context_images=context_images,
+                        context_rms=context_rms,
+                        context_bands=context_bands,
+                        policy=args.context_policy,
+                    )
 
                     valid = [j for j, b in enumerate(context_bands) if b in backbone.band_names]
                     if not valid:
@@ -1116,6 +1260,12 @@ def build_argparser() -> argparse.ArgumentParser:
 
     parser.add_argument("--min-context", type=int, default=1)
     parser.add_argument("--max-context", type=int, default=9)
+    parser.add_argument(
+        "--context-policy",
+        type=str,
+        default="all",
+        choices=["all", "same_survey", "rubin_target_rubin_only"],
+    )
 
     parser.add_argument("--mask-random", type=float, default=0.50)
     parser.add_argument("--mask-object", type=float, default=0.40)
@@ -1135,6 +1285,8 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--predict-noise-units", dest="predict_noise_units", action="store_true")
     parser.add_argument("--predict-raw-target", dest="predict_noise_units", action="store_false")
     parser.set_defaults(predict_noise_units=True)
+    parser.add_argument("--stem-clamp-min", type=float, default=-10.0)
+    parser.add_argument("--stem-clamp-max", type=float, default=100.0)
     parser.add_argument("--target-clamp-min", type=float, default=-10.0)
     parser.add_argument("--target-clamp-max", type=float, default=100.0)
     parser.add_argument("--save-every", type=int, default=5)
