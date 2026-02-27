@@ -153,45 +153,163 @@ def compute_loss(
 def make_preview(pred_dra, pred_ddec, gt_dra, gt_ddec, rubin_band, mode, epoch):
     """Create a wandb image showing predicted vs ground truth offset fields."""
     import matplotlib.pyplot as plt
+    from matplotlib.colors import TwoSlopeNorm
 
     pd_ra = pred_dra[0, 0].detach().cpu().numpy()
     pd_de = pred_ddec[0, 0].detach().cpu().numpy()
     gt_ra = gt_dra[0, 0].detach().cpu().numpy()
     gt_de = gt_ddec[0, 0].detach().cpu().numpy()
-    err_ra = np.abs(pd_ra - gt_ra)
-    err_de = np.abs(pd_de - gt_de)
+    err_ra = pd_ra - gt_ra      # signed error
+    err_de = pd_de - gt_de
+    err_total = np.sqrt(err_ra**2 + err_de**2)
 
-    fig, axes = plt.subplots(2, 3, figsize=(15, 9))
+    # Stats (in mas for readability).
+    gt_ra_med = np.median(gt_ra) * 1000
+    gt_de_med = np.median(gt_de) * 1000
+    pd_ra_med = np.median(pd_ra) * 1000
+    pd_de_med = np.median(pd_de) * 1000
+    mae_ra = np.abs(err_ra).mean() * 1000
+    mae_de = np.abs(err_de).mean() * 1000
+    mae_tot = err_total.mean() * 1000
+    p95_tot = np.percentile(err_total, 95) * 1000
 
-    vmax_ra = max(abs(gt_ra.min()), abs(gt_ra.max()), 0.01)
-    vmax_de = max(abs(gt_de.min()), abs(gt_de.max()), 0.01)
+    fig = plt.figure(figsize=(22, 14))
 
-    im = axes[0, 0].imshow(gt_ra, cmap="RdBu_r", vmin=-vmax_ra, vmax=vmax_ra, origin="lower")
-    axes[0, 0].set_title("GT ΔRA* (arcsec)")
-    plt.colorbar(im, ax=axes[0, 0], fraction=0.046)
+    # --- Row 1: ΔRA* (GT, Pred on SHARED range, Signed Error) ---
+    # Shared range covers both GT and Pred so you can compare directly.
+    all_ra = np.concatenate([gt_ra.ravel(), pd_ra.ravel()])
+    vmax_ra = max(np.abs(all_ra).max(), 0.01)
 
-    im = axes[0, 1].imshow(pd_ra, cmap="RdBu_r", vmin=-vmax_ra, vmax=vmax_ra, origin="lower")
-    axes[0, 1].set_title("Pred ΔRA*")
-    plt.colorbar(im, ax=axes[0, 1], fraction=0.046)
+    ax = fig.add_subplot(3, 4, 1)
+    im = ax.imshow(gt_ra, cmap="RdBu_r", vmin=-vmax_ra, vmax=vmax_ra, origin="lower")
+    ax.set_title(f"GT ΔRA*\nmed={gt_ra_med:+.1f} mas", fontsize=10)
+    plt.colorbar(im, ax=ax, fraction=0.046, label="arcsec")
 
-    im = axes[0, 2].imshow(err_ra, cmap="magma", vmin=0, origin="lower")
-    axes[0, 2].set_title("|Error| ΔRA*")
-    plt.colorbar(im, ax=axes[0, 2], fraction=0.046)
+    ax = fig.add_subplot(3, 4, 2)
+    im = ax.imshow(pd_ra, cmap="RdBu_r", vmin=-vmax_ra, vmax=vmax_ra, origin="lower")
+    ax.set_title(f"Pred ΔRA*\nmed={pd_ra_med:+.1f} mas", fontsize=10)
+    plt.colorbar(im, ax=ax, fraction=0.046, label="arcsec")
 
-    im = axes[1, 0].imshow(gt_de, cmap="RdBu_r", vmin=-vmax_de, vmax=vmax_de, origin="lower")
-    axes[1, 0].set_title("GT ΔDec (arcsec)")
-    plt.colorbar(im, ax=axes[1, 0], fraction=0.046)
+    ax = fig.add_subplot(3, 4, 3)
+    emax_ra = max(np.abs(err_ra).max(), 0.001)
+    im = ax.imshow(err_ra, cmap="RdBu_r", vmin=-emax_ra, vmax=emax_ra, origin="lower")
+    ax.set_title(f"Signed Error ΔRA*\nMAE={mae_ra:.1f} mas", fontsize=10)
+    plt.colorbar(im, ax=ax, fraction=0.046, label="arcsec")
 
-    im = axes[1, 1].imshow(pd_de, cmap="RdBu_r", vmin=-vmax_de, vmax=vmax_de, origin="lower")
-    axes[1, 1].set_title("Pred ΔDec")
-    plt.colorbar(im, ax=axes[1, 1], fraction=0.046)
+    # --- Row 2: ΔDec (GT, Pred on SHARED range, Signed Error) ---
+    all_de = np.concatenate([gt_de.ravel(), pd_de.ravel()])
+    vmax_de = max(np.abs(all_de).max(), 0.01)
 
-    im = axes[1, 2].imshow(err_de, cmap="magma", vmin=0, origin="lower")
-    axes[1, 2].set_title("|Error| ΔDec")
-    plt.colorbar(im, ax=axes[1, 2], fraction=0.046)
+    ax = fig.add_subplot(3, 4, 5)
+    im = ax.imshow(gt_de, cmap="RdBu_r", vmin=-vmax_de, vmax=vmax_de, origin="lower")
+    ax.set_title(f"GT ΔDec\nmed={gt_de_med:+.1f} mas", fontsize=10)
+    plt.colorbar(im, ax=ax, fraction=0.046, label="arcsec")
 
-    fig.suptitle(f"Epoch {epoch} | {rubin_band} → VIS | mode={mode}", fontsize=12)
-    fig.tight_layout()
+    ax = fig.add_subplot(3, 4, 6)
+    im = ax.imshow(pd_de, cmap="RdBu_r", vmin=-vmax_de, vmax=vmax_de, origin="lower")
+    ax.set_title(f"Pred ΔDec\nmed={pd_de_med:+.1f} mas", fontsize=10)
+    plt.colorbar(im, ax=ax, fraction=0.046, label="arcsec")
+
+    ax = fig.add_subplot(3, 4, 7)
+    emax_de = max(np.abs(err_de).max(), 0.001)
+    im = ax.imshow(err_de, cmap="RdBu_r", vmin=-emax_de, vmax=emax_de, origin="lower")
+    ax.set_title(f"Signed Error ΔDec\nMAE={mae_de:.1f} mas", fontsize=10)
+    plt.colorbar(im, ax=ax, fraction=0.046, label="arcsec")
+
+    # --- Column 4: Total |error| map + vector quiver ---
+    ax = fig.add_subplot(3, 4, 4)
+    im = ax.imshow(err_total * 1000, cmap="magma", vmin=0, origin="lower")
+    ax.set_title(f"|Error| total\nMAE={mae_tot:.1f} mas  p95={p95_tot:.1f} mas", fontsize=10)
+    plt.colorbar(im, ax=ax, fraction=0.046, label="mas")
+
+    ax = fig.add_subplot(3, 4, 8)
+    im = ax.imshow(err_total * 1000, cmap="magma", vmin=0, origin="lower", alpha=0.3)
+    # Quiver: subsample for readability.
+    H, W = gt_ra.shape
+    step = max(1, min(H, W) // 20)
+    yy = np.arange(0, H, step)
+    xx = np.arange(0, W, step)
+    Y, X = np.meshgrid(yy, xx, indexing="ij")
+    # GT vectors (blue) and Pred vectors (red).
+    ax.quiver(X, Y, gt_ra[::step, ::step], gt_de[::step, ::step],
+              color="royalblue", scale=vmax_ra * 15, alpha=0.8,
+              width=0.004, label="GT")
+    ax.quiver(X, Y, pd_ra[::step, ::step], pd_de[::step, ::step],
+              color="tomato", scale=vmax_ra * 15, alpha=0.6,
+              width=0.003, label="Pred")
+    ax.legend(loc="upper right", fontsize=8)
+    ax.set_title("Vector field: GT (blue) vs Pred (red)", fontsize=10)
+    ax.set_xlim(0, W)
+    ax.set_ylim(0, H)
+
+    # --- Row 3: Summary panel ---
+    ax = fig.add_subplot(3, 4, 9)
+    # Histogram of total error.
+    flat_err = err_total.ravel() * 1000
+    ax.hist(flat_err, bins=60, color="steelblue", alpha=0.8, edgecolor="none")
+    ax.axvline(mae_tot, color="tomato", ls="--", lw=2, label=f"MAE={mae_tot:.1f}")
+    ax.axvline(p95_tot, color="orange", ls="--", lw=2, label=f"p95={p95_tot:.1f}")
+    ax.set_xlabel("|Error| (mas)")
+    ax.set_ylabel("Count")
+    ax.set_title("Error distribution", fontsize=10)
+    ax.legend(fontsize=8)
+
+    ax = fig.add_subplot(3, 4, 10)
+    # Scatter: pred vs GT for both components.
+    n_pts = min(2000, gt_ra.size)
+    idx = np.random.choice(gt_ra.size, n_pts, replace=False)
+    ax.scatter(gt_ra.ravel()[idx] * 1000, pd_ra.ravel()[idx] * 1000,
+               s=2, alpha=0.3, color="steelblue", label="ΔRA*")
+    ax.scatter(gt_de.ravel()[idx] * 1000, pd_de.ravel()[idx] * 1000,
+               s=2, alpha=0.3, color="tomato", label="ΔDec")
+    lims = max(vmax_ra, vmax_de) * 1000
+    ax.plot([-lims, lims], [-lims, lims], "k--", lw=0.5, alpha=0.5)
+    ax.set_xlabel("GT (mas)")
+    ax.set_ylabel("Pred (mas)")
+    ax.set_title("Pred vs GT scatter", fontsize=10)
+    ax.legend(fontsize=8, markerscale=4)
+    ax.set_aspect("equal")
+
+    ax = fig.add_subplot(3, 4, 11)
+    # Residual quiver (error vectors only).
+    im = ax.imshow(err_total * 1000, cmap="magma", vmin=0, origin="lower", alpha=0.3)
+    ax.quiver(X, Y, err_ra[::step, ::step], err_de[::step, ::step],
+              color="crimson", scale=emax_ra * 15,
+              width=0.004)
+    ax.set_title("Residual vectors (Pred − GT)", fontsize=10)
+    ax.set_xlim(0, W)
+    ax.set_ylim(0, H)
+
+    ax = fig.add_subplot(3, 4, 12)
+    ax.axis("off")
+    summary = (
+        f"Epoch {epoch}  |  {rubin_band} → VIS  |  mode={mode}\n"
+        f"─────────────────────────────────\n"
+        f"GT  ΔRA* median:  {gt_ra_med:+7.1f} mas\n"
+        f"GT  ΔDec median:  {gt_de_med:+7.1f} mas\n"
+        f"GT  range RA*:    [{gt_ra.min()*1000:+.1f}, {gt_ra.max()*1000:+.1f}] mas\n"
+        f"GT  range Dec:    [{gt_de.min()*1000:+.1f}, {gt_de.max()*1000:+.1f}] mas\n"
+        f"─────────────────────────────────\n"
+        f"Pred ΔRA* median: {pd_ra_med:+7.1f} mas\n"
+        f"Pred ΔDec median: {pd_de_med:+7.1f} mas\n"
+        f"─────────────────────────────────\n"
+        f"MAE  ΔRA*:         {mae_ra:7.1f} mas\n"
+        f"MAE  ΔDec:         {mae_de:7.1f} mas\n"
+        f"MAE  total:        {mae_tot:7.1f} mas\n"
+        f"p95  total:        {p95_tot:7.1f} mas\n"
+        f"<100 mas:          {(err_total < 0.1).mean():7.1%}\n"
+        f"<50  mas:          {(err_total < 0.05).mean():7.1%}\n"
+    )
+    ax.text(0.05, 0.95, summary, transform=ax.transAxes,
+            fontsize=9, fontfamily="monospace", verticalalignment="top",
+            bbox=dict(boxstyle="round,pad=0.5", facecolor="lightyellow", alpha=0.8))
+
+    fig.suptitle(
+        f"Epoch {epoch}  |  {rubin_band} → VIS  |  mode={mode}  |  "
+        f"MAE={mae_tot:.1f} mas  p95={p95_tot:.1f} mas",
+        fontsize=13, fontweight="bold",
+    )
+    fig.tight_layout(rect=[0, 0, 1, 0.96])
     img = wandb.Image(fig)
     plt.close(fig)
     return img
