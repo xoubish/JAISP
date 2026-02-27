@@ -145,6 +145,47 @@ def soft_argmax_2d(
 # Refinement network
 # ---------------------------------------------------------------------------
 
+class GlobalOffsetBranch(nn.Module):
+    """
+    Detect uniform (constant) offsets by globally pooling the correlation volume.
+
+    Local cross-correlation can detect spatially-varying offsets but struggles
+    with constant shifts (every position looks the same). This branch pools
+    the entire correlation volume to extract a single global (Δy, Δx) that
+    gets added as a baseline to the local prediction.
+
+    Input:  correlation volume [B, S², H, W] + raw local offsets [B, 2, H, W]
+    Output: [B, 2, 1, 1] global offset in token units (broadcastable)
+    """
+
+    def __init__(self, corr_channels: int, hidden: int = 64):
+        super().__init__()
+        # Pool spatial dimensions, then MLP on the correlation statistics.
+        self.net = nn.Sequential(
+            # Per-channel stats: mean + std → 2 * corr_channels input features.
+            nn.Linear(2 * corr_channels + 2, hidden),
+            nn.GELU(),
+            nn.Linear(hidden, hidden),
+            nn.GELU(),
+            nn.Linear(hidden, 2),  # (Δy, Δx) global offset
+        )
+        # Init near-zero so it doesn't disturb early training.
+        nn.init.zeros_(self.net[-1].weight)
+        nn.init.zeros_(self.net[-1].bias)
+
+    def forward(self, corr_volume: torch.Tensor, raw_offsets: torch.Tensor) -> torch.Tensor:
+        B = corr_volume.shape[0]
+        # Global statistics of the correlation volume.
+        corr_mean = corr_volume.mean(dim=(-2, -1))              # [B, S²]
+        corr_std = corr_volume.std(dim=(-2, -1)).clamp(min=1e-6)  # [B, S²]
+        # Global mean of raw local offsets.
+        off_mean = raw_offsets.mean(dim=(-2, -1))                # [B, 2]
+
+        features = torch.cat([corr_mean, corr_std, off_mean], dim=1)  # [B, 2*S²+2]
+        global_offset = self.net(features)                        # [B, 2]
+        return global_offset.unsqueeze(-1).unsqueeze(-1)          # [B, 2, 1, 1]
+
+
 class SmoothRefineNet(nn.Module):
     """
     Small CNN that refines raw correlation offsets into a smooth field.
@@ -269,11 +310,17 @@ class AstrometryConcordanceHead(nn.Module):
         else:
             self.register_buffer("log_temp", torch.tensor(math.log(max(softmax_temp, 1e-6))))
 
-        # Refinement network.
+        # Refinement network (local, spatially-varying).
         self.refine = SmoothRefineNet(
             corr_channels=S * S,
             hidden=refine_hidden,
             depth=refine_depth,
+        )
+
+        # Global offset branch (detects uniform/constant shifts).
+        self.global_branch = GlobalOffsetBranch(
+            corr_channels=S * S,
+            hidden=64,
         )
         self.stem_refine = None
         if self.use_stem_refine:
@@ -340,9 +387,12 @@ class AstrometryConcordanceHead(nn.Module):
             corr, self.search_radius, self.temperature
         )  # [B, 2, Hc, Wc], [B, 1, Hc, Wc]
 
-        # --- Refinement ---
+        # --- Global offset branch (constant/uniform component) ---
+        global_offset = self.global_branch(corr, raw_offsets)     # [B, 2, 1, 1]
+
+        # --- Local refinement (spatially-varying residual) ---
         residual = self.refine(raw_offsets, corr, confidence)         # [B, 2, Hc, Wc]
-        refined_offsets = raw_offsets + residual                       # [B, 2, Hc, Wc]
+        refined_offsets = global_offset + raw_offsets + residual       # [B, 2, Hc, Wc]
 
         # --- Convert from token units to arcseconds ---
         # Each token on the common grid covers:
@@ -387,5 +437,6 @@ class AstrometryConcordanceHead(nn.Module):
             "confidence": confidence,
             "corr_volume": corr,
             "refined_offsets_tokens": refined_offsets,
+            "global_offset_tokens": global_offset,
             "stem_residual": stem_residual,
         }
