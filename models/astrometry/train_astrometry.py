@@ -354,6 +354,9 @@ def train(args):
         refine_hidden=args.refine_hidden,
         refine_depth=args.refine_depth,
         patch_size=args.patch_size,
+        global_hidden=args.global_hidden,
+        local_hidden=args.local_hidden,
+        local_depth=args.local_depth,
         use_stem_refine=args.use_stem_refine,
         stem_channels=args.stem_channels,
         stem_hidden=args.stem_hidden,
@@ -584,6 +587,12 @@ def build_parser():
     p.add_argument("--softmax-temp", type=float, default=0.1)
     p.add_argument("--refine-hidden", type=int, default=32)
     p.add_argument("--refine-depth", type=int, default=4)
+    p.add_argument("--global-hidden", type=int, default=128,
+                   help="Hidden width for global offset branch.")
+    p.add_argument("--local-hidden", type=int, default=64,
+                   help="Hidden width for local offset branch CNN.")
+    p.add_argument("--local-depth", type=int, default=5,
+                   help="Number of conv layers in local offset branch.")
     p.add_argument("--use-stem-refine", action="store_true",
                    help="Add higher-resolution residual refinement from stem features.")
     p.add_argument("--stem-channels", type=int, default=64,
