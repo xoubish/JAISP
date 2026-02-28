@@ -12,7 +12,7 @@ Rubin band tokens [B, N_r, D]     VIS tokens [B, N_v, D]
          └──────── interpolate to ──────────┘
                    common grid
                        │
-              cross-correlation
+           coarse cross-correlation
               (local, ±r tokens)
                        │
               correlation volume
@@ -21,10 +21,13 @@ Rubin band tokens [B, N_r, D]     VIS tokens [B, N_v, D]
                   soft-argmax
               (differentiable peak)
                        │
-               raw offsets (tokens)
+             coarse offsets (tokens)
                        │
-              refinement CNN (k=5)
-              (enforces smoothness)
+     concat(rubin, vis, rubin-vis) features
+                       │
+         global+local residual regressor
+                       │
+      final offsets = coarse + gain*residual
                        │
             token → arcsec conversion
                        │
@@ -37,8 +40,8 @@ Rubin band tokens [B, N_r, D]     VIS tokens [B, N_v, D]
 ```
 
 Key design choices:
-- **Cross-correlation** rather than regression — the foundation model's position encoding already encodes spatial correspondences, so correlation at the token level naturally extracts offsets.
-- **Soft-argmax** provides differentiable sub-pixel precision from the correlation peak.
+- **Hybrid coarse+residual** avoids collapse on larger offsets: correlation finds coarse displacement, residual regression refines sub-token detail.
+- **Soft-argmax** on local correlation provides differentiable coarse matching.
 - **Learnable temperature** controls the sharpness of the soft-argmax peak, adapting to the correlation landscape.
 - **Large-kernel refinement CNN** (5×5 convolutions) enforces spatial smoothness — astrometric distortions are low-frequency by nature.
 - **Optional stem-space refinement** adds a higher-resolution residual correction using native stem feature maps from Rubin and VIS.
@@ -60,7 +63,7 @@ A curriculum ramps offset complexity: constant → affine → smooth sinusoidal 
 
 | File | Role |
 |------|------|
-| `head.py` | `AstrometryConcordanceHead` — correlation + soft-argmax + refinement |
+| `head.py` | `AstrometryConcordanceHead` — coarse correlation + residual regression + optional stem refinement |
 | `offsets.py` | Synthetic offset generators (constant/affine/smooth) + image warping |
 | `dataset.py` | `AstrometryDataset` — always pairs Rubin band with VIS |
 | `train_astrometry.py` | Training loop with curriculum + wandb logging |
@@ -148,6 +151,7 @@ Training logs (wandb) include:
 - `frac_01arcsec` — fraction of positions with error < 100 mas
 - `frac_02arcsec` — fraction of positions with error < 200 mas
 - `temp` — learned soft-argmax temperature
+- `residual_gain` — scalar weight on residual branch vs coarse correlation branch
 
 ## FITS Product Structure
 

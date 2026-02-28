@@ -41,7 +41,7 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from jaisp_dataset_v4 import ALL_BANDS, _to_float32, _safe_sqrt_var, RUBIN_BAND_ORDER
 from jaisp_foundation_v5 import JAISPFoundationV5
-from head import AstrometryConcordanceHead, PIXEL_SCALES
+from head import AstrometryConcordanceHead, NonParametricConcordanceHead, PIXEL_SCALES
 
 
 def load_backbone(device, args):
@@ -65,25 +65,39 @@ def load_backbone(device, args):
 
 
 def load_head(device, args):
+    if args.head_mode == "nonparametric":
+        head = NonParametricConcordanceHead(
+            patch_size=args.patch_size,
+            search_radius=args.search_radius,
+            softmax_temp=args.softmax_temp,
+            smooth_kernel=args.nonparam_smooth_kernel,
+        ).to(device)
+        head.eval()
+        return head
+
     ckpt = torch.load(args.head_ckpt, map_location=device)
     head_args = ckpt.get("args", {})
     head = AstrometryConcordanceHead(
         embed_dim=head_args.get("embed_dim", args.embed_dim),
         search_radius=head_args.get("search_radius", args.search_radius),
-        softmax_temp=head_args.get("softmax_temp", 0.1),
+        softmax_temp=head_args.get("softmax_temp", args.softmax_temp),
         refine_hidden=head_args.get("refine_hidden", 32),
         refine_depth=head_args.get("refine_depth", 4),
         patch_size=head_args.get("patch_size", args.patch_size),
         global_hidden=head_args.get("global_hidden", 128),
         local_hidden=head_args.get("local_hidden", 64),
         local_depth=head_args.get("local_depth", 5),
+        match_dim=head_args.get("match_dim", 64),
+        residual_gain_init=head_args.get("residual_gain_init", 1.0),
         use_stem_refine=head_args.get("use_stem_refine", False),
         stem_channels=head_args.get("stem_channels", 64),
         stem_hidden=head_args.get("stem_hidden", 32),
         stem_depth=head_args.get("stem_depth", 4),
         stem_stride=head_args.get("stem_stride", 4),
     ).to(device)
-    head.load_state_dict(ckpt["head"])
+    missing, unexpected = head.load_state_dict(ckpt["head"], strict=False)
+    if missing or unexpected:
+        print(f"Head checkpoint mismatch: missing={len(missing)} unexpected={len(unexpected)}")
     head.eval()
     return head
 
@@ -244,7 +258,9 @@ def export_tile(
 def main():
     parser = argparse.ArgumentParser(description="Export astrometry concordance FITS.")
     parser.add_argument("--backbone-ckpt", type=str, required=True)
-    parser.add_argument("--head-ckpt", type=str, required=True)
+    parser.add_argument("--head-mode", type=str, default="hybrid",
+                        choices=["hybrid", "nonparametric"])
+    parser.add_argument("--head-ckpt", type=str, default="")
     parser.add_argument("--rubin-dir", type=str, required=True)
     parser.add_argument("--euclid-dir", type=str, required=True)
     parser.add_argument("--output", type=str, default="concordance.fits")
@@ -256,6 +272,8 @@ def main():
     parser.add_argument("--depth", type=int, default=6)
     parser.add_argument("--patch-size", type=int, default=16)
     parser.add_argument("--search-radius", type=int, default=3)
+    parser.add_argument("--softmax-temp", type=float, default=0.1)
+    parser.add_argument("--nonparam-smooth-kernel", type=int, default=3)
     parser.add_argument("--use-stem-refine", action="store_true")
     parser.add_argument("--stem-channels", type=int, default=64)
     parser.add_argument("--stem-hidden", type=int, default=32)
@@ -266,6 +284,9 @@ def main():
 
     if not HAS_ASTROPY:
         print("ERROR: astropy is required for FITS export.")
+        return
+    if args.head_mode == "hybrid" and not args.head_ckpt:
+        print("ERROR: --head-ckpt is required for head_mode=hybrid.")
         return
 
     device = torch.device(args.device if args.device else ("cuda" if torch.cuda.is_available() else "cpu"))

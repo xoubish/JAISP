@@ -23,6 +23,17 @@ from jaisp_dataset_v4 import (
 from offsets import generate_offset_field, sample_offset_mode
 
 
+def _worker_init_fn(worker_id: int):
+    """Ensure each worker has an independent RNG stream for augment/mode sampling."""
+    info = torch.utils.data.get_worker_info()
+    if info is None:
+        return
+    ds = info.dataset
+    seed = torch.initial_seed() % (2 ** 32 - 1)
+    if hasattr(ds, "rng"):
+        ds.rng = np.random.RandomState(int(seed))
+
+
 class AstrometryDataset(Dataset):
     """
     Yields (Rubin_band, Euclid_VIS) pairs with synthetic offsets applied to Rubin.
@@ -42,6 +53,10 @@ class AstrometryDataset(Dataset):
         euclid_dir: str,
         max_offset_arcsec: float = 0.5,
         curriculum_epochs: int = 10,
+        offset_mode: str = "curriculum",
+        rubin_band: Optional[str] = None,
+        fixed_dra_arcsec: Optional[float] = None,
+        fixed_ddec_arcsec: Optional[float] = None,
         seed: int = 42,
         augment: bool = True,
         mmap: bool = True,
@@ -51,11 +66,29 @@ class AstrometryDataset(Dataset):
         self.euclid_dir = Path(euclid_dir)
         self.max_offset = float(max_offset_arcsec)
         self.curriculum_epochs = int(curriculum_epochs)
+        self.offset_mode = str(offset_mode)
+        self.rubin_band = None if rubin_band is None else str(rubin_band).strip().lower()
+        if self.rubin_band == "":
+            self.rubin_band = None
+        self.fixed_dra = None if fixed_dra_arcsec is None else float(fixed_dra_arcsec)
+        self.fixed_ddec = None if fixed_ddec_arcsec is None else float(fixed_ddec_arcsec)
         self.augment = augment
         self.mmap = mmap
         self.rng = np.random.RandomState(seed)
         self.finite_frac_thresh = float(finite_frac_thresh)
         self.epoch = 1  # updated externally by training loop
+
+        if self.offset_mode not in {"curriculum", "constant", "affine", "smooth", "nonparametric"}:
+            raise ValueError(
+                f"offset_mode must be one of: curriculum, constant, affine, smooth, nonparametric; got {self.offset_mode}"
+            )
+        if self.rubin_band is not None:
+            if self.rubin_band in RUBIN_BAND_ORDER:
+                self.rubin_band = f"rubin_{self.rubin_band}"
+            if self.rubin_band not in RUBIN_BANDS:
+                raise ValueError(f"rubin_band must be one of {RUBIN_BANDS} or short names {RUBIN_BAND_ORDER}; got {rubin_band}")
+        if (self.fixed_dra is None) ^ (self.fixed_ddec is None):
+            raise ValueError("fixed_dra_arcsec and fixed_ddec_arcsec must be set together.")
 
         # Find tiles that have BOTH Rubin and Euclid.
         rubin_files = sorted(glob.glob(os.path.join(rubin_dir, "tile_x*_y*.npz")))
@@ -98,6 +131,11 @@ class AstrometryDataset(Dataset):
         n_with_vis = sum(self._has_vis)
         print(f"AstrometryDataset: {len(self.pairs)} tiles, {n_with_vis} with VIS")
         print(f"  max_offset={self.max_offset}\" curriculum={self.curriculum_epochs} epochs")
+        print(f"  offset_mode={self.offset_mode}")
+        if self.rubin_band is not None:
+            print(f"  rubin_band={self.rubin_band}")
+        if self.fixed_dra is not None:
+            print(f"  fixed_constant=({self.fixed_dra:+.4f}\", {self.fixed_ddec:+.4f}\")")
 
     def __len__(self) -> int:
         return len(self.pairs)
@@ -119,7 +157,10 @@ class AstrometryDataset(Dataset):
         pair = self.pairs[idx]
 
         # Pick a random Rubin band.
-        rubin_band = self.rng.choice(self._rubin_avail[idx])
+        if self.rubin_band is not None and self.rubin_band in self._rubin_avail[idx]:
+            rubin_band = self.rubin_band
+        else:
+            rubin_band = self.rng.choice(self._rubin_avail[idx])
         rubin_img, rubin_rms = self._load_rubin(pair["rubin_path"], rubin_band)
 
         # Load VIS.
@@ -151,8 +192,16 @@ class AstrometryDataset(Dataset):
 
         # Generate synthetic offset field on Rubin pixel grid.
         H_r, W_r = rubin_img.shape
-        mode = sample_offset_mode(self.epoch, self.curriculum_epochs, self.rng)
-        dra, ddec = generate_offset_field(H_r, W_r, self.max_offset, mode=mode, rng=self.rng)
+        if self.offset_mode == "curriculum":
+            mode = sample_offset_mode(self.epoch, self.curriculum_epochs, self.rng)
+        else:
+            mode = self.offset_mode
+
+        if mode == "constant" and self.fixed_dra is not None:
+            dra = np.full((H_r, W_r), self.fixed_dra, dtype=np.float32)
+            ddec = np.full((H_r, W_r), self.fixed_ddec, dtype=np.float32)
+        else:
+            dra, ddec = generate_offset_field(H_r, W_r, self.max_offset, mode=mode, rng=self.rng)
 
         return {
             "tile_id": pair["tile_id"],
@@ -199,8 +248,10 @@ def make_astrometry_loader(
         shuffle=shuffle,
         num_workers=num_workers,
         pin_memory=True,
-        persistent_workers=(num_workers > 0),
+        # Keep workers non-persistent so each epoch picks up updated dataset.epoch.
+        persistent_workers=False,
         drop_last=True,
         collate_fn=collate_astrometry,
+        worker_init_fn=_worker_init_fn if num_workers > 0 else None,
     )
     return dataset, loader

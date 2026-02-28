@@ -32,7 +32,7 @@ if str(SCRIPT_DIR) not in sys.path:
 from jaisp_dataset_v4 import ALL_BANDS
 from jaisp_foundation_v5 import JAISPFoundationV5
 
-from head import AstrometryConcordanceHead
+from head import AstrometryConcordanceHead, NonParametricConcordanceHead
 from dataset import make_astrometry_loader
 from offsets import apply_offset_to_image, resample_offset_to_grid
 
@@ -332,6 +332,10 @@ def train(args):
         num_workers=args.num_workers,
         max_offset_arcsec=args.max_offset,
         curriculum_epochs=args.curriculum_epochs,
+        offset_mode=args.offset_mode,
+        rubin_band=args.rubin_band,
+        fixed_dra_arcsec=args.fixed_dra_arcsec,
+        fixed_ddec_arcsec=args.fixed_ddec_arcsec,
         seed=args.seed,
         augment=not args.no_augment,
     )
@@ -347,28 +351,44 @@ def train(args):
     print("Backbone frozen.")
 
     # Head.
-    head = AstrometryConcordanceHead(
-        embed_dim=args.embed_dim,
-        search_radius=args.search_radius,
-        softmax_temp=args.softmax_temp,
-        refine_hidden=args.refine_hidden,
-        refine_depth=args.refine_depth,
-        patch_size=args.patch_size,
-        global_hidden=args.global_hidden,
-        local_hidden=args.local_hidden,
-        local_depth=args.local_depth,
-        use_stem_refine=args.use_stem_refine,
-        stem_channels=args.stem_channels,
-        stem_hidden=args.stem_hidden,
-        stem_depth=args.stem_depth,
-        stem_stride=args.stem_stride,
-    ).to(device)
+    if args.head_mode == "nonparametric":
+        if args.use_stem_refine:
+            print("Warning: --use-stem-refine ignored for nonparametric head.")
+        head = NonParametricConcordanceHead(
+            patch_size=args.patch_size,
+            search_radius=args.search_radius,
+            softmax_temp=args.softmax_temp,
+            smooth_kernel=args.nonparam_smooth_kernel,
+        ).to(device)
+    else:
+        head = AstrometryConcordanceHead(
+            embed_dim=args.embed_dim,
+            search_radius=args.search_radius,
+            softmax_temp=args.softmax_temp,
+            patch_size=args.patch_size,
+            global_hidden=args.global_hidden,
+            local_hidden=args.local_hidden,
+            local_depth=args.local_depth,
+            use_stem_refine=args.use_stem_refine,
+            match_dim=args.match_dim,
+            residual_gain_init=args.residual_gain_init,
+            stem_channels=args.stem_channels,
+            stem_hidden=args.stem_hidden,
+            stem_depth=args.stem_depth,
+            stem_stride=args.stem_stride,
+        ).to(device)
 
     n_params = sum(p.numel() for p in head.parameters())
-    print(f"Head parameters: {n_params:,}")
+    n_trainable = sum(p.numel() for p in head.parameters() if p.requires_grad)
+    print(f"Head parameters: {n_params:,} (trainable={n_trainable:,})")
 
-    optimizer = torch.optim.AdamW(head.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-6)
+    if n_trainable > 0:
+        optimizer = torch.optim.AdamW(head.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-6)
+    else:
+        optimizer = None
+        scheduler = None
+        print("Non-parametric mode: no optimization step (evaluation-only baseline).")
 
     # W&B.
     wandb_run = None
@@ -394,6 +414,14 @@ def train(args):
             t0 = time.time()
             head.train()
             dataset.epoch = epoch  # update curriculum
+            if args.max_offset_start is not None or args.max_offset_end is not None:
+                start = float(args.max_offset if args.max_offset_start is None else args.max_offset_start)
+                end = float(args.max_offset if args.max_offset_end is None else args.max_offset_end)
+                denom = max(1, args.epochs - 1)
+                alpha = float(epoch - 1) / float(denom)
+                dataset.max_offset = (1.0 - alpha) * start + alpha * end
+            else:
+                dataset.max_offset = float(args.max_offset)
 
             agg = defaultdict(float)
             mode_counts = defaultdict(int)
@@ -401,7 +429,8 @@ def train(args):
             preview_data = None
 
             for batch in loader:
-                optimizer.zero_grad(set_to_none=True)
+                if optimizer is not None:
+                    optimizer.zero_grad(set_to_none=True)
                 sample_losses = []
 
                 bsz = len(batch["rubin_band"])
@@ -464,7 +493,19 @@ def train(args):
                         smooth_weight=args.smooth_weight,
                     )
 
-                    sample_losses.append(metrics["loss_total"])
+                    # Auxiliary supervision for coarse branch (helps large-shift learning).
+                    if optimizer is not None and args.coarse_weight > 0 and "coarse_dra" in out and "coarse_ddec" in out:
+                        coarse_metrics = compute_loss(
+                            out["coarse_dra"], out["coarse_ddec"],
+                            gt_dra_grid, gt_ddec_grid,
+                            smooth_weight=0.0,
+                        )
+                        metrics["loss_coarse"] = coarse_metrics["loss_offset"]
+                        metrics["coarse_mae_total"] = coarse_metrics["mae_total"]
+                        metrics["loss_total"] = metrics["loss_total"] + args.coarse_weight * coarse_metrics["loss_offset"]
+
+                    if optimizer is not None:
+                        sample_losses.append(metrics["loss_total"])
 
                     # Accumulate.
                     for k, v in metrics.items():
@@ -482,36 +523,51 @@ def train(args):
                             "mode": offset_mode,
                         }
 
-                if not sample_losses:
-                    continue
+                if optimizer is not None:
+                    if not sample_losses:
+                        continue
+                    loss = torch.stack(sample_losses).mean()
+                    loss.backward()
+                    if args.grad_clip > 0:
+                        torch.nn.utils.clip_grad_norm_(head.parameters(), args.grad_clip)
+                    optimizer.step()
+                    global_step += 1
 
-                loss = torch.stack(sample_losses).mean()
-                loss.backward()
-                if args.grad_clip > 0:
-                    torch.nn.utils.clip_grad_norm_(head.parameters(), args.grad_clip)
-                optimizer.step()
-                global_step += 1
-
-            scheduler.step()
+            if scheduler is not None:
+                scheduler.step()
 
             # Epoch summary.
             n = max(1, n_samples)
             epoch_metrics = {k: v / n for k, v in agg.items()}
             epoch_metrics["epoch"] = epoch
-            epoch_metrics["lr"] = optimizer.param_groups[0]["lr"]
-            epoch_metrics["temp"] = float(head.temperature.detach().item())
+            epoch_metrics["lr"] = optimizer.param_groups[0]["lr"] if optimizer is not None else 0.0
+            if hasattr(head, "temperature"):
+                try:
+                    epoch_metrics["temp"] = float(head.temperature.detach().item())
+                except Exception:
+                    pass
+            if hasattr(head, "residual_gain"):
+                try:
+                    epoch_metrics["residual_gain"] = float(head.residual_gain.detach().item())
+                except Exception:
+                    pass
             epoch_metrics["time_sec"] = time.time() - t0
             epoch_metrics["samples"] = n_samples
 
+            temp_str = f" temp={epoch_metrics['temp']:.4f}" if "temp" in epoch_metrics else ""
+            rg_str = f" rg={epoch_metrics['residual_gain']:.3f}" if "residual_gain" in epoch_metrics else ""
+            coarse_str = f" coarse={epoch_metrics['coarse_mae_total']*1000:.1f}mas " if "coarse_mae_total" in epoch_metrics else " "
             print(
                 f"Epoch {epoch:03d} | "
                 f"loss={epoch_metrics['loss_total']:.5f} "
                 f"MAE_total={epoch_metrics['mae_total']*1000:.1f}mas "
                 f"MAE_ra={epoch_metrics['mae_ra']*1000:.1f}mas "
                 f"MAE_dec={epoch_metrics['mae_dec']*1000:.1f}mas "
+                f"max_off={dataset.max_offset:.3f}\" "
+                f"{coarse_str}"
                 f"<0.1\"={epoch_metrics['frac_01arcsec']:.1%} "
                 f"<0.2\"={epoch_metrics['frac_02arcsec']:.1%} "
-                f"temp={epoch_metrics['temp']:.4f} "
+                f"{temp_str}{rg_str} "
                 f"modes={dict(mode_counts)} "
                 f"t={epoch_metrics['time_sec']:.1f}s"
             )
@@ -530,11 +586,13 @@ def train(args):
             ckpt = {
                 "epoch": epoch,
                 "head": head.state_dict(),
-                "optimizer": optimizer.state_dict(),
-                "scheduler": scheduler.state_dict(),
                 "metrics": epoch_metrics,
                 "args": vars(args),
             }
+            if optimizer is not None:
+                ckpt["optimizer"] = optimizer.state_dict()
+            if scheduler is not None:
+                ckpt["scheduler"] = scheduler.state_dict()
             torch.save(ckpt, out_dir / "last_astrometry.pt")
 
             score = epoch_metrics["loss_total"]
@@ -582,9 +640,16 @@ def build_parser():
     p.add_argument("--proj-dim", type=int, default=256)
     p.add_argument("--depth", type=int, default=6)
     p.add_argument("--patch-size", type=int, default=16)
+    p.add_argument("--head-mode", type=str, default="hybrid",
+                   choices=["hybrid", "nonparametric"],
+                   help="Astrometry head type.")
 
+    # Correlation branch controls.
     p.add_argument("--search-radius", type=int, default=3)
     p.add_argument("--softmax-temp", type=float, default=0.1)
+    p.add_argument("--nonparam-smooth-kernel", type=int, default=3,
+                   help="Fixed smoothing kernel for nonparametric head (odd; <=1 disables).")
+    # Legacy knobs kept for backward CLI/checkpoint compatibility.
     p.add_argument("--refine-hidden", type=int, default=32)
     p.add_argument("--refine-depth", type=int, default=4)
     p.add_argument("--global-hidden", type=int, default=128,
@@ -593,6 +658,10 @@ def build_parser():
                    help="Hidden width for local offset branch CNN.")
     p.add_argument("--local-depth", type=int, default=5,
                    help="Number of conv layers in local offset branch.")
+    p.add_argument("--match-dim", type=int, default=64,
+                   help="Channel dimension for learnable token matching space.")
+    p.add_argument("--residual-gain-init", type=float, default=1.2,
+                   help="Initial gain for residual branch contribution (effective range ~0.5..1.5).")
     p.add_argument("--use-stem-refine", action="store_true",
                    help="Add higher-resolution residual refinement from stem features.")
     p.add_argument("--stem-channels", type=int, default=64,
@@ -606,7 +675,22 @@ def build_parser():
 
     p.add_argument("--max-offset", type=float, default=0.5,
                    help="Max synthetic offset amplitude in arcseconds")
+    p.add_argument("--max-offset-start", type=float, default=None,
+                   help="If set, linearly schedule max offset from this value to --max-offset-end across epochs.")
+    p.add_argument("--max-offset-end", type=float, default=None,
+                   help="If set with --max-offset-start, target max offset at the final epoch.")
+    p.add_argument("--offset-mode", type=str, default="curriculum",
+                   choices=["curriculum", "constant", "affine", "smooth", "nonparametric"],
+                   help="Synthetic field mode. 'curriculum' uses epoch-dependent random mixture.")
+    p.add_argument("--rubin-band", type=str, default="",
+                   help="Optional fixed Rubin band for training (u/g/r/i/z/y or rubin_u..rubin_y).")
+    p.add_argument("--fixed-dra-arcsec", type=float, default=None,
+                   help="If set with --fixed-ddec-arcsec and mode=constant, use this fixed ΔRA* everywhere.")
+    p.add_argument("--fixed-ddec-arcsec", type=float, default=None,
+                   help="If set with --fixed-dra-arcsec and mode=constant, use this fixed ΔDec everywhere.")
     p.add_argument("--smooth-weight", type=float, default=0.1)
+    p.add_argument("--coarse-weight", type=float, default=0.2,
+                   help="Auxiliary loss weight for coarse correlation prediction.")
     p.add_argument("--curriculum-epochs", type=int, default=10)
 
     p.add_argument("--seed", type=int, default=42)

@@ -94,6 +94,54 @@ def generate_smooth_offset(
     return dra.astype(np.float32), ddec.astype(np.float32)
 
 
+def generate_nonparametric_offset(
+    H: int,
+    W: int,
+    max_amp: float,
+    rng: Optional[np.random.RandomState] = None,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Random smooth displacement field with no fixed analytic form.
+
+    Implementation:
+      1) Sample random coarse control grids (size chosen randomly)
+      2) Upsample to full resolution with bicubic interpolation
+      3) Apply a couple of local averaging passes for smoothness
+      4) Rescale amplitude so the 99th percentile of |offset| ~= random fraction of max_amp
+    """
+    if rng is None:
+        rng = np.random.RandomState()
+
+    # Random coarse resolution of control points.
+    ky = int(rng.randint(3, 9))   # [3..8]
+    kx = int(rng.randint(3, 9))
+
+    dra_ctrl = torch.from_numpy(rng.normal(0.0, 1.0, size=(1, 1, ky, kx)).astype(np.float32))
+    ddec_ctrl = torch.from_numpy(rng.normal(0.0, 1.0, size=(1, 1, ky, kx)).astype(np.float32))
+    field = torch.cat([dra_ctrl, ddec_ctrl], dim=1)  # [1,2,ky,kx]
+
+    # Bicubic upsample creates smooth non-parametric surfaces.
+    field = F.interpolate(field, size=(H, W), mode="bicubic", align_corners=False)
+
+    # Mild extra smoothing.
+    for _ in range(2):
+        field = F.avg_pool2d(field, kernel_size=5, stride=1, padding=2)
+
+    dra = field[0, 0].numpy()
+    ddec = field[0, 1].numpy()
+
+    # Normalize amplitude robustly.
+    mag = np.sqrt(dra * dra + ddec * ddec)
+    robust = float(np.percentile(mag, 99))
+    target = float(rng.uniform(0.3, 1.0) * max_amp)
+    if robust > 1e-8:
+        scale = target / robust
+        dra = dra * scale
+        ddec = ddec * scale
+
+    return dra.astype(np.float32), ddec.astype(np.float32)
+
+
 def generate_offset_field(
     H: int,
     W: int,
@@ -107,7 +155,7 @@ def generate_offset_field(
     Args:
         H, W: spatial dimensions (typically Rubin pixel grid)
         max_amp: maximum offset amplitude in arcseconds
-        mode: 'constant', 'affine', or 'smooth'
+        mode: 'constant', 'affine', 'smooth', or 'nonparametric'
         rng: random state for reproducibility
 
     Returns:
@@ -119,6 +167,8 @@ def generate_offset_field(
         return generate_affine_offset(H, W, max_amp, rng)
     elif mode == "smooth":
         return generate_smooth_offset(H, W, max_amp, rng=rng)
+    elif mode == "nonparametric":
+        return generate_nonparametric_offset(H, W, max_amp, rng=rng)
     else:
         raise ValueError(f"Unknown offset mode: {mode}")
 
