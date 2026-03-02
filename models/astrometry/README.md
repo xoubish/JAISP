@@ -1,174 +1,95 @@
 # JAISP Astrometry Concordance
 
-Predicts smooth offset fields (ΔRA\*, ΔDec) in arcseconds that map Rubin astrometry onto the Euclid VIS reference frame. Follows the concordance data product specification: physically meaningful offsets in sky coordinates where Δ=0 means perfectly aligned, VIS is the reference grid, and geometry is handled by WCS.
+This folder now has two explicit paths:
 
-## Architecture
+1. `fit_concordance_no_neural_baseline.py`
+   - direct, non-neural baseline
+   - measures Rubin->VIS offsets from matched sources
+   - fits a smooth field (`affine + RBF residual`)
+   - useful as a sanity check and as a teacher-label generator
 
-The head operates on frozen backbone token embeddings from a (Rubin band, Euclid VIS) pair:
+2. `train_astrometry_multiband_teacher.py`
+   - the current neural path
+   - frozen JAISP foundation backbone
+   - `AstrometryConcordanceHead` on top
+   - supervised by dense smooth teacher fields from the direct matcher
+   - uses multiple Rubin bands as latent-space context while still targeting one Rubin band at a time
 
-```
-Rubin band tokens [B, N_r, D]     VIS tokens [B, N_v, D]
-         │                                  │
-         └──────── interpolate to ──────────┘
-                   common grid
-                       │
-           coarse cross-correlation
-              (local, ±r tokens)
-                       │
-              correlation volume
-              [B, S², H_tok, W_tok]
-                       │
-                  soft-argmax
-              (differentiable peak)
-                       │
-             coarse offsets (tokens)
-                       │
-     concat(rubin, vis, rubin-vis) features
-                       │
-         global+local residual regressor
-                       │
-      final offsets = coarse + gain*residual
-                       │
-            token → arcsec conversion
-                       │
-          ΔRA*, ΔDec [B, 1, H, W]
-                       │
-     optional stem-space residual refine
-     (higher resolution, configurable stride)
-                       │
-         optional mesh upsample (DSTEP)
-```
+Older experiments that are not the recommended path anymore are under `models/astrometry/older/`.
+Thin wrappers are left at the old entrypoints so existing commands still run.
 
-Key design choices:
-- **Hybrid coarse+residual** avoids collapse on larger offsets: correlation finds coarse displacement, residual regression refines sub-token detail.
-- **Soft-argmax** on local correlation provides differentiable coarse matching.
-- **Learnable temperature** controls the sharpness of the soft-argmax peak, adapting to the correlation landscape.
-- **Large-kernel refinement CNN** (5×5 convolutions) enforces spatial smoothness — astrometric distortions are low-frequency by nature.
-- **Optional stem-space refinement** adds a higher-resolution residual correction using native stem feature maps from Rubin and VIS.
-- **Smoothness loss** explicitly penalizes high-frequency structure in the predicted field.
+## Current Layout
 
-## Self-Supervised Training
+- `head.py`: concordance heads (`AstrometryConcordanceHead`, `NonParametricConcordanceHead`)
+- `source_matching.py`: shared source detection + WCS matching utilities
+- `teacher_fields.py`: shared smooth-field fitting utilities used by both baseline and neural trainer
+- `fit_concordance_no_neural_baseline.py`: explicit no-neural baseline
+- `train_astrometry_multiband_teacher.py`: current recommended trainer
+- `export_fits.py`: export neural predictions to FITS
+- `inspect_concordance_fits.ipynb`: visual inspection notebook
+- `older/`: legacy synthetic and sparse-point trainers
 
-No external astrometric catalogs needed. The training loop:
+## How The Current Neural Path Works
 
-1. Takes a tile with both Rubin and VIS data
-2. Generates a synthetic smooth offset field (ΔRA\*, ΔDec)
-3. Warps the Rubin image by that offset using `grid_sample`
-4. Encodes both (warped Rubin, original VIS) through the frozen backbone
-5. Head predicts the offset → loss against the known synthetic ground truth
+For a target band (for example `rubin_g -> euclid_VIS`):
 
-A curriculum ramps offset complexity: constant → affine → smooth sinusoidal fields over the first ~10 epochs.
+1. Detect and match Rubin/VIS sources.
+2. Fit a smooth teacher field from those matches.
+3. Load multiple Rubin bands through the frozen foundation.
+4. Fuse Rubin latent features by blending:
+   - the target-band latent
+   - the mean latent of the other context bands
+5. Feed the fused Rubin latent plus VIS latent into `AstrometryConcordanceHead`.
+6. Train against the dense teacher field.
 
-## Files
+This keeps the head on top of the foundation, but avoids the old failure mode of learning from tiny synthetic shifts or from sparse point labels alone.
 
-| File | Role |
-|------|------|
-| `head.py` | `AstrometryConcordanceHead` — coarse correlation + residual regression + optional stem refinement |
-| `offsets.py` | Synthetic offset generators (constant/affine/smooth) + image warping |
-| `dataset.py` | `AstrometryDataset` — always pairs Rubin band with VIS |
-| `train_astrometry.py` | Training loop with curriculum + wandb logging |
-| `export_fits.py` | Inference + FITS export following concordance spec |
+## Recommended Commands
 
-## Quick Start
-
-### Train
+### Non-Neural Baseline (all Rubin bands -> VIS)
 
 ```bash
-python3 models/astrometry/train_astrometry.py \
-    --rubin-dir data/rubin_tiles_ecdfs \
-    --euclid-dir data/euclid_tiles_ecdfs \
-    --backbone-ckpt models/checkpoints/jaisp_v5/best.pt \
-    --output-dir models/checkpoints/jaisp_astrometry \
-    --epochs 50 \
-    --batch-size 2 \
-    --max-offset 0.5
+python3 models/astrometry/fit_concordance_no_neural_baseline.py \
+  --rubin-dir data/rubin_tiles_ecdfs \
+  --euclid-dir data/euclid_tiles_ecdfs \
+  --rubin-bands all \
+  --detect-bands g r i z \
+  --output models/checkpoints/concordance_no_neural_allbands.fits \
+  --summary-json models/checkpoints/concordance_no_neural_allbands.json
 ```
 
-### Train With Stem-Space Refinement
+### Neural Trainer (all target bands, multiband context)
 
 ```bash
-python3 models/astrometry/train_astrometry.py \
-    --rubin-dir data/rubin_tiles_ecdfs \
-    --euclid-dir data/euclid_tiles_ecdfs \
-    --backbone-ckpt models/checkpoints/jaisp_v5/best.pt \
-    --output-dir models/checkpoints/jaisp_astrometry_stem \
-    --epochs 50 \
-    --batch-size 2 \
-    --use-stem-refine \
-    --stem-stride 2
+python3 models/astrometry/train_astrometry_multiband_teacher.py \
+  --rubin-dir data/rubin_tiles_ecdfs \
+  --euclid-dir data/euclid_tiles_ecdfs \
+  --output-dir models/checkpoints/jaisp_astrometry_multiband_teacher \
+  --target-bands all \
+  --context-bands all \
+  --detect-bands g r i z \
+  --use-stem-refine \
+  --stem-stride 2 \
+  --epochs 50 \
+  --batch-size 2 \
+  --wandb-mode online
 ```
 
-### Smoke test
+### Legacy Trainers
 
-```bash
-python3 models/astrometry/train_astrometry.py \
-    --rubin-dir data/rubin_tiles_ecdfs \
-    --euclid-dir data/euclid_tiles_ecdfs \
-    --backbone-ckpt models/checkpoints/jaisp_v5/best.pt \
-    --output-dir models/checkpoints/jaisp_astrometry_smoke \
-    --epochs 3 \
-    --batch-size 1 \
-    --num-workers 0 \
-    --wandb-mode disabled
-```
+These still work, but they are compatibility wrappers now:
 
-### Export FITS concordance product
+- `train_astrometry.py` -> old synthetic trainer
+- `train_astrometry_pseudolabel.py` -> old sparse-point pseudo-label trainer
 
-```bash
-python3 models/astrometry/export_fits.py \
-    --backbone-ckpt models/checkpoints/jaisp_v5/best.pt \
-    --head-ckpt models/checkpoints/jaisp_astrometry/best_astrometry.pt \
-    --rubin-dir data/rubin_tiles_ecdfs \
-    --euclid-dir data/euclid_tiles_ecdfs \
-    --output concordance_ecdfs.fits \
-    --dstep 8
-```
+## W&B Visuals
 
-### Evaluate in Notebook
+`train_astrometry_multiband_teacher.py` logs a fixed preview tile each epoch:
 
-Use `models/astrometry/inspect_concordance_fits.ipynb` for post-train evaluation and visual QA.
-The notebook runs the full evaluator flow directly (including sign sweep and fixed-pair metrics),
-so no standalone evaluation command is needed.
+- VIS image with matched source offsets
+- teacher quiver field on VIS
+- predicted quiver field on VIS
+- residual field on the mesh
+- teacher vs prediction scatter on the mesh
 
-## Key Arguments
-
-| Arg | Default | Notes |
-|-----|---------|-------|
-| `--max-offset` | 0.5 | Max synthetic offset amplitude in arcseconds |
-| `--search-radius` | 3 | ±3 tokens = 7×7 correlation window |
-| `--softmax-temp` | 0.1 | Initial temperature (learnable) |
-| `--smooth-weight` | 0.1 | Gradient penalty weight on predicted field |
-| `--curriculum-epochs` | 10 | Ramp from constant → smooth offsets |
-| `--use-stem-refine` | off | Enable higher-resolution residual correction from stem features |
-| `--stem-stride` | 4 | VIS-pixel stride of stem-refinement grid (1 = native VIS resolution) |
-| `--dstep` | 8 | Mesh sampling in VIS pixels for FITS export |
-
-## Metrics
-
-Training logs (wandb) include:
-- `MAE_total` — mean absolute positional error in milliarcseconds
-- `MAE_ra`, `MAE_dec` — per-component
-- `frac_01arcsec` — fraction of positions with error < 100 mas
-- `frac_02arcsec` — fraction of positions with error < 200 mas
-- `temp` — learned soft-argmax temperature
-- `residual_gain` — scalar weight on residual branch vs coarse correlation branch
-
-## FITS Product Structure
-
-Following the concordance spec, the output FITS file contains:
-
-```
-HDU 0: Primary (keywords: CONCRDNC, DSTEP, DUNIT, REFFRAME, INTERP)
-HDU 1: tile_x00_y00.r.DRA  — ΔRA* for rubin_r
-HDU 2: tile_x00_y00.r.DDE  — ΔDec for rubin_r
-HDU 3: tile_x00_y00.g.DRA  — ΔRA* for rubin_g
-...
-```
-
-Each HDU has keywords: `DSTEP`, `DUNIT=arcsec`, `INTERP=bilinear`, `CONCRDNC=True`, `RBNBAND`, `REFFRAME=euclid_VIS`, `TILEID`.
-
-## Open Questions (from spec)
-
-- **Mesh size**: DSTEP=8 is the baseline (~0.8″ sampling). The model can predict at any resolution; the question is what's needed for the science. The `--dstep` flag controls this at export time.
-- **Extension to Roman/NISP**: The architecture is band-agnostic — just swap the reference band and adjust pixel scales. The head itself doesn't know which instruments are involved.
-- **Epoch corrections**: Currently assumes surveys handle proper motion. If needed, a time-dependent term could be added as an additional output channel.
+That preview is intentionally fixed to a held-out validation tile when `--val-frac > 0`, so the images are comparable across epochs.
