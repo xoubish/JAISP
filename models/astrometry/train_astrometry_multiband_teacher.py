@@ -179,6 +179,7 @@ def build_teacher_samples(
                     "teacher_ddec": fit["ddec"].astype(np.float32, copy=False),
                     "teacher_x_mesh": fit["x_mesh"].astype(np.float32, copy=False),
                     "teacher_y_mesh": fit["y_mesh"].astype(np.float32, copy=False),
+                    "teacher_affine_coeffs": fit["affine_coeffs"].astype(np.float32, copy=False),
                     "matched_vis_xy": matched["vis_xy"].astype(np.float32, copy=False),
                     "matched_offsets": matched["offsets"].astype(np.float32, copy=False),
                     "match_count": int(matched["vis_xy"].shape[0]),
@@ -293,6 +294,7 @@ class TeacherFieldDataset(torch.utils.data.Dataset):
             "teacher_ddec": torch.from_numpy(sample["teacher_ddec"].copy()),
             "teacher_x_mesh": torch.from_numpy(sample["teacher_x_mesh"].copy()),
             "teacher_y_mesh": torch.from_numpy(sample["teacher_y_mesh"].copy()),
+            "teacher_affine_coeffs": torch.from_numpy(sample["teacher_affine_coeffs"].copy()),
             "matched_vis_xy": torch.from_numpy(sample["matched_vis_xy"].copy()),
             "matched_offsets": torch.from_numpy(sample["matched_offsets"].copy()),
             "match_count": sample["match_count"],
@@ -312,6 +314,7 @@ def collate_teacher(batch: List[Dict]) -> Dict:
         "teacher_ddec": [b["teacher_ddec"] for b in batch],
         "teacher_x_mesh": [b["teacher_x_mesh"] for b in batch],
         "teacher_y_mesh": [b["teacher_y_mesh"] for b in batch],
+        "teacher_affine_coeffs": [b["teacher_affine_coeffs"] for b in batch],
         "matched_vis_xy": [b["matched_vis_xy"] for b in batch],
         "matched_offsets": [b["matched_offsets"] for b in batch],
         "match_count": [b["match_count"] for b in batch],
@@ -397,6 +400,140 @@ def _gradient_penalty(field: torch.Tensor) -> torch.Tensor:
     gx = (field[:, :, :, 1:] - field[:, :, :, :-1]).abs().mean()
     gy = (field[:, :, 1:, :] - field[:, :, :-1, :]).abs().mean()
     return gx + gy
+
+
+def _field_gradient_map(dra: torch.Tensor, ddec: torch.Tensor) -> torch.Tensor:
+    """
+    Approximate per-pixel teacher-field complexity on the mesh.
+    """
+    gx_ra = F.pad((dra[:, :, :, 1:] - dra[:, :, :, :-1]).abs(), (0, 1, 0, 0))
+    gy_ra = F.pad((dra[:, :, 1:, :] - dra[:, :, :-1, :]).abs(), (0, 0, 0, 1))
+    gx_dec = F.pad((ddec[:, :, :, 1:] - ddec[:, :, :, :-1]).abs(), (0, 1, 0, 0))
+    gy_dec = F.pad((ddec[:, :, 1:, :] - ddec[:, :, :-1, :]).abs(), (0, 0, 0, 1))
+    return gx_ra + gy_ra + gx_dec + gy_dec
+
+
+def _make_teacher_weight_map(
+    gt_dra: torch.Tensor,
+    gt_ddec: torch.Tensor,
+    amp_gain: float,
+    grad_gain: float,
+) -> torch.Tensor:
+    """
+    Upweight large-offset and rapidly-varying teacher regions.
+
+    Without this, the mesh loss is dominated by the many near-zero pixels and
+    the easiest local optimum is to predict a tiny low-variance field.
+    """
+    mag = torch.sqrt(gt_dra ** 2 + gt_ddec ** 2 + 1e-10)
+    mag_scale = mag.amax(dim=(2, 3), keepdim=True).clamp_min(1e-6)
+    mag_norm = mag / mag_scale
+
+    grad = _field_gradient_map(gt_dra, gt_ddec)
+    grad_scale = grad.amax(dim=(2, 3), keepdim=True).clamp_min(1e-6)
+    grad_norm = grad / grad_scale
+
+    weights = 1.0 + float(max(0.0, amp_gain)) * mag_norm + float(max(0.0, grad_gain)) * grad_norm
+    return weights.detach()
+
+
+def _weighted_smooth_l1(pred: torch.Tensor, target: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+    per = F.smooth_l1_loss(pred, target, reduction="none")
+    return (per * weight).sum() / weight.sum().clamp_min(1e-6)
+
+
+def _sample_points_from_teacher_mesh(
+    field: torch.Tensor,
+    vis_xy: torch.Tensor,
+    x_mesh: torch.Tensor,
+    y_mesh: torch.Tensor,
+) -> torch.Tensor:
+    """
+    Bilinearly sample a mesh-space field at full-resolution VIS pixel positions.
+
+    `field` is defined on the teacher mesh. `vis_xy` is in native VIS pixels.
+    """
+    if vis_xy.numel() == 0:
+        return field.new_zeros((0,))
+
+    height = int(field.shape[-2])
+    width = int(field.shape[-1])
+
+    x_mesh = x_mesh.to(field.device, dtype=field.dtype)
+    y_mesh = y_mesh.to(field.device, dtype=field.dtype)
+    vis_xy = vis_xy.to(field.device, dtype=field.dtype)
+
+    dx = float((x_mesh[1] - x_mesh[0]).item()) if x_mesh.numel() > 1 else 1.0
+    dy = float((y_mesh[1] - y_mesh[0]).item()) if y_mesh.numel() > 1 else 1.0
+    dx = max(dx, 1e-6)
+    dy = max(dy, 1e-6)
+
+    x_idx = ((vis_xy[:, 0] - x_mesh[0]) / dx).clamp(0.0, float(max(0, width - 1)))
+    y_idx = ((vis_xy[:, 1] - y_mesh[0]) / dy).clamp(0.0, float(max(0, height - 1)))
+
+    if width > 1:
+        x_norm = 2.0 * (x_idx / float(width - 1)) - 1.0
+    else:
+        x_norm = torch.zeros_like(x_idx)
+    if height > 1:
+        y_norm = 2.0 * (y_idx / float(height - 1)) - 1.0
+    else:
+        y_norm = torch.zeros_like(y_idx)
+
+    grid = torch.stack([x_norm, y_norm], dim=-1).view(1, -1, 1, 2)
+    vals = F.grid_sample(field, grid, mode="bilinear", padding_mode="border", align_corners=True)
+    return vals.view(-1)
+
+
+def _eval_teacher_affine_on_mesh(
+    coeffs: torch.Tensor,
+    x_mesh: torch.Tensor,
+    y_mesh: torch.Tensor,
+    vis_hw: Tuple[int, int],
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Evaluate teacher affine coefficients on the teacher mesh.
+
+    coeffs shape: [2, 3], where:
+      dra = a0 + a1*x + a2*y
+      ddec = b0 + b1*x + b2*y
+    on normalized coordinates x,y in [-1, 1].
+    """
+    height = max(1, int(vis_hw[0]))
+    width = max(1, int(vis_hw[1]))
+    x_mesh = x_mesh.to(dtype=coeffs.dtype, device=coeffs.device)
+    y_mesh = y_mesh.to(dtype=coeffs.dtype, device=coeffs.device)
+    xx, yy = torch.meshgrid(x_mesh, y_mesh, indexing="xy")
+    x_norm = 2.0 * (xx / float(max(1, width - 1))) - 1.0
+    y_norm = 2.0 * (yy / float(max(1, height - 1))) - 1.0
+
+    dra = coeffs[0, 0] + coeffs[0, 1] * x_norm + coeffs[0, 2] * y_norm
+    ddec = coeffs[1, 0] + coeffs[1, 1] * x_norm + coeffs[1, 2] * y_norm
+    return dra.unsqueeze(0).unsqueeze(0), ddec.unsqueeze(0).unsqueeze(0)
+
+
+def _predicted_affine_component(
+    out: Dict[str, torch.Tensor],
+    vis_hw: Tuple[int, int],
+    target_hw: Tuple[int, int],
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Convert the head's affine branch output into arcseconds on the teacher mesh.
+    """
+    affine_tokens = out["global_offset_tokens"]
+    gain = out["residual_gain"].to(device=affine_tokens.device, dtype=affine_tokens.dtype)
+    grid_h = max(1, int(affine_tokens.shape[-2]))
+    grid_w = max(1, int(affine_tokens.shape[-1]))
+    vis_h = max(1, int(vis_hw[0]))
+    vis_w = max(1, int(vis_hw[1]))
+    sky_per_token_y = (vis_h * PIXEL_SCALES["euclid_VIS"]) / float(grid_h)
+    sky_per_token_x = (vis_w * PIXEL_SCALES["euclid_VIS"]) / float(grid_w)
+
+    pred_affine_ddec = gain * affine_tokens[:, 0:1] * sky_per_token_y
+    pred_affine_dra = gain * affine_tokens[:, 1:2] * sky_per_token_x
+    pred_affine_dra = F.interpolate(pred_affine_dra, size=target_hw, mode="bilinear", align_corners=False)
+    pred_affine_ddec = F.interpolate(pred_affine_ddec, size=target_hw, mode="bilinear", align_corners=False)
+    return pred_affine_dra, pred_affine_ddec
 
 
 def _compute_metrics(pred_dra, pred_ddec, gt_dra, gt_ddec) -> Dict[str, float]:
@@ -674,6 +811,7 @@ def run_epoch(
                 "teacher_ddec": batch["teacher_ddec"][i].float(),
                 "teacher_x_mesh": batch["teacher_x_mesh"][i].float(),
                 "teacher_y_mesh": batch["teacher_y_mesh"][i].float(),
+                "teacher_affine_coeffs": batch["teacher_affine_coeffs"][i].float(),
                 "matched_vis_xy": batch["matched_vis_xy"][i].float(),
                 "matched_offsets": batch["matched_offsets"][i].float(),
                 "match_count": batch["match_count"][i],
@@ -690,20 +828,82 @@ def run_epoch(
                 )
                 gt_dra = sample["teacher_dra"].unsqueeze(0).unsqueeze(0).to(device)
                 gt_ddec = sample["teacher_ddec"].unsqueeze(0).unsqueeze(0).to(device)
+                teacher_weight = _make_teacher_weight_map(
+                    gt_dra,
+                    gt_ddec,
+                    amp_gain=args.teacher_amp_gain,
+                    grad_gain=args.teacher_grad_gain,
+                )
+                pred_affine_dra, pred_affine_ddec = _predicted_affine_component(
+                    out,
+                    vis_hw=(int(sample["vis_image"].shape[-2]), int(sample["vis_image"].shape[-1])),
+                    target_hw=tuple(int(x) for x in sample["teacher_dra"].shape[-2:]),
+                )
+                gt_affine_dra, gt_affine_ddec = _eval_teacher_affine_on_mesh(
+                    sample["teacher_affine_coeffs"].to(device),
+                    sample["teacher_x_mesh"],
+                    sample["teacher_y_mesh"],
+                    vis_hw=(int(sample["vis_image"].shape[-2]), int(sample["vis_image"].shape[-1])),
+                )
+                gt_resid_dra = gt_dra - gt_affine_dra
+                gt_resid_ddec = gt_ddec - gt_affine_ddec
+                pred_resid_dra = pred_dra - pred_affine_dra
+                pred_resid_ddec = pred_ddec - pred_affine_ddec
 
-                loss_dense = F.smooth_l1_loss(pred_dra, gt_dra) + F.smooth_l1_loss(pred_ddec, gt_ddec)
+                loss_dense = _weighted_smooth_l1(pred_dra, gt_dra, teacher_weight) + _weighted_smooth_l1(
+                    pred_ddec, gt_ddec, teacher_weight
+                )
+                loss_affine = _weighted_smooth_l1(pred_affine_dra, gt_affine_dra, teacher_weight) + _weighted_smooth_l1(
+                    pred_affine_ddec, gt_affine_ddec, teacher_weight
+                )
+                loss_residual = _weighted_smooth_l1(pred_resid_dra, gt_resid_dra, teacher_weight) + _weighted_smooth_l1(
+                    pred_resid_ddec, gt_resid_ddec, teacher_weight
+                )
+
+                matched_vis_xy = sample["matched_vis_xy"]
+                matched_offsets = sample["matched_offsets"].to(device)
+                pred_dra_pts = _sample_points_from_teacher_mesh(
+                    pred_dra,
+                    matched_vis_xy,
+                    sample["teacher_x_mesh"],
+                    sample["teacher_y_mesh"],
+                )
+                pred_ddec_pts = _sample_points_from_teacher_mesh(
+                    pred_ddec,
+                    matched_vis_xy,
+                    sample["teacher_x_mesh"],
+                    sample["teacher_y_mesh"],
+                )
+                loss_anchor = F.smooth_l1_loss(pred_dra_pts, matched_offsets[:, 0]) + F.smooth_l1_loss(
+                    pred_ddec_pts, matched_offsets[:, 1]
+                )
                 loss_smooth = _gradient_penalty(pred_dra) + _gradient_penalty(pred_ddec)
-                loss_total = loss_dense + args.smooth_weight * loss_smooth
+                loss_total = (
+                    loss_dense
+                    + args.anchor_weight * loss_anchor
+                    + args.affine_weight * loss_affine
+                    + args.residual_weight * loss_residual
+                    + args.smooth_weight * loss_smooth
+                )
                 sample_losses.append(loss_total)
 
             metrics = _compute_metrics(pred_dra.detach(), pred_ddec.detach(), gt_dra, gt_ddec)
+            with torch.no_grad():
+                anchor_err_ra = (pred_dra_pts.detach() - matched_offsets[:, 0]).abs()
+                anchor_err_dec = (pred_ddec_pts.detach() - matched_offsets[:, 1]).abs()
+                anchor_err_tot = torch.sqrt(anchor_err_ra ** 2 + anchor_err_dec ** 2 + 1e-10)
             agg["loss_total"] += float(loss_total.detach().item())
             agg["loss_dense"] += float(loss_dense.detach().item())
+            agg["loss_anchor"] += float(loss_anchor.detach().item())
+            agg["loss_affine"] += float(loss_affine.detach().item())
+            agg["loss_residual"] += float(loss_residual.detach().item())
             agg["loss_smooth"] += float(loss_smooth.detach().item())
             agg["mae_ra"] += metrics["mae_ra"]
             agg["mae_dec"] += metrics["mae_dec"]
             agg["mae_total"] += metrics["mae_total"]
             agg["p68_total"] += metrics["p68_total"]
+            agg["anchor_mae_total"] += float(anchor_err_tot.mean().item())
+            agg["anchor_p68_total"] += float(torch.quantile(anchor_err_tot.view(-1), 0.68).item())
             agg["frac_01arcsec"] += metrics["frac_01arcsec"]
             agg["frac_02arcsec"] += metrics["frac_02arcsec"]
             agg["match_count"] += float(sample["match_count"])
@@ -844,10 +1044,12 @@ def train(args):
                 val_str = (
                     f" | val_MAE={val_metrics.get('mae_total', 0.0) * 1000:.1f}mas"
                     f" val_p68={val_metrics.get('p68_total', 0.0) * 1000:.1f}mas"
+                    f" val_anchor={val_metrics.get('anchor_mae_total', 0.0) * 1000:.1f}mas"
                 )
             print(
                 f"Epoch {epoch:03d} | "
                 f"train_MAE={train_metrics.get('mae_total', 0.0) * 1000:.1f}mas "
+                f"train_anchor={train_metrics.get('anchor_mae_total', 0.0) * 1000:.1f}mas "
                 f"train_p68={train_metrics.get('p68_total', 0.0) * 1000:.1f}mas "
                 f"loss={train_metrics.get('loss_total', 0.0):.5f} "
                 f"bands={train_metrics.get('input_band_count', 0.0):.1f} "
@@ -978,6 +1180,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--weight-decay", type=float, default=0.01)
     p.add_argument("--grad-clip", type=float, default=1.0)
     p.add_argument("--smooth-weight", type=float, default=0.02)
+    p.add_argument("--anchor-weight", type=float, default=2.0,
+                   help="Extra weight on matched-source anchor loss.")
+    p.add_argument("--affine-weight", type=float, default=1.0,
+                   help="Extra weight on teacher affine-component supervision.")
+    p.add_argument("--residual-weight", type=float, default=1.0,
+                   help="Extra weight on teacher residual-component supervision.")
+    p.add_argument("--teacher-amp-gain", type=float, default=2.0,
+                   help="Extra per-pixel weight for large teacher offsets.")
+    p.add_argument("--teacher-grad-gain", type=float, default=2.0,
+                   help="Extra per-pixel weight for large teacher gradients.")
     p.add_argument("--val-frac", type=float, default=0.15)
     p.add_argument("--finite-frac-thresh", type=float, default=0.30)
     p.add_argument("--no-mmap", action="store_true")
