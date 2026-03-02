@@ -31,6 +31,7 @@ from dataset import (
 )
 from field_solver import evaluate_control_grid_mesh, solve_control_grid_field
 from matcher import LocalAstrometryMatcher
+from viz import save_tile_diagnostic
 from jaisp_dataset_v4 import RUBIN_BAND_ORDER, _to_float32
 from source_matching import (
     build_detection_image,
@@ -199,6 +200,7 @@ def predict_tile(
     raw_mag = np.hypot(kept_raw[:, 0], kept_raw[:, 1]) * 1000.0
     pred_mag = np.hypot(pred_offsets[:, 0], pred_offsets[:, 1]) * 1000.0
     return {
+        'vis_image': vis_img,
         'vis_wcs_header': vhdr,
         'vis_shape': vis_img.shape,
         'vis_xy': kept_xy,
@@ -225,6 +227,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--output', type=str, required=True)
     p.add_argument('--summary-json', type=str, default='')
     p.add_argument('--tile-id', type=str, default='')
+    p.add_argument('--plot-dir', type=str, default='',
+                   help='Optional directory to save one diagnostic PNG per exported tile.')
     p.add_argument('--input-bands', type=str, nargs='+', default=[], help='Optional Rubin input bands. Defaults to checkpoint config.')
     p.add_argument('--detect-bands', type=str, nargs='+', default=['g', 'r', 'i', 'z'])
 
@@ -289,6 +293,9 @@ def main():
             f"[tile] {tile_id}:{target_band} matches={row['matches']} raw_med={row['raw_median_mas']:.1f}mas "
             f"pred_med={row['pred_median_mas']:.1f}mas sigma_med={row['sigma_median_mas']:.1f}mas"
         )
+        if args.plot_dir:
+            plot_path = os.path.join(args.plot_dir, f'{prefix}.png')
+            save_tile_diagnostic(item, tile_id, target_band, input_bands, plot_path)
 
     if len(hdus) == 1:
         raise RuntimeError('No tiles were exported.')

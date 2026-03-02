@@ -6,7 +6,8 @@ import os
 import time
 from collections import defaultdict
 from pathlib import Path
-from typing import Dict
+from types import SimpleNamespace
+from typing import Dict, Sequence
 
 import numpy as np
 import torch
@@ -25,7 +26,9 @@ from dataset import (
     normalize_rubin_bands,
     split_tile_pairs,
 )
+from infer_concordance import predict_tile
 from matcher import LocalAstrometryMatcher
+from viz import make_tile_diagnostic_figure
 
 try:
     import wandb
@@ -33,33 +36,58 @@ except ImportError:
     wandb = None
 
 
-def compute_loss(out: Dict[str, torch.Tensor], target_offset_arcsec: torch.Tensor) -> Dict[str, torch.Tensor]:
+def _target_pixel_shift(target_offset_arcsec: torch.Tensor, pixel_to_sky: torch.Tensor) -> torch.Tensor:
+    inv = torch.linalg.pinv(pixel_to_sky)
+    return torch.bmm(inv, target_offset_arcsec.unsqueeze(-1)).squeeze(-1)
+
+
+def compute_loss(
+    out: Dict[str, torch.Tensor],
+    target_offset_arcsec: torch.Tensor,
+    pixel_to_sky: torch.Tensor,
+    pixel_loss_weight: float,
+) -> Dict[str, torch.Tensor]:
     pred = out['pred_offset_arcsec']
     err = pred - target_offset_arcsec
     radial = torch.sqrt((err ** 2).sum(dim=1) + 1e-10)
     sigma = torch.exp(out['log_sigma']).clamp_min(1e-4)
     loss_main = (radial / sigma + out['log_sigma']).mean()
+    target_px = _target_pixel_shift(target_offset_arcsec, pixel_to_sky)
+    loss_px = (
+        torch.nn.functional.smooth_l1_loss(out['dx_px'], target_px[:, 0])
+        + torch.nn.functional.smooth_l1_loss(out['dy_px'], target_px[:, 1])
+    )
     loss_reg = 0.01 * ((out['dx_px'] ** 2 + out['dy_px'] ** 2).mean())
-    loss_total = loss_main + loss_reg
+    loss_total = loss_main + float(max(0.0, pixel_loss_weight)) * loss_px + loss_reg
     return {
         'loss_total': loss_total,
         'loss_main': loss_main,
+        'loss_px': loss_px,
         'loss_reg': loss_reg,
     }
 
 
 @torch.no_grad()
-def compute_metrics(out: Dict[str, torch.Tensor], target_offset_arcsec: torch.Tensor) -> Dict[str, float]:
+def compute_metrics(
+    out: Dict[str, torch.Tensor],
+    target_offset_arcsec: torch.Tensor,
+    pixel_to_sky: torch.Tensor,
+) -> Dict[str, float]:
     pred = out['pred_offset_arcsec']
     err = pred - target_offset_arcsec
     err_ra = err[:, 0].abs()
     err_dec = err[:, 1].abs()
     err_total = torch.sqrt(err_ra ** 2 + err_dec ** 2 + 1e-10)
+    target_px = _target_pixel_shift(target_offset_arcsec, pixel_to_sky)
+    err_px = torch.sqrt(
+        (out['dx_px'] - target_px[:, 0]) ** 2 + (out['dy_px'] - target_px[:, 1]) ** 2 + 1e-10
+    )
     return {
         'mae_ra': float(err_ra.mean().item()),
         'mae_dec': float(err_dec.mean().item()),
         'mae_total': float(err_total.mean().item()),
         'p68_total': float(torch.quantile(err_total, 0.68).item()),
+        'mae_px': float(err_px.mean().item()),
         'frac_01arcsec': float((err_total < 0.1).float().mean().item()),
         'frac_02arcsec': float((err_total < 0.2).float().mean().item()),
         'sigma_median': float(torch.exp(out['log_sigma']).median().item()),
@@ -129,7 +157,57 @@ def make_preview(model, sample: Dict, device: torch.device, epoch: int, split_na
     return img
 
 
-def run_epoch(split_name, loader, model, optimizer, device, grad_clip: float) -> Dict[str, float]:
+def make_field_preview(
+    model,
+    device: torch.device,
+    preview_pairs: Sequence[tuple[str, str, str]],
+    target_band: str,
+    input_bands: list[str],
+    detect_bands: list[str],
+    args,
+    epoch: int,
+    split_name: str,
+):
+    if wandb is None:
+        return None
+
+    preview_args = SimpleNamespace(
+        patch_size=args.patch_size,
+        batch_size=args.batch_size,
+        min_matches=args.min_matches,
+        max_matches=args.max_matches,
+        max_sep_arcsec=args.max_sep_arcsec,
+        clip_sigma=args.clip_sigma,
+        rubin_nsig=args.rubin_nsig,
+        vis_nsig=args.vis_nsig,
+        rubin_smooth=args.rubin_smooth,
+        vis_smooth=args.vis_smooth,
+        rubin_min_dist=args.rubin_min_dist,
+        vis_min_dist=args.vis_min_dist,
+        max_sources_rubin=args.max_sources_rubin,
+        max_sources_vis=args.max_sources_vis,
+        detect_clip_sigma=args.detect_clip_sigma,
+        refine_radius=args.refine_radius,
+        refine_flux_floor_sigma=args.refine_flux_floor_sigma,
+        grid_h=args.preview_grid_h,
+        grid_w=args.preview_grid_w,
+        smooth_lambda=args.preview_smooth_lambda,
+        dstep=args.preview_dstep,
+    )
+    for tile_id, rubin_path, euclid_path in preview_pairs:
+        item = predict_tile(model, device, rubin_path, euclid_path, target_band, input_bands, detect_bands, preview_args)
+        if item is None:
+            continue
+        fig = make_tile_diagnostic_figure(item, tile_id, target_band, input_bands)
+        fig.suptitle(f"Epoch {epoch} | {split_name} fixed tile | standalone local matcher", y=0.99)
+        out = wandb.Image(fig)
+        import matplotlib.pyplot as plt
+        plt.close(fig)
+        return out
+    return None
+
+
+def run_epoch(split_name, loader, model, optimizer, device, grad_clip: float, pixel_loss_weight: float) -> Dict[str, float]:
     is_train = optimizer is not None
     model.train(mode=is_train)
     agg = defaultdict(float)
@@ -147,7 +225,7 @@ def run_epoch(split_name, loader, model, optimizer, device, grad_clip: float) ->
 
         with torch.set_grad_enabled(is_train):
             out = model(rubin, vis, pix2sky)
-            losses = compute_loss(out, target)
+            losses = compute_loss(out, target, pix2sky, pixel_loss_weight=pixel_loss_weight)
             loss = losses['loss_total']
             if is_train:
                 loss.backward()
@@ -155,7 +233,7 @@ def run_epoch(split_name, loader, model, optimizer, device, grad_clip: float) ->
                     torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
                 optimizer.step()
 
-        metrics = compute_metrics(out, target)
+        metrics = compute_metrics(out, target, pix2sky)
         for k, v in losses.items():
             agg[k] += float(v.detach().item())
         for k, v in metrics.items():
