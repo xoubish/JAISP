@@ -129,9 +129,7 @@ def make_tile_diagnostic_figure(
     raw_mas = raw_offsets * 1000.0
     mesh_mag_mas = np.hypot(dra, ddec) * 1000.0
 
-    # Evaluate the smooth field at each anchor to get calibration residuals.
-    # resid_from_field: how far each NN prediction is from the solved smooth field.
-    # If σ is well-calibrated, high-σ anchors should have large residuals.
+    # Evaluate the smooth field at each anchor — used for the summary stats only.
     resid_from_field_mas = np.zeros(len(vis_xy), dtype=np.float32)
     valid_calib = np.zeros(len(vis_xy), dtype=bool)
     if _has_scipy and len(x_mesh) > 1 and len(y_mesh) > 1:
@@ -159,7 +157,7 @@ def make_tile_diagnostic_figure(
         p1v, p99v = float(vis.min()), float(vis.max())
     vis_extent = _mesh_extent(vis.shape)
     comp_lim_mas = max(20.0, float(
-        np.percentile(np.abs(np.concatenate([dra.ravel(), ddec.ravel()])), 99)) * 1000.0)
+        np.percentile(np.abs(np.concatenate([dra.ravel(), ddec.ravel()])), 95)) * 1000.0)
     dstep = int(round(float(x_mesh[1] - x_mesh[0]))) if len(x_mesh) > 1 else 1
 
     # Quiver arrows for field magnitude panel
@@ -209,15 +207,21 @@ def make_tile_diagnostic_figure(
 
     # ── Row 2: Quality checks ───────────────────────────────────────────────
 
-    # (1,0) Field magnitude + direction arrows on VIS
+    # (1,0) Field direction arrows on white background, colored by magnitude
     ax = axes[1, 0]
-    ax.imshow(vis, origin="lower", cmap="gray", vmin=p1v, vmax=p99v, aspect="auto")
-    im = ax.imshow(mesh_mag_mas, origin="lower", extent=vis_extent, cmap="magma",
-                   alpha=0.5, aspect="auto", interpolation="bilinear")
-    _outlined_quiver(ax, xx_q.ravel(), yy_q.ravel(), qu_u.ravel(), qu_v.ravel())
-    plt.colorbar(im, ax=ax, fraction=0.03, pad=0.02, label="|offset| (mas)")
+    ax.set_facecolor("white")
+    arrow_mag = np.hypot(qu_dx, qu_dy).ravel() / qu_div  # un-scaled magnitude
+    vmax_arrow = float(np.percentile(np.hypot(dra, ddec) * 1000.0, 95))
+    q = ax.quiver(
+        xx_q.ravel(), yy_q.ravel(), qu_u.ravel(), qu_v.ravel(),
+        arrow_mag,
+        cmap="plasma", clim=(0, max(vmax_arrow, 1.0)),
+        angles="xy", scale_units="xy", scale=1,
+        width=0.003, alpha=0.9,
+    )
+    plt.colorbar(q, ax=ax, fraction=0.03, pad=0.02, label="|offset| (mas)")
     ax.set_xlim(0, vis.shape[1]); ax.set_ylim(0, vis.shape[0])
-    ax.set_title("Solved field magnitude + direction\n(arrows display-scaled for visibility)", fontsize=9)
+    ax.set_title("Solved field direction\n(arrow color = magnitude, display-scaled)", fontsize=9)
     ax.set_xlabel("VIS x (px)", fontsize=8); ax.set_ylabel("VIS y (px)", fontsize=8)
 
     # (1,1) Sky-plane scatter of predicted offsets colored by σ.
@@ -237,27 +241,30 @@ def make_tile_diagnostic_figure(
     ax.set_ylabel("ΔDec (mas)  →  North", fontsize=9)
     ax.set_title("Offset direction map (color = σ)\ntight cluster = consistent; spread = varying field", fontsize=9)
 
-    # (1,2) Uncertainty calibration.
-    # x = predicted σ, y = |pred − smooth field| (actual scatter from smooth field).
-    # Points near y=x → σ correctly represents how much predictions scatter.
-    # Points above y=x → σ is too small (overconfident).
-    # Points below y=x → σ is too large (underconfident).
+    # (1,2) Uncertainty calibration: does high σ correlate with the NN
+    # disagreeing more with the raw WCS measurement?
+    # x = predicted σ,  y = |raw_offset − pred_offset|
+    # Points near y=x → σ correctly tracks how much the NN deviates from raw.
+    # Points above y=x → model is overconfident.
+    # Points below y=x → model is underconfident.
     ax = axes[1, 2]
-    if valid_calib.sum() > 4:
-        s_c = sigma_mas[valid_calib]
-        r_c = resid_from_field_mas[valid_calib]
-        keep_c = _downsample_indices(int(valid_calib.sum()), 600)
-        ax.scatter(s_c[keep_c], r_c[keep_c], s=8, alpha=0.45, color="steelblue")
-        smax = max(float(np.percentile(s_c, 97)), 1.0)
-        ax.plot([0, smax], [0, smax], "k--", lw=1.2, label="y = x  (perfect calibration)")
-        ax.set_xlim(0, smax); ax.set_ylim(0, smax * 1.5)
-        ax.legend(fontsize=8)
-    else:
-        ax.text(0.5, 0.5, "Too few valid anchors\nfor calibration plot",
-                ha="center", va="center", transform=ax.transAxes, fontsize=9)
+    raw_pred_diff_mas = np.hypot(
+        (raw_offsets[:, 0] - pred_offsets[:, 0]) * 1000.0,
+        (raw_offsets[:, 1] - pred_offsets[:, 1]) * 1000.0,
+    )
+    keep_c = _downsample_indices(len(sigma_mas), 600)
+    s_c = sigma_mas[keep_c]
+    r_c = raw_pred_diff_mas[keep_c]
+    ax.scatter(s_c, r_c, s=8, alpha=0.45, color="steelblue")
+    smax = max(float(np.percentile(s_c, 97)), 1.0)
+    rmax = max(float(np.percentile(r_c, 97)), 1.0)
+    diag_max = max(smax, rmax)
+    ax.plot([0, diag_max], [0, diag_max], "k--", lw=1.2, label="y = x  (perfect calibration)")
+    ax.set_xlim(0, smax * 1.1); ax.set_ylim(0, rmax * 1.2)
+    ax.legend(fontsize=8)
     ax.set_xlabel("Predicted σ (mas)", fontsize=9)
-    ax.set_ylabel("|pred − smooth field| (mas)", fontsize=9)
-    ax.set_title("Uncertainty calibration\n(are σ estimates reliable?)", fontsize=9)
+    ax.set_ylabel("|raw WCS − NN pred| (mas)", fontsize=9)
+    ax.set_title("Uncertainty calibration\n(does σ track disagreement with raw WCS?)", fontsize=9)
 
     # ── Row 3: Model performance statistics ────────────────────────────────
 
@@ -266,7 +273,7 @@ def make_tile_diagnostic_figure(
     ax = axes[2, 0]
     all_vals = np.concatenate([pred_mas[:, 0], pred_mas[:, 1]])
     lim_h = max(20.0, float(np.percentile(np.abs(all_vals), 98)))
-    bins = np.linspace(-lim_h, lim_h, 40)
+    bins = np.linspace(-lim_h, lim_h, 20)
     ax.hist(pred_mas[:, 0], bins=bins, alpha=0.7, label="ΔRA*", color="tab:blue", density=True)
     ax.hist(pred_mas[:, 1], bins=bins, alpha=0.7, label="ΔDec", color="tab:orange", density=True)
     ax.axvline(0, color="gray", lw=0.8)
