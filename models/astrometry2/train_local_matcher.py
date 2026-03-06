@@ -96,9 +96,16 @@ def compute_metrics(
 
 
 def make_preview(model, sample: Dict, device: torch.device, epoch: int, split_name: str):
+    """
+    2×3 fixed-patch diagnostic figure logged to W&B each vis_every epochs.
+
+    Row 1: Rubin patch (normalized) | VIS patch (normalized) | Cost volume heatmap
+    Row 2: GT vs Pred offset arrows with σ circle (wide) | Stats text
+    """
     if wandb is None:
         return None
     import matplotlib.pyplot as plt
+    import matplotlib.gridspec as gridspec
 
     model.eval()
     with torch.no_grad():
@@ -106,52 +113,125 @@ def make_preview(model, sample: Dict, device: torch.device, epoch: int, split_na
         vis = sample['vis_patch'].unsqueeze(0).to(device)
         pix2sky = sample['pixel_to_sky'].unsqueeze(0).to(device)
         out = model(rubin, vis, pix2sky)
-    pred = out['pred_offset_arcsec'][0].cpu().numpy() * 1000.0
-    gt = sample['target_offset_arcsec'].numpy() * 1000.0
-    sigma = float(torch.exp(out['log_sigma'][0]).cpu().item() * 1000.0)
 
-    rubin_img = sample['rubin_patch'].numpy().mean(axis=0)
-    vis_img = sample['vis_patch'].numpy()[0]
+    pred_mas = out['pred_offset_arcsec'][0].cpu().numpy() * 1000.0
+    gt_mas = sample['target_offset_arcsec'].numpy() * 1000.0
+    sigma_mas = float(torch.exp(out['log_sigma'][0]).cpu().item()) * 1000.0
+    conf = float(out['confidence'][0].cpu().item())
+    coarse_dx = float(out['coarse_dx_px'][0].cpu().item())
+    coarse_dy = float(out['coarse_dy_px'][0].cpu().item())
+    mlp_dx = float((out['dx_px'] - out['coarse_dx_px'])[0].cpu().item())
+    mlp_dy = float((out['dy_px'] - out['coarse_dy_px'])[0].cpu().item())
+    err_mas = float(np.hypot(pred_mas[0] - gt_mas[0], pred_mas[1] - gt_mas[1]))
 
-    fig = plt.figure(figsize=(10, 8))
-    ax = fig.add_subplot(2, 2, 1)
-    ax.imshow(rubin_img, origin='lower', cmap='magma')
-    ax.set_title('Rubin reprojection patch')
+    # Patches are already background-subtracted + noise-normalized (from __getitem__).
+    rubin_np = sample['rubin_patch'].numpy()[0]   # first Rubin channel
+    vis_np = sample['vis_patch'].numpy()[0]
+    r = model.search_radius
 
-    ax = fig.add_subplot(2, 2, 2)
-    ax.imshow(vis_img, origin='lower', cmap='gray')
-    ax.set_title('VIS patch')
+    fig = plt.figure(figsize=(15, 8))
+    gs = gridspec.GridSpec(2, 3, figure=fig, hspace=0.42, wspace=0.32)
 
-    ax = fig.add_subplot(2, 2, 3)
-    ax.scatter([gt[0]], [pred[0]], c='tab:blue', s=40, label='DRA*')
-    ax.scatter([gt[1]], [pred[1]], c='tab:orange', s=40, label='DDec')
-    lim = max(20.0, abs(gt).max(), abs(pred).max())
-    ax.plot([-lim, lim], [-lim, lim], 'k--', lw=1.0)
+    def _show_patch(ax, img, title, cmap):
+        p1, p99 = np.percentile(img, [1, 99])
+        if p1 >= p99:
+            p1, p99 = float(img.min()), float(img.max()) + 1e-6
+        ax.imshow(img, origin='lower', cmap=cmap, vmin=p1, vmax=p99)
+        h, w = img.shape
+        ax.axhline(h / 2, color='cyan', lw=0.7, alpha=0.7)
+        ax.axvline(w / 2, color='cyan', lw=0.7, alpha=0.7)
+        ax.set_title(title, fontsize=9)
+        ax.set_xlabel('x (VIS px)', fontsize=8)
+        ax.tick_params(labelsize=7)
+
+    # (0,0) Rubin patch — what the model sees for the Rubin instrument
+    _show_patch(fig.add_subplot(gs[0, 0]), rubin_np,
+                f"Rubin {sample['target_band'].split('_')[1]}-band\n(bkg-sub, noise-norm)",
+                'magma')
+
+    # (0,1) VIS patch — the reference frame
+    _show_patch(fig.add_subplot(gs[0, 1]), vis_np,
+                'Euclid VIS\n(bkg-sub, noise-norm)', 'gray')
+
+    # (0,2) Cost volume — the (2r+1)² correlation scores between Rubin and VIS.
+    # The bright peak shows where the coarse cross-correlation found the best match.
+    # A sharp, isolated peak means high confidence. A flat/noisy map means poor match.
+    ax = fig.add_subplot(gs[0, 2])
+    if r > 0 and 'logits' in out:
+        logits_np = out['logits'][0].cpu().numpy()
+        cost_vol = logits_np.reshape(2 * r + 1, 2 * r + 1)
+        im = ax.imshow(cost_vol, origin='lower', cmap='hot',
+                       extent=[-r - 0.5, r + 0.5, -r - 0.5, r + 0.5])
+        plt.colorbar(im, ax=ax, fraction=0.046, label='cosine sim', pad=0.02)
+        ax.plot(coarse_dx, coarse_dy, 'c+', ms=12, mew=2.0,
+                label=f'coarse peak\n({coarse_dx:+.2f}, {coarse_dy:+.2f}) px')
+        ax.legend(fontsize=7, loc='upper right')
+        ax.set_xlabel('Δx (pixels)', fontsize=8)
+        ax.set_ylabel('Δy (pixels)', fontsize=8)
+    else:
+        ax.axis('off')
+        ax.text(0.5, 0.5, 'search_radius=0', ha='center', va='center',
+                transform=ax.transAxes, fontsize=9)
+    ax.set_title('Cost volume  (bright peak = coarse match)\nsharp isolated peak → high confidence', fontsize=9)
+    ax.tick_params(labelsize=7)
+
+    # (1, 0:2) Sky-plane offset diagram — GT and Pred arrows from origin.
+    # The orange circle shows the model's predicted 1σ uncertainty radius.
+    # The closer the red arrow (Pred) is to the blue arrow (GT), the better.
+    ax = fig.add_subplot(gs[1, :2])
+    lim = max(30.0, float(np.abs(np.concatenate([gt_mas, pred_mas])).max()) * 1.6, sigma_mas * 2.5)
+    theta = np.linspace(0, 2 * np.pi, 200)
+    ax.fill(sigma_mas * np.cos(theta), sigma_mas * np.sin(theta),
+            alpha=0.15, color='orange', zorder=1)
+    ax.plot(sigma_mas * np.cos(theta), sigma_mas * np.sin(theta),
+            color='darkorange', lw=1.0, ls='--', zorder=2,
+            label=f'1σ = {sigma_mas:.1f} mas  (predicted uncertainty radius)')
+    ax.annotate('', xy=(gt_mas[0], gt_mas[1]), xytext=(0, 0), zorder=3,
+                arrowprops=dict(arrowstyle='->', color='tab:blue', lw=2.2))
+    ax.annotate('', xy=(pred_mas[0], pred_mas[1]), xytext=(0, 0), zorder=3,
+                arrowprops=dict(arrowstyle='->', color='tab:red', lw=2.2))
+    ax.scatter([gt_mas[0]], [gt_mas[1]], c='tab:blue', s=70, zorder=5,
+               label=f'Ground truth   DRA*={gt_mas[0]:+.1f}  DDec={gt_mas[1]:+.1f} mas')
+    ax.scatter([pred_mas[0]], [pred_mas[1]], c='tab:red', s=70, zorder=5,
+               label=f'NN prediction  DRA*={pred_mas[0]:+.1f}  DDec={pred_mas[1]:+.1f} mas')
+    ax.axhline(0, color='lightgray', lw=0.8)
+    ax.axvline(0, color='lightgray', lw=0.8)
     ax.set_xlim(-lim, lim)
     ax.set_ylim(-lim, lim)
-    ax.set_xlabel('GT (mas)')
-    ax.set_ylabel('Pred (mas)')
-    ax.legend(loc='upper left')
-    ax.set_title('Offset prediction')
+    ax.set_aspect('equal')
+    ax.set_xlabel('ΔRA* (mas)  →  East', fontsize=9)
+    ax.set_ylabel('ΔDec (mas)  →  North', fontsize=9)
+    ax.set_title('Predicted vs ground-truth sky offset  (arrows from origin = sky displacement from Rubin to VIS)', fontsize=9)
+    ax.legend(loc='upper left', fontsize=8)
+    ax.tick_params(labelsize=7)
 
-    ax = fig.add_subplot(2, 2, 4)
+    # (1,2) Stats text
+    ax = fig.add_subplot(gs[1, 2])
     ax.axis('off')
+    calib = err_mas / max(sigma_mas, 1e-3)
+    calib_note = ('good' if 0.3 < calib < 3.0 else
+                  'overconfident — σ too small' if calib > 3.0 else
+                  'underconfident — σ too large')
     txt = (
-        f'{split_name} preview\n'
-        f"tile: {sample['tile_id']}\n"
-        f"target: {sample['target_band']}\n"
-        f"input: {', '.join(sample['input_bands'])}\n"
-        f'GT DRA*: {gt[0]:+.1f} mas\n'
-        f'GT DDec: {gt[1]:+.1f} mas\n'
-        f'Pred DRA*: {pred[0]:+.1f} mas\n'
-        f'Pred DDec: {pred[1]:+.1f} mas\n'
-        f'Pred sigma: {sigma:.1f} mas\n'
-        f"Confidence: {float(out['confidence'][0].cpu().item()):.3f}"
+        f'{split_name}  —  epoch {epoch}\n\n'
+        f"Tile:   {sample['tile_id']}\n"
+        f"Band:   {sample['target_band']}\n\n"
+        f'GT:      ({gt_mas[0]:+.1f}, {gt_mas[1]:+.1f}) mas\n'
+        f'Pred:    ({pred_mas[0]:+.1f}, {pred_mas[1]:+.1f}) mas\n'
+        f'|error|:  {err_mas:.1f} mas\n\n'
+        f'σ (predicted): {sigma_mas:.1f} mas\n'
+        f'|err|/σ: {calib:.2f}  [{calib_note}]\n\n'
+        f'Confidence:  {conf:.3f}\n'
+        f'Temperature: {float(model.temperature.detach().item()):.4f}\n\n'
+        f'Coarse (cost vol): ({coarse_dx:+.2f}, {coarse_dy:+.2f}) px\n'
+        f'MLP residual:      ({mlp_dx:+.2f}, {mlp_dy:+.2f}) px'
     )
-    ax.text(0.05, 0.95, txt, transform=ax.transAxes, va='top', fontfamily='monospace')
+    ax.text(0.05, 0.97, txt, transform=ax.transAxes, va='top',
+            fontfamily='monospace', fontsize=8.5,
+            bbox=dict(boxstyle='round,pad=0.5', facecolor='whitesmoke', alpha=0.95))
 
-    fig.suptitle(f'Epoch {epoch} | standalone local matcher')
-    fig.tight_layout(rect=[0, 0, 1, 0.96])
+    fig.suptitle(f'Epoch {epoch}  |  fixed-patch preview  |  standalone local matcher',
+                 y=1.0, fontsize=11)
     img = wandb.Image(fig)
     plt.close(fig)
     return img
@@ -345,8 +425,8 @@ def train(args):
     train_samples = build_patch_samples(train_pairs, split_name='train', **common_kwargs)
     val_samples = build_patch_samples(val_pairs, split_name='val', **common_kwargs) if val_pairs else []
 
-    train_dataset = MatchedPatchDataset(train_samples)
-    val_dataset = MatchedPatchDataset(val_samples) if val_samples else None
+    train_dataset = MatchedPatchDataset(train_samples, augment=True)
+    val_dataset = MatchedPatchDataset(val_samples, augment=False) if val_samples else None
     train_loader = make_loader(train_dataset, batch_size=args.batch_size, num_workers=args.num_workers, shuffle=True)
     val_loader = make_loader(val_dataset, batch_size=args.batch_size, num_workers=args.num_workers, shuffle=False) if val_dataset else None
 

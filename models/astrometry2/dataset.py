@@ -30,6 +30,27 @@ from source_matching import (
 VIS_PIXEL_SCALE_ARCSEC = 0.1
 
 
+def _normalize_patch(arr: np.ndarray, floor: float = 1e-3) -> np.ndarray:
+    """
+    Background-subtract and noise-normalize a patch to ~unit background noise.
+
+    Uses robust statistics (median background, MAD noise estimate) so the
+    bright source itself does not bias the normalization.
+
+    After normalization:
+      - Background pixels → values clustered around 0 with std ≈ 1
+      - Source pixels     → large positive values (S/N >> 1)
+
+    This makes patches cross-tile and cross-instrument comparable regardless
+    of exposure depth, sky level, or flux calibration differences.
+    """
+    bg = float(np.median(arr))
+    diff = arr.astype(np.float32) - bg
+    mad = float(np.median(np.abs(diff)))
+    scale = max(1.4826 * mad, float(floor))
+    return (diff / scale).astype(np.float32)
+
+
 def normalize_rubin_band(name: str) -> str:
     band = str(name).strip().lower()
     if band in RUBIN_BAND_ORDER:
@@ -321,21 +342,57 @@ def build_patch_samples(
 
 
 class MatchedPatchDataset(torch.utils.data.Dataset):
-    def __init__(self, samples: Sequence[Dict]):
+    def __init__(self, samples: Sequence[Dict], augment: bool = False):
         self.samples = list(samples)
+        self.augment = bool(augment)
 
     def __len__(self) -> int:
         return len(self.samples)
 
     def __getitem__(self, idx: int) -> Dict:
         s = self.samples[idx]
+        rubin_patch = s['rubin_patch'].copy()           # [C, H, W]
+        vis_patch = s['vis_patch'].copy()               # [1, H, W]
+        pix2sky = s['pixel_to_sky'].copy()              # [2, 2]
+
+        if self.augment:
+            # Horizontal flip (W-axis):
+            #   Both patches are flipped so relative source morphology is preserved.
+            #   The sky-coord target offset is unchanged (it's a physical measurement).
+            #   The pixel_to_sky Jacobian's x-column (col 0) must be negated because
+            #   after the flip, a +x pixel displacement maps to the opposite sky direction.
+            if np.random.rand() > 0.5:
+                rubin_patch = rubin_patch[:, :, ::-1].copy()
+                vis_patch = vis_patch[:, :, ::-1].copy()
+                pix2sky = pix2sky.copy()
+                pix2sky[:, 0] = -pix2sky[:, 0]
+
+            # Vertical flip (H-axis): same logic, y-column (col 1) is negated.
+            if np.random.rand() > 0.5:
+                rubin_patch = rubin_patch[:, ::-1, :].copy()
+                vis_patch = vis_patch[:, ::-1, :].copy()
+                pix2sky = pix2sky.copy()
+                pix2sky[:, 1] = -pix2sky[:, 1]
+
+        # Normalize after augmentation: per-patch background subtraction +
+        # MAD noise scaling. Applied per-channel for Rubin (each band
+        # independently) and to the single VIS channel.
+        # This makes patches cross-tile comparable regardless of depth,
+        # and turns sources into clean S/N peaks for the encoder.
+        rubin_patch = np.stack(
+            [_normalize_patch(rubin_patch[c]) for c in range(rubin_patch.shape[0])], axis=0
+        )
+        vis_patch = np.stack(
+            [_normalize_patch(vis_patch[c]) for c in range(vis_patch.shape[0])], axis=0
+        )
+
         return {
             'tile_id': s['tile_id'],
             'anchor_xy': torch.from_numpy(s['anchor_xy'].copy()),
-            'rubin_patch': torch.from_numpy(s['rubin_patch'].copy()),
-            'vis_patch': torch.from_numpy(s['vis_patch'].copy()),
+            'rubin_patch': torch.from_numpy(rubin_patch),
+            'vis_patch': torch.from_numpy(vis_patch),
             'target_offset_arcsec': torch.from_numpy(s['target_offset_arcsec'].copy()),
-            'pixel_to_sky': torch.from_numpy(s['pixel_to_sky'].copy()),
+            'pixel_to_sky': torch.from_numpy(pix2sky),
             'input_bands': list(s['input_bands']),
             'target_band': s['target_band'],
         }
