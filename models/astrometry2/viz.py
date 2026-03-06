@@ -1,10 +1,84 @@
 """Visualization helpers for the standalone astrometry2 pipeline."""
 
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict
 
 import matplotlib.pyplot as plt
 import numpy as np
+
+
+def _downsample_indices(n: int, max_n: int) -> np.ndarray:
+    if n <= max_n:
+        return np.arange(n, dtype=np.int64)
+    return np.linspace(0, n - 1, max_n, dtype=np.int64)
+
+
+def _sky_to_display_vectors(item: Dict, dra_arcsec: np.ndarray, ddec_arcsec: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    dra_arcsec = np.asarray(dra_arcsec, dtype=np.float32)
+    ddec_arcsec = np.asarray(ddec_arcsec, dtype=np.float32)
+    hdr = item.get("vis_wcs_header")
+    if hdr is not None:
+        try:
+            from astropy.wcs import WCS
+
+            vis = np.asarray(item["vis_image"], dtype=np.float32)
+            h, w = int(vis.shape[0]), int(vis.shape[1])
+            cx = 0.5 * max(0.0, float(w - 1))
+            cy = 0.5 * max(0.0, float(h - 1))
+            wcs = WCS(hdr)
+            ra0, dec0 = wcs.wcs_pix2world([[cx, cy]], 0)[0]
+            ra_x, dec_x = wcs.wcs_pix2world([[cx + 1.0, cy]], 0)[0]
+            ra_y, dec_y = wcs.wcs_pix2world([[cx, cy + 1.0]], 0)[0]
+            cos_dec = np.cos(np.deg2rad(dec0))
+            pix_to_sky = np.array(
+                [
+                    [(ra_x - ra0) * cos_dec * 3600.0, (ra_y - ra0) * cos_dec * 3600.0],
+                    [(dec_x - dec0) * 3600.0, (dec_y - dec0) * 3600.0],
+                ],
+                dtype=np.float32,
+            )
+            sky_to_pix = np.linalg.pinv(pix_to_sky)
+            flat = np.stack([dra_arcsec.reshape(-1), ddec_arcsec.reshape(-1)], axis=0)
+            disp = sky_to_pix @ flat
+            return disp[0].reshape(dra_arcsec.shape), disp[1].reshape(dra_arcsec.shape)
+        except Exception:
+            pass
+
+    mag = np.hypot(dra_arcsec, ddec_arcsec)
+    scale = max(1e-4, float(np.percentile(mag, 95)))
+    return (dra_arcsec / scale) * 8.0, (ddec_arcsec / scale) * 8.0
+
+
+def _mesh_extent(vis_shape: tuple[int, int]) -> list[float]:
+    h, w = int(vis_shape[0]), int(vis_shape[1])
+    return [0.0, float(w), 0.0, float(h)]
+
+
+def _outlined_quiver(ax, x, y, u, v, color: str = "black", halo: str = "white", width: float = 0.0024) -> None:
+    ax.quiver(
+        x,
+        y,
+        u,
+        v,
+        color=halo,
+        angles="xy",
+        scale_units="xy",
+        scale=1,
+        width=width * 2.0,
+        alpha=0.9,
+    )
+    ax.quiver(
+        x,
+        y,
+        u,
+        v,
+        color=color,
+        angles="xy",
+        scale_units="xy",
+        scale=1,
+        width=width,
+        alpha=0.95,
+    )
 
 
 def make_tile_diagnostic_figure(
@@ -42,79 +116,88 @@ def make_tile_diagnostic_figure(
     step = max(1, min(dra.shape[0], dra.shape[1]) // 18)
     xx_s = xx[::step, ::step]
     yy_s = yy[::step, ::step]
-    qu_u = dra[::step, ::step] / 0.1
-    qu_v = ddec[::step, ::step] / 0.1
-    qu_scale = max(1.0, float(np.percentile(np.hypot(qu_u, qu_v), 95)))
-    qu_div = max(1.0, qu_scale / 12.0)
+    qu_dx, qu_dy = _sky_to_display_vectors(item, dra[::step, ::step], ddec[::step, ::step])
+    qu_mag_px = np.hypot(qu_dx, qu_dy)
+    qu_div = max(1.0, float(np.percentile(qu_mag_px, 95)) / 20.0)
+    qu_u = qu_dx / qu_div
+    qu_v = qu_dy / qu_div
+    vis_extent = _mesh_extent(vis.shape)
+    comp_lim_mas = max(20.0, float(np.percentile(np.abs(np.concatenate([dra.ravel(), ddec.ravel()])), 99)) * 1000.0)
 
     fig = plt.figure(figsize=(16, 10))
 
     ax = fig.add_subplot(2, 3, 1)
     ax.imshow(vis, origin="lower", cmap="gray", vmin=p1, vmax=p99)
     sc = ax.scatter(vis_xy[:, 0], vis_xy[:, 1], c=raw_mag_mas, s=12, cmap="magma", alpha=0.9)
-    ax.set_title("VIS + matched anchors (raw |offset|)")
+    ax.set_xlim(0, vis.shape[1])
+    ax.set_ylim(0, vis.shape[0])
+    ax.set_title("Raw matched-source offsets on VIS")
     plt.colorbar(sc, ax=ax, fraction=0.046, label="mas")
 
     ax = fig.add_subplot(2, 3, 2)
     ax.imshow(vis, origin="lower", cmap="gray", vmin=p1, vmax=p99)
-    ax.quiver(
-        xx_s,
-        yy_s,
-        qu_u / qu_div,
-        qu_v / qu_div,
-        color="white",
-        angles="xy",
-        scale_units="xy",
-        scale=1,
-        width=0.0024,
-        alpha=0.85,
+    im = ax.imshow(
+        mesh_mag_mas,
+        origin="lower",
+        extent=vis_extent,
+        cmap="magma",
+        alpha=0.55,
+        interpolation="bilinear",
     )
-    ax.set_title("Predicted mesh field (quiver on VIS)")
+    _outlined_quiver(ax, xx_s, yy_s, qu_u, qu_v, color="black", halo="white", width=0.0019)
+    ax.set_xlim(0, vis.shape[1])
+    ax.set_ylim(0, vis.shape[0])
+    ax.set_title("Solved field |offset| with display arrows")
+    plt.colorbar(im, ax=ax, fraction=0.046, label="mas")
 
     ax = fig.add_subplot(2, 3, 3)
-    im = ax.imshow(mesh_mag_mas, origin="lower", cmap="viridis")
-    ax.quiver(
-        xx_s,
-        yy_s,
-        qu_u / qu_div,
-        qu_v / qu_div,
-        color="white",
-        angles="xy",
-        scale_units="xy",
-        scale=1,
-        width=0.0022,
-        alpha=0.7,
+    im = ax.imshow(
+        dra * 1000.0,
+        origin="lower",
+        extent=vis_extent,
+        cmap="coolwarm",
+        vmin=-comp_lim_mas,
+        vmax=comp_lim_mas,
+        interpolation="bilinear",
     )
-    ax.set_title("Predicted mesh |offset|")
+    ax.set_title("Solved DRA* field")
     plt.colorbar(im, ax=ax, fraction=0.046, label="mas")
 
     ax = fig.add_subplot(2, 3, 4)
+    im = ax.imshow(
+        ddec * 1000.0,
+        origin="lower",
+        extent=vis_extent,
+        cmap="coolwarm",
+        vmin=-comp_lim_mas,
+        vmax=comp_lim_mas,
+        interpolation="bilinear",
+    )
+    ax.set_title("Solved DDec field")
+    plt.colorbar(im, ax=ax, fraction=0.046, label="mas")
+
+    ax = fig.add_subplot(2, 3, 5)
     ax.imshow(vis, origin="lower", cmap="gray", vmin=p1, vmax=p99)
-    n = vis_xy.shape[0]
-    keep = np.arange(n)
-    if n > 200:
-        keep = np.random.choice(n, 200, replace=False)
-    ax.quiver(
+    keep = _downsample_indices(int(vis_xy.shape[0]), 200)
+    resid_dx, resid_dy = _sky_to_display_vectors(item, resid[keep, 0], resid[keep, 1])
+    resid_mag = np.hypot(resid_dx, resid_dy)
+    resid_div = max(1.0, float(np.percentile(resid_mag, 95)) / 20.0)
+    _outlined_quiver(
+        ax,
         vis_xy[keep, 0],
         vis_xy[keep, 1],
-        resid[keep, 0] * 1000.0 / 12.0,
-        resid[keep, 1] * 1000.0 / 12.0,
-        angles="xy",
-        scale_units="xy",
-        scale=1,
+        resid_dx / resid_div,
+        resid_dy / resid_div,
         color="crimson",
-        width=0.0025,
-        alpha=0.8,
+        halo="white",
+        width=0.0019,
     )
     ax.set_xlim(0, vis.shape[1])
     ax.set_ylim(0, vis.shape[0])
-    ax.set_title("Anchor residuals (pred - raw)")
+    ax.set_title("Anchor residuals (network - raw)")
 
-    ax = fig.add_subplot(2, 3, 5)
-    m = min(2000, vis_xy.shape[0])
-    keep2 = np.arange(vis_xy.shape[0])
-    if keep2.size > m:
-        keep2 = np.random.choice(keep2, m, replace=False)
+    ax = fig.add_subplot(2, 3, 6)
+    keep2 = _downsample_indices(int(vis_xy.shape[0]), 2000)
     ax.scatter(raw_offsets[keep2, 0] * 1000.0, pred_offsets[keep2, 0] * 1000.0, s=5, alpha=0.35, label="DRA*")
     ax.scatter(raw_offsets[keep2, 1] * 1000.0, pred_offsets[keep2, 1] * 1000.0, s=5, alpha=0.35, label="DDec")
     lim = max(
@@ -129,33 +212,33 @@ def make_tile_diagnostic_figure(
     ax.plot([-lim, lim], [-lim, lim], "k--", lw=1.0)
     ax.set_xlim(-lim, lim)
     ax.set_ylim(-lim, lim)
-    ax.set_xlabel("Raw match (mas)")
-    ax.set_ylabel("Pred local (mas)")
-    ax.set_title("Anchor offsets: raw vs pred")
+    ax.set_xlabel("Raw matched-source offset (mas)")
+    ax.set_ylabel("Network local prediction (mas)")
+    ax.set_title("Anchor comparison")
     ax.legend(loc="upper left")
-
-    ax = fig.add_subplot(2, 3, 6)
-    ax.axis("off")
     summary = (
         f"tile: {tile_id}\n"
         f"target: {rubin_band} -> euclid_VIS\n"
         f"input: {', '.join(input_bands)}\n"
         f"anchors: {vis_xy.shape[0]}\n"
+        f"raw = WCS-matched source measurement\n"
+        f"pred = network output at same anchor\n"
         f"raw |offset| median: {float(np.median(raw_mag_mas)):.1f} mas\n"
         f"pred |offset| median: {float(np.median(pred_mag_mas)):.1f} mas\n"
         f"anchor residual median: {float(np.median(resid_mag_mas)):.1f} mas\n"
         f"anchor residual p68: {float(np.percentile(resid_mag_mas, 68)):.1f} mas\n"
         f"sigma median: {float(np.median(sigma_mas)):.1f} mas\n"
-        f"mesh |offset| p95: {float(np.percentile(mesh_mag_mas, 95)):.1f} mas"
+        f"field |offset| p95: {float(np.percentile(mesh_mag_mas, 95)):.1f} mas\n"
+        f"arrows are display-scaled for visibility"
     )
     ax.text(
-        0.05,
-        0.95,
+        0.03,
+        0.97,
         summary,
         transform=ax.transAxes,
         va="top",
         fontfamily="monospace",
-        fontsize=10,
+        fontsize=9,
         bbox=dict(boxstyle="round,pad=0.5", facecolor="whitesmoke", alpha=0.95),
     )
 

@@ -289,9 +289,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--lr', type=float, default=3e-4)
     p.add_argument('--weight-decay', type=float, default=1e-4)
     p.add_argument('--grad-clip', type=float, default=1.0)
+    p.add_argument('--pixel-loss-weight', type=float, default=1.0)
     p.add_argument('--val-frac', type=float, default=0.15)
     p.add_argument('--seed', type=int, default=42)
     p.add_argument('--device', type=str, default='')
+    p.add_argument('--vis-every', type=int, default=1,
+                   help='Render the fixed patch/tile previews every N epochs.')
+    p.add_argument('--preview-grid-h', type=int, default=12)
+    p.add_argument('--preview-grid-w', type=int, default=12)
+    p.add_argument('--preview-smooth-lambda', type=float, default=1e-2)
+    p.add_argument('--preview-dstep', type=int, default=4)
 
     p.add_argument('--wandb-project', type=str, default='JAISP-Astrometry2')
     p.add_argument('--wandb-run-name', type=str, default='')
@@ -357,6 +364,7 @@ def train(args):
 
     preview_sample = val_dataset[0] if val_dataset is not None and len(val_dataset) > 0 else train_dataset[0]
     preview_split = 'val' if val_dataset is not None and len(val_dataset) > 0 else 'train'
+    preview_pairs = val_pairs if val_pairs else train_pairs
 
     wandb_run = None
     if args.wandb_mode != 'disabled' and wandb is not None:
@@ -374,14 +382,30 @@ def train(args):
     best_score = float('inf')
     for epoch in range(1, args.epochs + 1):
         t0 = time.time()
-        train_metrics = run_epoch('train', train_loader, model, optimizer, device, args.grad_clip)
+        train_metrics = run_epoch(
+            'train',
+            train_loader,
+            model,
+            optimizer,
+            device,
+            args.grad_clip,
+            args.pixel_loss_weight,
+        )
         scheduler.step()
         train_metrics['lr'] = optimizer.param_groups[0]['lr']
 
         val_metrics = {}
         if val_loader is not None:
             with torch.no_grad():
-                val_metrics = run_epoch('val', val_loader, model, None, device, args.grad_clip)
+                val_metrics = run_epoch(
+                    'val',
+                    val_loader,
+                    model,
+                    None,
+                    device,
+                    args.grad_clip,
+                    args.pixel_loss_weight,
+                )
 
         score = val_metrics.get('mae_total', train_metrics['mae_total'])
         elapsed = time.time() - t0
@@ -390,12 +414,14 @@ def train(args):
             val_str = (
                 f" | val_MAE={val_metrics.get('mae_total', 0.0) * 1000:.1f}mas"
                 f" val_p68={val_metrics.get('p68_total', 0.0) * 1000:.1f}mas"
+                f" val_px={val_metrics.get('mae_px', 0.0):.3f}px"
             )
         temp_str = f" temp={train_metrics.get('temp', 0.0):.4f}" if 'temp' in train_metrics else ''
         print(
             f"Epoch {epoch:03d} | "
             f"train_MAE={train_metrics.get('mae_total', 0.0) * 1000:.1f}mas "
             f"train_p68={train_metrics.get('p68_total', 0.0) * 1000:.1f}mas "
+            f"train_px={train_metrics.get('mae_px', 0.0):.3f}px "
             f"loss={train_metrics.get('loss_total', 0.0):.5f}"
             f"{val_str}{temp_str} t={elapsed:.1f}s"
         )
@@ -406,9 +432,23 @@ def train(args):
         log_data['time_sec'] = elapsed
         if wandb_run is not None:
             try:
-                preview = make_preview(model, preview_sample, device, epoch, preview_split)
-                if preview is not None:
-                    log_data['preview/fixed_patch'] = preview
+                if epoch % max(1, int(args.vis_every)) == 0:
+                    preview = make_preview(model, preview_sample, device, epoch, preview_split)
+                    if preview is not None:
+                        log_data['preview/fixed_patch'] = preview
+                    field_preview = make_field_preview(
+                        model,
+                        device,
+                        preview_pairs,
+                        target_band,
+                        train_samples[0]['input_bands'],
+                        detect_bands,
+                        args,
+                        epoch,
+                        preview_split,
+                    )
+                    if field_preview is not None:
+                        log_data['preview/fixed_tile'] = field_preview
             except Exception as exc:
                 print(f'Preview rendering failed at epoch {epoch}: {exc}')
             wandb_run.log(log_data, step=epoch)
