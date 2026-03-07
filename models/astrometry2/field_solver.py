@@ -79,6 +79,7 @@ def solve_control_grid_field(
     vis_shape: Tuple[int, int],
     grid_shape: Tuple[int, int] = (12, 12),
     smooth_lambda: float = 1e-2,
+    anchor_lambda: float = 1e-4,
 ) -> Dict[str, np.ndarray]:
     vis_xy = np.asarray(vis_xy, dtype=np.float64)
     offsets_arcsec = np.asarray(offsets_arcsec, dtype=np.float64)
@@ -91,18 +92,29 @@ def solve_control_grid_field(
     sqrt_w = np.sqrt(np.clip(weights, 1e-6, None))[:, None]
     aw = a * sqrt_w
     d = _smoothness_rows(grid_shape)
+
+    # Anchor (ridge) regularization: penalises absolute node values, not just
+    # differences.  The smoothness rows only penalise *differences* between
+    # adjacent nodes, leaving a constant-shift null-space.  Edge/corner nodes
+    # with no nearby sources are completely unconstrained in magnitude and can
+    # drift to large values.  The anchor term pulls every unconstrained node
+    # toward zero without biasing interior nodes that are well-anchored by data.
+    n_nodes = int(grid_shape[0]) * int(grid_shape[1])
+    anchor = np.sqrt(max(0.0, float(anchor_lambda))) * np.eye(n_nodes, dtype=np.float64)
+
+    parts = [aw]
     if d.size:
-        reg = np.sqrt(max(0.0, float(smooth_lambda))) * d
-        design = np.concatenate([aw, reg], axis=0)
-    else:
-        design = aw
+        parts.append(np.sqrt(max(0.0, float(smooth_lambda))) * d)
+    parts.append(anchor)
+    design = np.concatenate(parts, axis=0)
 
     coeffs = []
     for k in range(2):
         yw = offsets_arcsec[:, k:k+1] * sqrt_w
         rhs = yw[:, 0]
         if d.size:
-            rhs = np.concatenate([rhs, np.zeros((reg.shape[0],), dtype=np.float64)], axis=0)
+            rhs = np.concatenate([rhs, np.zeros((d.shape[0],), dtype=np.float64)], axis=0)
+        rhs = np.concatenate([rhs, np.zeros(n_nodes, dtype=np.float64)], axis=0)
         sol, _, _, _ = np.linalg.lstsq(design, rhs, rcond=None)
         coeffs.append(sol.reshape(grid_shape))
 

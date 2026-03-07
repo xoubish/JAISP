@@ -4,383 +4,383 @@
     "rubin_band": "rubin_r",
     "matches": 114,
     "raw_median_mas": 45.5124397277832,
-    "pred_median_mas": 22.90420913696289,
-    "sigma_median_mas": 38.74668502807617
+    "pred_median_mas": 35.115482330322266,
+    "sigma_median_mas": 21.09577178955078
   },
   {
     "tile_id": "tile_x00000_y00768",
     "rubin_band": "rubin_r",
     "matches": 101,
     "raw_median_mas": 52.39455032348633,
-    "pred_median_mas": 24.0080509185791,
-    "sigma_median_mas": 42.185401916503906
+    "pred_median_mas": 32.926509857177734,
+    "sigma_median_mas": 26.160043716430664
   },
   {
     "tile_id": "tile_x00000_y01024",
     "rubin_band": "rubin_r",
     "matches": 98,
     "raw_median_mas": 47.23741912841797,
-    "pred_median_mas": 22.287372589111328,
-    "sigma_median_mas": 42.53858184814453
+    "pred_median_mas": 31.515613555908203,
+    "sigma_median_mas": 25.784284591674805
   },
   {
     "tile_id": "tile_x00000_y02560",
     "rubin_band": "rubin_r",
     "matches": 127,
     "raw_median_mas": 52.408329010009766,
-    "pred_median_mas": 24.253700256347656,
-    "sigma_median_mas": 47.812747955322266
+    "pred_median_mas": 36.595882415771484,
+    "sigma_median_mas": 22.908931732177734
   },
   {
     "tile_id": "tile_x00256_y01024",
     "rubin_band": "rubin_r",
     "matches": 83,
     "raw_median_mas": 46.78432083129883,
-    "pred_median_mas": 21.93401336669922,
-    "sigma_median_mas": 43.86570739746094
+    "pred_median_mas": 33.449703216552734,
+    "sigma_median_mas": 24.21702766418457
   },
   {
     "tile_id": "tile_x00256_y01280",
     "rubin_band": "rubin_r",
     "matches": 90,
     "raw_median_mas": 55.6363525390625,
-    "pred_median_mas": 24.69646453857422,
-    "sigma_median_mas": 46.42326354980469
+    "pred_median_mas": 39.22290802001953,
+    "sigma_median_mas": 23.30425453186035
   },
   {
     "tile_id": "tile_x00256_y02304",
     "rubin_band": "rubin_r",
     "matches": 108,
     "raw_median_mas": 51.89031982421875,
-    "pred_median_mas": 22.87825584411621,
-    "sigma_median_mas": 46.919742584228516
+    "pred_median_mas": 35.851402282714844,
+    "sigma_median_mas": 21.564014434814453
   },
   {
     "tile_id": "tile_x00512_y01024",
     "rubin_band": "rubin_r",
     "matches": 102,
     "raw_median_mas": 53.14122772216797,
-    "pred_median_mas": 21.439960479736328,
-    "sigma_median_mas": 49.2097053527832
+    "pred_median_mas": 33.92397689819336,
+    "sigma_median_mas": 29.834739685058594
   },
   {
     "tile_id": "tile_x00512_y01280",
     "rubin_band": "rubin_r",
     "matches": 93,
     "raw_median_mas": 65.51123046875,
-    "pred_median_mas": 24.917789459228516,
-    "sigma_median_mas": 52.22465133666992
+    "pred_median_mas": 42.15874099731445,
+    "sigma_median_mas": 22.41501808166504
   },
   {
     "tile_id": "tile_x00512_y02048",
     "rubin_band": "rubin_r",
     "matches": 93,
     "raw_median_mas": 40.92711639404297,
-    "pred_median_mas": 22.766231536865234,
-    "sigma_median_mas": 48.17436599731445
+    "pred_median_mas": 28.89417266845703,
+    "sigma_median_mas": 21.141611099243164
   },
   {
     "tile_id": "tile_x00512_y02304",
     "rubin_band": "rubin_r",
     "matches": 91,
     "raw_median_mas": 52.805885314941406,
-    "pred_median_mas": 22.762800216674805,
-    "sigma_median_mas": 46.108734130859375
+    "pred_median_mas": 37.44573211669922,
+    "sigma_median_mas": 21.20584487915039
   },
   {
     "tile_id": "tile_x00768_y00000",
     "rubin_band": "rubin_r",
     "matches": 99,
     "raw_median_mas": 49.19367218017578,
-    "pred_median_mas": 24.316890716552734,
-    "sigma_median_mas": 45.44072723388672
+    "pred_median_mas": 37.0576171875,
+    "sigma_median_mas": 29.435625076293945
   },
   {
     "tile_id": "tile_x00768_y01024",
     "rubin_band": "rubin_r",
     "matches": 104,
     "raw_median_mas": 45.86863708496094,
-    "pred_median_mas": 20.48056983947754,
-    "sigma_median_mas": 46.172359466552734
+    "pred_median_mas": 29.04187774658203,
+    "sigma_median_mas": 21.9136905670166
   },
   {
     "tile_id": "tile_x00768_y01280",
     "rubin_band": "rubin_r",
     "matches": 94,
     "raw_median_mas": 64.9385986328125,
-    "pred_median_mas": 24.832111358642578,
-    "sigma_median_mas": 49.20917892456055
+    "pred_median_mas": 37.86563491821289,
+    "sigma_median_mas": 21.558425903320312
   },
   {
     "tile_id": "tile_x00768_y02048",
     "rubin_band": "rubin_r",
     "matches": 75,
     "raw_median_mas": 32.52722930908203,
-    "pred_median_mas": 21.23124122619629,
-    "sigma_median_mas": 42.31233596801758
+    "pred_median_mas": 28.894393920898438,
+    "sigma_median_mas": 20.280685424804688
   },
   {
     "tile_id": "tile_x01024_y00000",
     "rubin_band": "rubin_r",
     "matches": 110,
     "raw_median_mas": 50.74807357788086,
-    "pred_median_mas": 24.478160858154297,
-    "sigma_median_mas": 44.116146087646484
+    "pred_median_mas": 30.65091323852539,
+    "sigma_median_mas": 33.76132583618164
   },
   {
     "tile_id": "tile_x01280_y00256",
     "rubin_band": "rubin_r",
     "matches": 108,
     "raw_median_mas": 50.746925354003906,
-    "pred_median_mas": 21.463043212890625,
-    "sigma_median_mas": 46.89408493041992
+    "pred_median_mas": 31.78774642944336,
+    "sigma_median_mas": 28.882041931152344
   },
   {
     "tile_id": "tile_x01280_y00512",
     "rubin_band": "rubin_r",
     "matches": 124,
     "raw_median_mas": 52.032283782958984,
-    "pred_median_mas": 22.677438735961914,
-    "sigma_median_mas": 45.817359924316406
+    "pred_median_mas": 30.71332359313965,
+    "sigma_median_mas": 25.206510543823242
   },
   {
     "tile_id": "tile_x01280_y00768",
     "rubin_band": "rubin_r",
     "matches": 136,
     "raw_median_mas": 48.84177780151367,
-    "pred_median_mas": 25.778526306152344,
-    "sigma_median_mas": 49.51021194458008
+    "pred_median_mas": 31.72905731201172,
+    "sigma_median_mas": 29.223848342895508
   },
   {
     "tile_id": "tile_x01280_y01024",
     "rubin_band": "rubin_r",
     "matches": 121,
     "raw_median_mas": 48.49034881591797,
-    "pred_median_mas": 23.366138458251953,
-    "sigma_median_mas": 53.21234893798828
+    "pred_median_mas": 33.578128814697266,
+    "sigma_median_mas": 28.42740249633789
   },
   {
     "tile_id": "tile_x01280_y02560",
     "rubin_band": "rubin_r",
     "matches": 85,
     "raw_median_mas": 46.56513595581055,
-    "pred_median_mas": 24.453542709350586,
-    "sigma_median_mas": 42.22792434692383
+    "pred_median_mas": 35.59735107421875,
+    "sigma_median_mas": 23.50971221923828
   },
   {
     "tile_id": "tile_x01536_y00512",
     "rubin_band": "rubin_r",
     "matches": 117,
     "raw_median_mas": 46.577457427978516,
-    "pred_median_mas": 23.147592544555664,
-    "sigma_median_mas": 45.0268440246582
+    "pred_median_mas": 32.0110969543457,
+    "sigma_median_mas": 25.64241600036621
   },
   {
     "tile_id": "tile_x01536_y00768",
     "rubin_band": "rubin_r",
     "matches": 132,
     "raw_median_mas": 48.49562454223633,
-    "pred_median_mas": 20.871898651123047,
-    "sigma_median_mas": 45.56916809082031
+    "pred_median_mas": 27.397239685058594,
+    "sigma_median_mas": 32.98483657836914
   },
   {
     "tile_id": "tile_x01536_y01536",
     "rubin_band": "rubin_r",
     "matches": 111,
     "raw_median_mas": 57.48163986206055,
-    "pred_median_mas": 23.94733428955078,
-    "sigma_median_mas": 48.4170036315918
+    "pred_median_mas": 35.410762786865234,
+    "sigma_median_mas": 27.245994567871094
   },
   {
     "tile_id": "tile_x01536_y01792",
     "rubin_band": "rubin_r",
     "matches": 106,
     "raw_median_mas": 50.77875518798828,
-    "pred_median_mas": 23.802988052368164,
-    "sigma_median_mas": 52.80711364746094
+    "pred_median_mas": 35.90085983276367,
+    "sigma_median_mas": 20.389760971069336
   },
   {
     "tile_id": "tile_x01792_y00512",
     "rubin_band": "rubin_r",
     "matches": 92,
     "raw_median_mas": 45.932899475097656,
-    "pred_median_mas": 22.983827590942383,
-    "sigma_median_mas": 46.391963958740234
+    "pred_median_mas": 29.237930297851562,
+    "sigma_median_mas": 27.380891799926758
   },
   {
     "tile_id": "tile_x01792_y00768",
     "rubin_band": "rubin_r",
     "matches": 105,
     "raw_median_mas": 42.35443878173828,
-    "pred_median_mas": 19.87173080444336,
-    "sigma_median_mas": 41.684112548828125
+    "pred_median_mas": 20.947460174560547,
+    "sigma_median_mas": 34.51032257080078
   },
   {
     "tile_id": "tile_x01792_y01536",
     "rubin_band": "rubin_r",
     "matches": 121,
     "raw_median_mas": 53.33706283569336,
-    "pred_median_mas": 24.58535385131836,
-    "sigma_median_mas": 47.279842376708984
+    "pred_median_mas": 32.127166748046875,
+    "sigma_median_mas": 31.170269012451172
   },
   {
     "tile_id": "tile_x01792_y01792",
     "rubin_band": "rubin_r",
     "matches": 98,
     "raw_median_mas": 46.71858215332031,
-    "pred_median_mas": 23.012229919433594,
-    "sigma_median_mas": 48.614219665527344
+    "pred_median_mas": 33.27739715576172,
+    "sigma_median_mas": 20.089035034179688
   },
   {
     "tile_id": "tile_x02048_y00512",
     "rubin_band": "rubin_r",
     "matches": 98,
     "raw_median_mas": 55.988521575927734,
-    "pred_median_mas": 24.974315643310547,
-    "sigma_median_mas": 45.801979064941406
+    "pred_median_mas": 36.57494354248047,
+    "sigma_median_mas": 24.55304527282715
   },
   {
     "tile_id": "tile_x02048_y00768",
     "rubin_band": "rubin_r",
     "matches": 109,
     "raw_median_mas": 43.49530792236328,
-    "pred_median_mas": 23.373626708984375,
-    "sigma_median_mas": 43.47190475463867
+    "pred_median_mas": 32.37115478515625,
+    "sigma_median_mas": 25.212486267089844
   },
   {
     "tile_id": "tile_x02048_y01536",
     "rubin_band": "rubin_r",
     "matches": 97,
     "raw_median_mas": 44.46928405761719,
-    "pred_median_mas": 27.258670806884766,
-    "sigma_median_mas": 41.766971588134766
+    "pred_median_mas": 35.16322326660156,
+    "sigma_median_mas": 22.96247100830078
   },
   {
     "tile_id": "tile_x02048_y01792",
     "rubin_band": "rubin_r",
     "matches": 83,
     "raw_median_mas": 45.039554595947266,
-    "pred_median_mas": 24.806875228881836,
-    "sigma_median_mas": 40.76064682006836
+    "pred_median_mas": 30.56220054626465,
+    "sigma_median_mas": 18.944238662719727
   },
   {
     "tile_id": "tile_x02304_y00512",
     "rubin_band": "rubin_r",
     "matches": 91,
     "raw_median_mas": 36.31760787963867,
-    "pred_median_mas": 21.119871139526367,
-    "sigma_median_mas": 40.76183319091797
+    "pred_median_mas": 28.197818756103516,
+    "sigma_median_mas": 24.272483825683594
   },
   {
     "tile_id": "tile_x02304_y00768",
     "rubin_band": "rubin_r",
     "matches": 123,
     "raw_median_mas": 41.3395881652832,
-    "pred_median_mas": 21.626901626586914,
-    "sigma_median_mas": 45.9725456237793
+    "pred_median_mas": 33.81620788574219,
+    "sigma_median_mas": 24.256580352783203
   },
   {
     "tile_id": "tile_x02304_y01024",
     "rubin_band": "rubin_r",
     "matches": 92,
     "raw_median_mas": 45.04228973388672,
-    "pred_median_mas": 19.66352081298828,
-    "sigma_median_mas": 44.93074035644531
+    "pred_median_mas": 35.734580993652344,
+    "sigma_median_mas": 20.601003646850586
   },
   {
     "tile_id": "tile_x02304_y02048",
     "rubin_band": "rubin_r",
     "matches": 62,
     "raw_median_mas": 33.62004852294922,
-    "pred_median_mas": 21.756778717041016,
-    "sigma_median_mas": 33.558998107910156
+    "pred_median_mas": 22.938438415527344,
+    "sigma_median_mas": 22.188899993896484
   },
   {
     "tile_id": "tile_x02304_y02304",
     "rubin_band": "rubin_r",
     "matches": 100,
     "raw_median_mas": 49.205116271972656,
-    "pred_median_mas": 27.005958557128906,
-    "sigma_median_mas": 39.840633392333984
+    "pred_median_mas": 30.817222595214844,
+    "sigma_median_mas": 27.85285186767578
   },
   {
     "tile_id": "tile_x02560_y00256",
     "rubin_band": "rubin_r",
     "matches": 43,
     "raw_median_mas": 27.69071388244629,
-    "pred_median_mas": 23.09639549255371,
-    "sigma_median_mas": 22.325468063354492
+    "pred_median_mas": 21.22504997253418,
+    "sigma_median_mas": 18.59463882446289
   },
   {
     "tile_id": "tile_x02560_y00512",
     "rubin_band": "rubin_r",
     "matches": 78,
     "raw_median_mas": 32.53672409057617,
-    "pred_median_mas": 21.63479232788086,
-    "sigma_median_mas": 35.82168960571289
+    "pred_median_mas": 22.63113021850586,
+    "sigma_median_mas": 24.85382843017578
   },
   {
     "tile_id": "tile_x02560_y00768",
     "rubin_band": "rubin_r",
     "matches": 103,
     "raw_median_mas": 39.10176086425781,
-    "pred_median_mas": 21.960399627685547,
-    "sigma_median_mas": 42.31846237182617
+    "pred_median_mas": 26.421430587768555,
+    "sigma_median_mas": 25.435842514038086
   },
   {
     "tile_id": "tile_x02560_y01024",
     "rubin_band": "rubin_r",
     "matches": 108,
     "raw_median_mas": 46.55590057373047,
-    "pred_median_mas": 21.212677001953125,
-    "sigma_median_mas": 44.93084716796875
+    "pred_median_mas": 35.875892639160156,
+    "sigma_median_mas": 22.461109161376953
   },
   {
     "tile_id": "tile_x02560_y01280",
     "rubin_band": "rubin_r",
     "matches": 114,
     "raw_median_mas": 46.027130126953125,
-    "pred_median_mas": 21.765361785888672,
-    "sigma_median_mas": 44.05810546875
+    "pred_median_mas": 35.74729537963867,
+    "sigma_median_mas": 22.199602127075195
   },
   {
     "tile_id": "tile_x02560_y01536",
     "rubin_band": "rubin_r",
     "matches": 105,
     "raw_median_mas": 40.55488204956055,
-    "pred_median_mas": 21.32195472717285,
-    "sigma_median_mas": 41.97235107421875
+    "pred_median_mas": 30.08392333984375,
+    "sigma_median_mas": 22.006132125854492
   },
   {
     "tile_id": "tile_x02560_y02304",
     "rubin_band": "rubin_r",
     "matches": 126,
     "raw_median_mas": 54.673789978027344,
-    "pred_median_mas": 23.987049102783203,
-    "sigma_median_mas": 41.83143997192383
+    "pred_median_mas": 32.909542083740234,
+    "sigma_median_mas": 28.246379852294922
   },
   {
     "tile_id": "tile_x02560_y02560",
     "rubin_band": "rubin_r",
     "matches": 127,
     "raw_median_mas": 47.184539794921875,
-    "pred_median_mas": 20.81294822692871,
-    "sigma_median_mas": 39.04747772216797
+    "pred_median_mas": 33.60859680175781,
+    "sigma_median_mas": 27.975849151611328
   },
   {
     "tile_id": "tile_x02560_y02816",
     "rubin_band": "rubin_r",
     "matches": 134,
     "raw_median_mas": 48.375003814697266,
-    "pred_median_mas": 22.11911392211914,
-    "sigma_median_mas": 42.76947021484375
+    "pred_median_mas": 33.877689361572266,
+    "sigma_median_mas": 28.645578384399414
   },
   {
     "tile_id": "tile_x02816_y02304",
     "rubin_band": "rubin_r",
     "matches": 110,
     "raw_median_mas": 55.01464080810547,
-    "pred_median_mas": 19.390499114990234,
-    "sigma_median_mas": 40.54731369018555
+    "pred_median_mas": 31.62653350830078,
+    "sigma_median_mas": 27.6097354888916
   }
 ]

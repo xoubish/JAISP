@@ -194,6 +194,7 @@ def predict_tile(
         vis_shape=vis_img.shape,
         grid_shape=(args.grid_h, args.grid_w),
         smooth_lambda=args.smooth_lambda,
+        anchor_lambda=args.anchor_lambda,
     )
     mesh = evaluate_control_grid_mesh(field, vis_shape=vis_img.shape, dstep=args.dstep)
 
@@ -253,6 +254,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--grid-h', type=int, default=12)
     p.add_argument('--grid-w', type=int, default=12)
     p.add_argument('--smooth-lambda', type=float, default=1e-2)
+    p.add_argument('--anchor-lambda', type=float, default=1e-4,
+                   help='Ridge regularisation strength: pulls unconstrained edge nodes toward zero.')
     p.add_argument('--dstep', type=int, default=8)
     p.add_argument('--device', type=str, default='')
     return p
