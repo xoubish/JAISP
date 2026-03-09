@@ -148,8 +148,8 @@ def make_tile_diagnostic_figure(
                 (pred_offsets[:, 1] - fdd) * 1000.0,
             )
             valid_calib = np.isfinite(resid_from_field_mas)
-        except Exception:
-            pass
+        except Exception as exc:
+            print(f'[viz] Field interpolation failed: {exc}')
 
     # Display setup
     p1v, p99v = np.percentile(vis, [1, 99])

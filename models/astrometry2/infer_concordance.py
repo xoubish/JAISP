@@ -102,7 +102,8 @@ def _load_nisp_data(edata) -> Dict[str, tuple[np.ndarray, WCS]]:
             img = np.nan_to_num(_to_float32(edata[img_key]), nan=0.0)
             wcs = WCS(safe_header_from_card_string(edata[wcs_key].item()))
             nisp_data[nb] = (img, wcs)
-        except Exception:
+        except Exception as exc:
+            print(f'[infer] Failed to load NISP band {nb}: {exc}')
             continue
     return nisp_data
 
@@ -184,6 +185,19 @@ def predict_tile(
             input_bands_norm.append(nb)
     if not input_bands_norm:
         return None
+
+    # Validate input channel count matches the model before touching any data.
+    try:
+        model_in_ch = model.rubin_encoder.net[0].in_channels
+        if len(input_bands_norm) != model_in_ch:
+            print(
+                f'[skip] {os.path.basename(rubin_path)}: input band count mismatch — '
+                f'model expects {model_in_ch} channels but got {len(input_bands_norm)} '
+                f'({input_bands_norm}). Use --include-nisp or adjust --input-bands.'
+            )
+            return None
+    except AttributeError:
+        pass  # Non-standard model; skip the check.
 
     try:
         rdata = np.load(rubin_path, allow_pickle=True)

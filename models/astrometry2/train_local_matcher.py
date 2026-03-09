@@ -55,10 +55,16 @@ def compute_loss(
     sigma = torch.exp(out['log_sigma']).clamp_min(1e-4)
     loss_main = (radial / sigma + out['log_sigma']).mean()
     target_px = _target_pixel_shift(target_offset_arcsec, pixel_to_sky)
+    # Weight pixel-space loss by predicted uncertainty so noisy sources are
+    # down-weighted consistently with the sky-space NLL.  Detach sigma so
+    # the gradient through loss_px doesn't drive sigma to grow artificially.
+    sigma_detached = torch.exp(out['log_sigma']).clamp_min(1e-4).detach()
     loss_px = (
-        torch.nn.functional.smooth_l1_loss(out['dx_px'], target_px[:, 0])
-        + torch.nn.functional.smooth_l1_loss(out['dy_px'], target_px[:, 1])
-    )
+        (
+            torch.nn.functional.smooth_l1_loss(out['dx_px'], target_px[:, 0], reduction='none')
+            + torch.nn.functional.smooth_l1_loss(out['dy_px'], target_px[:, 1], reduction='none')
+        ) / sigma_detached
+    ).mean()
     loss_reg = 0.01 * ((out['dx_px'] ** 2 + out['dy_px'] ** 2).mean())
     loss_total = loss_main + float(max(0.0, pixel_loss_weight)) * loss_px + loss_reg
     return {

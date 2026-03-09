@@ -58,7 +58,8 @@ def _load_nisp_band(edata, band: str):
         img = np.nan_to_num(_to_float32(edata[img_key]), nan=0.0)
         wcs = WCS(safe_header_from_card_string(edata[wcs_key].item()))
         return img, wcs
-    except Exception:
+    except Exception as exc:
+        print(f'[dataset] Failed to load NISP band {band}: {exc}')
         return None, None
 
 

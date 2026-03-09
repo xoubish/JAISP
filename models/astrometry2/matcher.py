@@ -154,32 +154,49 @@ class LocalAstrometryMatcher(nn.Module):
         logits = (rubin_w.unsqueeze(2) * vis_w).sum(dim=(1, 3, 4)) * scale
         return logits
 
-    def forward(
+    def _encode(
         self,
         rubin_patch: torch.Tensor,
         vis_patch: torch.Tensor,
-        pixel_to_sky: torch.Tensor,
-        band_idx: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
+        """Run encoders and coarse cost-volume once.  Shared by forward() and predict_all_bands()."""
         rubin_feat = self.rubin_encoder(rubin_patch)
         vis_feat = self.vis_encoder(vis_patch)
 
-        # --- Coarse offset via spatially-weighted cost volume + soft-argmax ---
         logits = self._weighted_cost_volume(rubin_feat, vis_feat)
         probs = torch.softmax(logits / self.temperature, dim=1)
         coarse_dx = (probs * self.dx_lut[:, :probs.shape[1]]).sum(dim=1)
         coarse_dy = (probs * self.dy_lut[:, :probs.shape[1]]).sum(dim=1)
-        coarse = torch.stack([coarse_dx, coarse_dy], dim=1)
 
-        # --- MLP refinement with center-biased Gaussian pooling ---
         B, C, H, W = rubin_feat.shape
         gauss = self._center_weights(H, W, rubin_feat.device, rubin_feat.dtype)
         rubin_pool = (rubin_feat * gauss).sum(dim=(2, 3))
         vis_pool = (vis_feat * gauss).sum(dim=(2, 3))
-        delta_pool = rubin_pool - vis_pool
 
-        # Concatenate band embedding if multi-band.
-        parts = [rubin_pool, vis_pool, delta_pool, coarse]
+        return {
+            'rubin_pool': rubin_pool,
+            'vis_pool': vis_pool,
+            'delta_pool': rubin_pool - vis_pool,
+            'coarse_dx': coarse_dx,
+            'coarse_dy': coarse_dy,
+            'probs': probs,
+            'logits': logits,
+        }
+
+    def _mlp_head(
+        self,
+        enc: Dict[str, torch.Tensor],
+        pixel_to_sky: torch.Tensor,
+        band_idx: Optional[torch.Tensor],
+        B: int,
+        device: torch.device,
+    ) -> Dict[str, torch.Tensor]:
+        """Apply MLP refinement head for a single band and convert to sky coords."""
+        coarse_dx = enc['coarse_dx']
+        coarse_dy = enc['coarse_dy']
+        coarse = torch.stack([coarse_dx, coarse_dy], dim=1)
+        parts = [enc['rubin_pool'], enc['vis_pool'], enc['delta_pool'], coarse]
+
         if self.band_embedding is not None and band_idx is not None:
             if band_idx.dtype != torch.long:
                 band_idx = band_idx.long()
@@ -190,21 +207,16 @@ class LocalAstrometryMatcher(nn.Module):
                     f'band_idx out of range: min={lo}, max={hi}, '
                     f'n_target_bands={self.n_target_bands}'
                 )
-            band_emb = self.band_embedding(band_idx)  # [B, band_embed_dim]
-            parts.append(band_emb)
+            parts.append(self.band_embedding(band_idx))
         elif self.band_embedding is not None:
             # Default to band 0 if not provided (backward compat).
-            band_emb = self.band_embedding.weight[0:1].expand(B, -1)
-            parts.append(band_emb)
+            parts.append(self.band_embedding.weight[0:1].expand(B, -1))
 
-        pooled = torch.cat(parts, dim=1)
-        residual = self.residual_head(pooled)
-
+        residual = self.residual_head(torch.cat(parts, dim=1))
         dx_px = coarse_dx + residual[:, 0]
         dy_px = coarse_dy + residual[:, 1]
         log_sigma = residual[:, 2].clamp(min=-6.0, max=3.0)
 
-        # --- Convert pixel shift to sky offset via local WCS Jacobian ---
         pix = torch.stack([dx_px, dy_px], dim=1).unsqueeze(-1)
         pred_sky = torch.bmm(pixel_to_sky, pix).squeeze(-1)
 
@@ -215,10 +227,20 @@ class LocalAstrometryMatcher(nn.Module):
             'coarse_dy_px': coarse_dy,
             'pred_offset_arcsec': pred_sky,
             'log_sigma': log_sigma,
-            'confidence': probs.max(dim=1).values,
+            'confidence': enc['probs'].max(dim=1).values,
             'temperature': self.temperature.detach(),
-            'logits': logits,
+            'logits': enc['logits'],
         }
+
+    def forward(
+        self,
+        rubin_patch: torch.Tensor,
+        vis_patch: torch.Tensor,
+        pixel_to_sky: torch.Tensor,
+        band_idx: Optional[torch.Tensor] = None,
+    ) -> Dict[str, torch.Tensor]:
+        enc = self._encode(rubin_patch, vis_patch)
+        return self._mlp_head(enc, pixel_to_sky, band_idx, rubin_patch.shape[0], rubin_patch.device)
 
     def predict_all_bands(
         self,
@@ -229,51 +251,12 @@ class LocalAstrometryMatcher(nn.Module):
         """Run encoder once, then predict offsets for every target band.
 
         Returns a dict mapping band_idx -> output dict.
-        Useful at inference to get all 6 concordance fields from one
-        encoder pass per source.
+        Useful at inference to get all concordance fields from one encoder pass per source.
         """
-        rubin_feat = self.rubin_encoder(rubin_patch)
-        vis_feat = self.vis_encoder(vis_patch)
-
-        logits = self._weighted_cost_volume(rubin_feat, vis_feat)
-        probs = torch.softmax(logits / self.temperature, dim=1)
-        coarse_dx = (probs * self.dx_lut[:, :probs.shape[1]]).sum(dim=1)
-        coarse_dy = (probs * self.dy_lut[:, :probs.shape[1]]).sum(dim=1)
-        coarse = torch.stack([coarse_dx, coarse_dy], dim=1)
-
-        B, C, H, W = rubin_feat.shape
-        gauss = self._center_weights(H, W, rubin_feat.device, rubin_feat.dtype)
-        rubin_pool = (rubin_feat * gauss).sum(dim=(2, 3))
-        vis_pool = (vis_feat * gauss).sum(dim=(2, 3))
-        delta_pool = rubin_pool - vis_pool
-        base_parts = [rubin_pool, vis_pool, delta_pool, coarse]
-
+        B = rubin_patch.shape[0]
+        enc = self._encode(rubin_patch, vis_patch)
         results = {}
         for bi in range(self.n_target_bands):
-            parts = list(base_parts)
-            if self.band_embedding is not None:
-                idx_t = torch.full((B,), bi, dtype=torch.long, device=rubin_patch.device)
-                parts.append(self.band_embedding(idx_t))
-
-            pooled = torch.cat(parts, dim=1)
-            residual = self.residual_head(pooled)
-
-            dx_px = coarse_dx + residual[:, 0]
-            dy_px = coarse_dy + residual[:, 1]
-            log_sigma = residual[:, 2].clamp(min=-6.0, max=3.0)
-
-            pix = torch.stack([dx_px, dy_px], dim=1).unsqueeze(-1)
-            pred_sky = torch.bmm(pixel_to_sky, pix).squeeze(-1)
-
-            results[bi] = {
-                'dx_px': dx_px,
-                'dy_px': dy_px,
-                'coarse_dx_px': coarse_dx,
-                'coarse_dy_px': coarse_dy,
-                'pred_offset_arcsec': pred_sky,
-                'log_sigma': log_sigma,
-                'confidence': probs.max(dim=1).values,
-                'temperature': self.temperature.detach(),
-                'logits': logits,
-            }
+            idx_t = torch.full((B,), bi, dtype=torch.long, device=rubin_patch.device)
+            results[bi] = self._mlp_head(enc, pixel_to_sky, idx_t, B, rubin_patch.device)
         return results

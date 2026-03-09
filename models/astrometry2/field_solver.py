@@ -274,13 +274,24 @@ def solve_control_grid_field(
     design = np.concatenate(parts, axis=0)
 
     coeffs = []
+    _warned_cond = False
     for k in range(2):
         yw = offsets_arcsec[:, k:k+1] * sqrt_w
         rhs = yw[:, 0]
         if d.size:
             rhs = np.concatenate([rhs, np.zeros((d.shape[0],), dtype=np.float64)], axis=0)
         rhs = np.concatenate([rhs, np.zeros(n_nodes, dtype=np.float64)], axis=0)
-        sol, _, _, _ = np.linalg.lstsq(design, rhs, rcond=None)
+        sol, _, rank, sv = np.linalg.lstsq(design, rhs, rcond=None)
+        if not _warned_cond and sv is not None and len(sv) > 1 and sv[-1] > 0:
+            cond = sv[0] / sv[-1]
+            if cond > 1e8:
+                print(
+                    f'[field_solver] WARNING: design matrix is ill-conditioned '
+                    f'(cond={cond:.1e}, rank={rank}/{n_nodes}). '
+                    f'Field may be unreliable — consider raising anchor_lambda or '
+                    f'using --auto-grid to reduce grid resolution.'
+                )
+                _warned_cond = True
         coeffs.append(sol.reshape(grid_shape))
 
     return {
