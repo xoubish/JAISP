@@ -1,4 +1,10 @@
-"""Native-resolution local patch matcher for Rubin<->VIS residual astrometry."""
+"""Native-resolution local patch matcher for Rubin<->VIS residual astrometry.
+
+Changes from v1:
+  - Cost volume computed via F.unfold instead of a Python loop over (2r+1)^2
+    displacements.  Single tensor operation, cleaner, and faster at larger
+    search radii.
+"""
 
 import math
 from typing import Dict
@@ -115,19 +121,11 @@ class LocalAstrometryMatcher(nn.Module):
 
     def _weighted_cost_volume(self, rubin_feat: torch.Tensor, vis_feat: torch.Tensor) -> torch.Tensor:
         """
-        Spatially-weighted cross-correlation cost volume.
+        Spatially-weighted cross-correlation cost volume via unfold.
 
-        For each candidate displacement (dx, dy) in the search window, the
-        score is a weighted average of per-pixel cosine similarities, where
-        the weights are:
-          spatial_w = rubin_energy * gaussian_center_prior
-
-        This means:
-          - Bright point sources (high feature energy) dominate the vote.
-          - Edge pixels (outside the Gaussian center prior) contribute less.
-
-        Without this, uniform background pixels collectively overwhelm the
-        signal from the actual source being centered in the patch.
+        Instead of looping over (2r+1)^2 displacements, we pad the VIS
+        features and use F.unfold to extract all shifted patches in one op,
+        then compute the weighted dot product as a batched matmul.
         """
         rubin_n = F.normalize(self.rubin_proj(rubin_feat), dim=1, eps=1e-6)
         vis_n = F.normalize(self.vis_proj(vis_feat), dim=1, eps=1e-6)
@@ -138,26 +136,34 @@ class LocalAstrometryMatcher(nn.Module):
             sim = (rubin_n * vis_n).sum(dim=1, keepdim=True)
             return sim.mean(dim=(2, 3))  # [B, 1]
 
-        # Spatial attention: source brightness × Gaussian center prior.
-        rubin_energy = (rubin_n * rubin_n).sum(dim=1, keepdim=True)       # [B, 1, H, W]
+        # Spatial attention: source brightness x Gaussian center prior.
+        rubin_energy = (rubin_n * rubin_n).sum(dim=1, keepdim=True)        # [B, 1, H, W]
         gauss = self._center_weights(H, W, rubin_n.device, rubin_n.dtype)  # [1, 1, H, W]
         spatial_w = rubin_energy * gauss
         spatial_w = spatial_w / (spatial_w.sum(dim=(2, 3), keepdim=True) + 1e-8)
 
+        # Weight the Rubin features by spatial attention, then flatten spatial dims.
+        # rubin_weighted: [B, C, H*W]  (each pixel scaled by its spatial weight)
+        sqrt_sw = torch.sqrt(spatial_w + 1e-10)  # [B, 1, H, W]
+        rubin_w = rubin_n * sqrt_sw              # [B, C, H, W]
+
+        # Pad VIS and unfold to get all (2r+1)^2 shifted views.
         vis_pad = F.pad(vis_n, (r, r, r, r), mode='replicate')
+        K = (2 * r + 1)
+        # unfold extracts K*K patches of size H x W from the padded VIS.
+        # Result shape: [B, C*H*W, K*K]
+        vis_unf = vis_pad.unfold(2, H, 1).unfold(3, W, 1)  # [B, C, K, K, H, W]
+        vis_unf = vis_unf.reshape(B, C, K * K, H, W)        # [B, C, K^2, H, W]
+
+        # Weight VIS patches by same spatial weights.
+        vis_w = vis_unf * sqrt_sw.unsqueeze(2)  # [B, C, K^2, H, W]
+
+        # Dot product: sum over C, H, W for each of K^2 shifts.
+        # rubin_w: [B, C, 1, H, W]  *  vis_w: [B, C, K^2, H, W]  ->  sum -> [B, K^2]
         scale = 1.0 / math.sqrt(float(max(1, C)))
-        logits = []
-        for dy in range(-r, r + 1):
-            y0 = r + dy
-            y1 = y0 + H
-            for dx in range(-r, r + 1):
-                x0 = r + dx
-                x1 = x0 + W
-                shifted = vis_pad[:, :, y0:y1, x0:x1]
-                # Per-pixel cosine similarity, spatially weighted and summed.
-                corr = ((rubin_n * shifted).sum(dim=1, keepdim=True) * spatial_w).sum(dim=(2, 3)) * scale
-                logits.append(corr.squeeze(1))  # [B]
-        return torch.stack(logits, dim=1)  # [B, K]
+        logits = (rubin_w.unsqueeze(2) * vis_w).sum(dim=(1, 3, 4)) * scale  # [B, K^2]
+
+        return logits
 
     def forward(
         self,
@@ -176,8 +182,6 @@ class LocalAstrometryMatcher(nn.Module):
         coarse = torch.stack([coarse_dx, coarse_dy], dim=1)
 
         # --- MLP refinement with center-biased Gaussian pooling ---
-        # Mean pooling discards spatial structure; Gaussian weighting focuses
-        # on the source center which is exactly the relevant region.
         B, C, H, W = rubin_feat.shape
         gauss = self._center_weights(H, W, rubin_feat.device, rubin_feat.dtype)
         rubin_pool = (rubin_feat * gauss).sum(dim=(2, 3))
@@ -203,7 +207,7 @@ class LocalAstrometryMatcher(nn.Module):
             'log_sigma': log_sigma,
             'confidence': probs.max(dim=1).values,
             'temperature': self.temperature.detach(),
-            # Raw cost-volume logits [B, K] — useful for visualization.
+            # Raw cost-volume logits [B, K] -- useful for visualization.
             # Reshape to [B, 2r+1, 2r+1] to see the matching signal as a 2D map.
             'logits': logits,
         }

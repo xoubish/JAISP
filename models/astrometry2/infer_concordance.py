@@ -1,4 +1,17 @@
-"""Run the standalone local matcher and export smooth concordance FITS fields."""
+"""Run the standalone local matcher and export smooth concordance FITS fields.
+
+Changes from v1:
+  - --auto-grid: automatically reduce grid resolution for low-match tiles
+    so the solver is never heavily underdetermined.
+  - --anchor-radius-px: adaptive per-node ridge regularization. Nodes far
+    from any matched source get a stronger pull toward zero, eliminating
+    the clumpy red/blue artifacts in source-sparse regions.
+  - Coverage HDU: each tile gets a third extension ({prefix}.COV) recording
+    the minimum distance (VIS pixels) from each mesh point to the nearest
+    anchor.  Downstream code can threshold this to mask unreliable regions.
+  - anchor_lambda default raised from 1e-4 to 1e-3.
+  - Cleaner sys.path setup via a helper function.
+"""
 
 import argparse
 import json
@@ -11,15 +24,20 @@ import torch
 from astropy.io import fits
 from astropy.wcs import WCS
 
-import sys
-SCRIPT_DIR = Path(__file__).resolve().parent
-MODELS_DIR = SCRIPT_DIR.parent
-ASTROMETRY_DIR = MODELS_DIR / 'astrometry'
-for p in (ASTROMETRY_DIR, MODELS_DIR, SCRIPT_DIR):
-    sp = str(p)
-    if sp in sys.path:
-        sys.path.remove(sp)
-    sys.path.insert(0, sp)
+
+def _setup_imports():
+    """Add project directories to sys.path for cross-module imports."""
+    import sys
+    script_dir = Path(__file__).resolve().parent
+    models_dir = script_dir.parent
+    astrometry_dir = models_dir / 'astrometry'
+    for p in (astrometry_dir, models_dir, script_dir):
+        sp = str(p)
+        if sp in sys.path:
+            sys.path.remove(sp)
+        sys.path.insert(0, sp)
+
+_setup_imports()
 
 from dataset import (
     discover_tile_pairs,
@@ -29,7 +47,7 @@ from dataset import (
     normalize_rubin_bands,
     reproject_rubin_patch_to_vis,
 )
-from field_solver import evaluate_control_grid_mesh, solve_control_grid_field
+from field_solver import auto_grid_shape, evaluate_control_grid_mesh, solve_control_grid_field
 from matcher import LocalAstrometryMatcher
 from viz import save_tile_diagnostic
 from jaisp_dataset_v4 import RUBIN_BAND_ORDER, _to_float32
@@ -89,6 +107,21 @@ def make_concordance_hdu(
                 if key.startswith('CD') or key.startswith('CDELT'):
                     val = val * float(max(1, dstep))
                 hdu.header[key] = val
+    return hdu
+
+
+def make_coverage_hdu(
+    coverage: np.ndarray,
+    extname: str,
+    dstep: int,
+    tile_id: str,
+) -> 'fits.ImageHDU':
+    """Coverage HDU: min distance (VIS px) from each mesh point to nearest anchor."""
+    hdu = fits.ImageHDU(data=coverage.astype(np.float32), name=extname)
+    hdu.header['DSTEP'] = (int(dstep), 'Mesh sampling step in VIS pixels')
+    hdu.header['DUNIT'] = ('VIS_px', 'Unit of coverage values')
+    hdu.header['COVTYPE'] = ('min_dist', 'Min distance to nearest anchor source')
+    hdu.header['TILEID'] = (tile_id, 'Source tile identifier')
     return hdu
 
 
@@ -187,16 +220,38 @@ def predict_tile(
     kept_raw = np.asarray(kept_raw, dtype=np.float32)
     weights = 1.0 / np.maximum(sigma, 1e-4) ** 2
 
+    # Auto grid shape: reduce resolution for sparse tiles.
+    grid_h, grid_w = int(args.grid_h), int(args.grid_w)
+    if getattr(args, 'auto_grid', False):
+        grid_h, grid_w = auto_grid_shape(
+            n_anchors=len(kept_xy),
+            default=(grid_h, grid_w),
+            min_shape=(4, 4),
+        )
+
+    # Compute adaptive anchor radius from grid cell spacing.
+    anchor_radius = float(getattr(args, 'anchor_radius_px', 0.0))
+    if anchor_radius <= 0 and getattr(args, 'auto_grid', False):
+        # Default: ~2x the mean grid cell spacing.
+        h, w = vis_img.shape
+        cell_y = h / max(1, grid_h - 1)
+        cell_x = w / max(1, grid_w - 1)
+        anchor_radius = 2.0 * 0.5 * (cell_y + cell_x)
+
     field = solve_control_grid_field(
         vis_xy=kept_xy,
         offsets_arcsec=pred_offsets,
         weights=weights,
         vis_shape=vis_img.shape,
-        grid_shape=(args.grid_h, args.grid_w),
+        grid_shape=(grid_h, grid_w),
         smooth_lambda=args.smooth_lambda,
         anchor_lambda=args.anchor_lambda,
+        anchor_radius_px=anchor_radius,
     )
-    mesh = evaluate_control_grid_mesh(field, vis_shape=vis_img.shape, dstep=args.dstep)
+    mesh = evaluate_control_grid_mesh(
+        field, vis_shape=vis_img.shape, dstep=args.dstep,
+        anchor_xy=kept_xy,
+    )
 
     raw_mag = np.hypot(kept_raw[:, 0], kept_raw[:, 1]) * 1000.0
     pred_mag = np.hypot(pred_offsets[:, 0], pred_offsets[:, 1]) * 1000.0
@@ -211,11 +266,15 @@ def predict_tile(
         'confidence': conf,
         'field': field,
         'mesh': mesh,
+        'grid_shape_used': (grid_h, grid_w),
+        'anchor_radius_used': anchor_radius,
         'summary': {
             'matches': int(pred_offsets.shape[0]),
             'raw_median_mas': float(np.median(raw_mag)),
             'pred_median_mas': float(np.median(pred_mag)),
             'sigma_median_mas': float(np.median(sigma) * 1000.0),
+            'grid_shape': [grid_h, grid_w],
+            'anchor_radius_px': anchor_radius,
         },
     }
 
@@ -253,9 +312,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     p.add_argument('--grid-h', type=int, default=12)
     p.add_argument('--grid-w', type=int, default=12)
+    p.add_argument('--auto-grid', action='store_true', default=False,
+                   help='Automatically reduce grid resolution for tiles with few matches.')
     p.add_argument('--smooth-lambda', type=float, default=1e-2)
-    p.add_argument('--anchor-lambda', type=float, default=1e-4,
-                   help='Ridge regularisation strength: pulls unconstrained edge nodes toward zero.')
+    p.add_argument('--anchor-lambda', type=float, default=1e-3,
+                   help='Ridge regularisation base strength (raised from 1e-4).')
+    p.add_argument('--anchor-radius-px', type=float, default=0.0,
+                   help='Gaussian scale for adaptive per-node anchor. 0 = auto if --auto-grid.')
     p.add_argument('--dstep', type=int, default=8)
     p.add_argument('--device', type=str, default='')
     return p
@@ -278,6 +341,9 @@ def main():
     hdus[0].header['DUNIT'] = ('arcsec', 'Offset unit')
     hdus[0].header['REFFRAME'] = ('euclid_VIS', 'Reference astrometric frame')
     hdus[0].header['FITMETH'] = ('dl_local+grid', 'Patch matcher + control grid')
+    hdus[0].header['AUTOGRID'] = (bool(args.auto_grid), 'Auto grid shape enabled')
+    hdus[0].header['ANCHLAM'] = (float(args.anchor_lambda), 'Anchor lambda base')
+    hdus[0].header['ANCHRAD'] = (float(args.anchor_radius_px), 'Anchor radius (0=auto)')
 
     for tile_id, rubin_path, euclid_path in pairs:
         if args.tile_id and tile_id != args.tile_id:
@@ -289,11 +355,19 @@ def main():
         prefix = f'{tile_id}.{band_key}'
         hdus.append(make_concordance_hdu(item['mesh']['dra'], f'{prefix}.DRA', args.dstep, target_band, tile_id, item['vis_wcs_header']))
         hdus.append(make_concordance_hdu(item['mesh']['ddec'], f'{prefix}.DDE', args.dstep, target_band, tile_id, item['vis_wcs_header']))
+        # Coverage HDU.
+        if 'coverage' in item['mesh']:
+            hdus.append(make_coverage_hdu(item['mesh']['coverage'], f'{prefix}.COV', args.dstep, tile_id))
+
         row = {'tile_id': tile_id, 'rubin_band': target_band}
         row.update(item['summary'])
         results.append(row)
+        gs = item.get('grid_shape_used', (args.grid_h, args.grid_w))
+        ar = item.get('anchor_radius_used', 0.0)
         print(
-            f"[tile] {tile_id}:{target_band} matches={row['matches']} raw_med={row['raw_median_mas']:.1f}mas "
+            f"[tile] {tile_id}:{target_band} matches={row['matches']} "
+            f"grid={gs[0]}x{gs[1]} anchor_r={ar:.0f}px "
+            f"raw_med={row['raw_median_mas']:.1f}mas "
             f"pred_med={row['pred_median_mas']:.1f}mas sigma_med={row['sigma_median_mas']:.1f}mas"
         )
         if args.plot_dir:
