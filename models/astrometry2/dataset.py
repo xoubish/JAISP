@@ -1,4 +1,13 @@
-"""Matched local-patch dataset for standalone astrometry matching."""
+"""Matched local-patch dataset for standalone astrometry matching.
+
+Multi-band version:
+  - build_patch_samples_multiband generates one sample per source per
+    target band, each containing the full 6-band Rubin stamp.
+  - Each sample carries a 'band_idx' integer identifying the target band.
+  - The target offset is computed from that specific band's refined centroid,
+    so ground truth is band-specific (capturing DCR differences).
+  - The original build_patch_samples is preserved for backward compatibility.
+"""
 
 import glob
 import os
@@ -29,6 +38,44 @@ from source_matching import (
 
 VIS_PIXEL_SCALE_ARCSEC = 0.1
 
+# Unified band ordering for the multi-instrument model.
+# Rubin bands come first (matching RUBIN_BAND_ORDER), then NISP bands.
+NISP_BAND_ORDER = ['Y', 'J', 'H']
+ALL_BAND_ORDER = [f'rubin_{b}' for b in RUBIN_BAND_ORDER] + [f'nisp_{b}' for b in NISP_BAND_ORDER]
+BAND_TO_IDX = {b: i for i, b in enumerate(ALL_BAND_ORDER)}
+
+
+def _load_nisp_band(edata, band: str):
+    """Load a NISP band image and WCS from the euclid npz.
+
+    Returns (image, wcs) or (None, None) if the band is missing.
+    """
+    img_key = f'img_{band}'
+    wcs_key = f'wcs_{band}'
+    if img_key not in edata or wcs_key not in edata:
+        return None, None
+    try:
+        img = np.nan_to_num(_to_float32(edata[img_key]), nan=0.0)
+        wcs = WCS(safe_header_from_card_string(edata[wcs_key].item()))
+        return img, wcs
+    except Exception:
+        return None, None
+
+
+def reproject_nisp_patch_to_vis(
+    nisp_img: np.ndarray,
+    nisp_wcs: WCS,
+    vis_wcs: WCS,
+    center_vis_xy: np.ndarray,
+    patch_size: int,
+) -> np.ndarray:
+    """Reproject a NISP stamp onto the VIS pixel grid, same as Rubin reprojection."""
+    gx, gy = _patch_grid(center_vis_xy, patch_size)
+    ra, dec = vis_wcs.wcs_pix2world(gx.ravel(), gy.ravel(), 0)
+    nx, ny = nisp_wcs.wcs_world2pix(ra, dec, 0)
+    patch = _bilinear_sample(nisp_img, nx.reshape(gx.shape), ny.reshape(gy.shape))
+    return patch.reshape(patch_size, patch_size)
+
 
 def _normalize_patch(arr: np.ndarray, floor: float = 1e-3) -> np.ndarray:
     """
@@ -36,13 +83,6 @@ def _normalize_patch(arr: np.ndarray, floor: float = 1e-3) -> np.ndarray:
 
     Uses robust statistics (median background, MAD noise estimate) so the
     bright source itself does not bias the normalization.
-
-    After normalization:
-      - Background pixels → values clustered around 0 with std ≈ 1
-      - Source pixels     → large positive values (S/N >> 1)
-
-    This makes patches cross-tile and cross-instrument comparable regardless
-    of exposure depth, sky level, or flux calibration differences.
     """
     bg = float(np.median(arr))
     diff = arr.astype(np.float32) - bg
@@ -196,6 +236,10 @@ def _select_input_bands(target_band: str, context_bands: Sequence[str]) -> List[
     return out
 
 
+# ---------------------------------------------------------------------------
+# Original single-band sample builder (preserved for backward compatibility)
+# ---------------------------------------------------------------------------
+
 def build_patch_samples(
     pairs: Sequence[Tuple[str, str, str]],
     target_band: str,
@@ -341,6 +385,268 @@ def build_patch_samples(
     return samples
 
 
+# ---------------------------------------------------------------------------
+# Multi-band sample builder
+# ---------------------------------------------------------------------------
+
+def build_patch_samples_multiband(
+    pairs: Sequence[Tuple[str, str, str]],
+    target_bands: Sequence[str],
+    detect_bands: Sequence[str],
+    *,
+    include_nisp: bool = False,
+    patch_size: int = 33,
+    max_patches_per_tile: int = 64,
+    min_matches: int = 20,
+    max_matches: int = 256,
+    max_sep_arcsec: float = 0.12,
+    clip_sigma: float = 3.5,
+    rubin_nsig: float = 4.5,
+    vis_nsig: float = 4.0,
+    rubin_smooth: float = 1.0,
+    vis_smooth: float = 1.2,
+    rubin_min_dist: int = 7,
+    vis_min_dist: int = 9,
+    max_sources_rubin: int = 600,
+    max_sources_vis: int = 800,
+    detect_clip_sigma: float = 8.0,
+    refine_radius: int = 3,
+    refine_flux_floor_sigma: float = 1.5,
+    seed: int = 42,
+    split_name: str = 'train',
+) -> List[Dict]:
+    """Build training samples with multi-instrument input and per-band targets.
+
+    For each matched source, the input stamp contains ALL available bands
+    reprojected onto the VIS pixel grid:
+      - 6 Rubin channels (u/g/r/i/z/y)
+      - Optionally 3 NISP channels (Y/J/H) if include_nisp=True
+
+    For each target_band, a separate sample is created with that band's
+    refined centroid offset as the ground truth and a 'band_idx' integer
+    for conditioning the MLP head.
+
+    Parameters
+    ----------
+    target_bands : list of band names to produce targets for.
+        Rubin bands: 'r', 'i', etc. or 'rubin_r', 'rubin_i'.
+        NISP bands: 'nisp_Y', 'nisp_J', 'nisp_H'.
+        Use ['all'] for all 6 Rubin bands, ['all_nisp'] to include NISP targets too.
+    detect_bands : bands used for Rubin source detection.
+    include_nisp : if True, include reprojected NISP Y/J/H as encoder input channels.
+        This is independent of whether NISP bands appear in target_bands.
+    """
+    if patch_size % 2 == 0:
+        raise ValueError('patch_size must be odd.')
+
+    # Parse target bands.
+    target_bands_raw = [str(b).strip().lower() for b in target_bands if str(b).strip()]
+    target_bands_norm = []
+    if any(b in ('all', 'all_rubin') for b in target_bands_raw):
+        target_bands_norm.extend([f'rubin_{b}' for b in RUBIN_BAND_ORDER])
+    if any(b == 'all_nisp' for b in target_bands_raw):
+        target_bands_norm.extend([f'nisp_{b}' for b in NISP_BAND_ORDER])
+    # Also parse individual band names.
+    for b in target_bands_raw:
+        if b.startswith('nisp_'):
+            if b not in target_bands_norm:
+                target_bands_norm.append(b)
+        elif b not in ('all', 'all_rubin', 'all_nisp'):
+            nb = normalize_rubin_band(b)
+            if nb not in target_bands_norm:
+                target_bands_norm.append(nb)
+    if not target_bands_norm:
+        target_bands_norm = [f'rubin_{b}' for b in RUBIN_BAND_ORDER]
+
+    detect_bands_norm = normalize_rubin_bands(detect_bands) or [f'rubin_{b}' for b in ('g', 'r', 'i', 'z')]
+
+    # Determine input channel layout.
+    rubin_input_bands = [f'rubin_{b}' for b in RUBIN_BAND_ORDER]
+    nisp_input_bands = [f'nisp_{b}' for b in NISP_BAND_ORDER] if include_nisp else []
+    all_input_bands = rubin_input_bands + nisp_input_bands
+    n_input_channels = len(all_input_bands)
+
+    # Band embedding indices: use the global ALL_BAND_ORDER table
+    # so indices are consistent across Rubin-only and Rubin+NISP configs.
+    rubin_targets = [b for b in target_bands_norm if b.startswith('rubin_')]
+    nisp_targets = [b for b in target_bands_norm if b.startswith('nisp_')]
+
+    rng = np.random.RandomState(int(seed))
+    samples: List[Dict] = []
+    kept_tiles = 0
+
+    for tile_id, rubin_path, euclid_path in pairs:
+        try:
+            rdata = np.load(rubin_path, allow_pickle=True)
+            edata = np.load(euclid_path, allow_pickle=True)
+            rubin_cube = rdata['img']
+            vis_img = np.nan_to_num(_to_float32(edata['img_VIS']), nan=0.0)
+            rwcs = WCS(rdata['wcs_hdr'].item())
+            vhdr = safe_header_from_card_string(edata['wcs_VIS'].item())
+            vwcs = WCS(vhdr)
+        except Exception as exc:
+            print(f'[{split_name}] skip {tile_id}: load/wcs failed ({exc})')
+            continue
+
+        # Load NISP data if needed.
+        nisp_data = {}  # band_letter -> (img, wcs)
+        if include_nisp or nisp_targets:
+            for nb in NISP_BAND_ORDER:
+                img, nwcs = _load_nisp_band(edata, nb)
+                if img is not None:
+                    nisp_data[nb] = (img, nwcs)
+
+        # Source detection (band-agnostic, from Rubin detection image).
+        rubin_det = build_detection_image(rubin_cube, detect_bands_norm, clip_sigma=detect_clip_sigma)
+        rx, ry = detect_sources(
+            rubin_det, nsig=rubin_nsig, smooth_sigma=rubin_smooth,
+            min_dist=rubin_min_dist, max_sources=max_sources_rubin,
+        )
+        vx, vy = detect_sources(
+            vis_img, nsig=vis_nsig, smooth_sigma=vis_smooth,
+            min_dist=vis_min_dist, max_sources=max_sources_vis,
+        )
+        matched = match_sources_wcs(
+            rx, ry, vx, vy, rwcs, vwcs,
+            max_sep_arcsec=max_sep_arcsec,
+            clip_sigma=clip_sigma,
+            max_matches=max_matches,
+        )
+        if matched['vis_xy'].shape[0] < int(min_matches):
+            continue
+
+        vis_xy = matched['vis_xy'].astype(np.float32)
+
+        # Pre-compute per-band refined centroids and offsets.
+        per_band_offsets = {}  # band_name -> (N, 2) arcsec
+
+        # Rubin target bands.
+        for tband in rubin_targets:
+            short = tband.split('_', 1)[1]
+            bidx = RUBIN_BAND_ORDER.index(short)
+            if bidx >= rubin_cube.shape[0]:
+                continue
+            rubin_band_img = np.nan_to_num(_to_float32(rubin_cube[bidx]), nan=0.0)
+            rubin_xy_refined = refine_centroids_in_band(
+                rubin_band_img, matched['rubin_xy'],
+                radius=refine_radius, flux_floor_sigma=refine_flux_floor_sigma,
+            )
+            r_ra, r_dec = rwcs.wcs_pix2world(rubin_xy_refined[:, 0], rubin_xy_refined[:, 1], 0)
+            v_ra, v_dec = vwcs.wcs_pix2world(vis_xy[:, 0], vis_xy[:, 1], 0)
+            dra = (v_ra - r_ra) * np.cos(np.deg2rad(v_dec)) * 3600.0
+            ddec = (v_dec - r_dec) * 3600.0
+            per_band_offsets[tband] = np.stack([dra, ddec], axis=1).astype(np.float32)
+
+        # NISP target bands: offset = VIS position - NISP position.
+        # NISP sources are detected independently and matched to VIS.
+        # For simplicity, we use the existing VIS-matched positions and
+        # compute the NISP centroid offset in sky coords.
+        for tband in nisp_targets:
+            nb = tband.split('_', 1)[1]  # 'Y', 'J', or 'H'
+            if nb not in nisp_data:
+                continue
+            nisp_img, nwcs = nisp_data[nb]
+            # Refine NISP centroids: project VIS positions into NISP pixel coords.
+            nisp_x, nisp_y = nwcs.wcs_world2pix(
+                *vwcs.wcs_pix2world(vis_xy[:, 0], vis_xy[:, 1], 0), 0)
+            nisp_xy_init = np.stack([nisp_x, nisp_y], axis=1).astype(np.float32)
+            nisp_xy_refined = refine_centroids_in_band(
+                nisp_img, nisp_xy_init,
+                radius=max(1, refine_radius // 3),  # NISP pixels are 3x coarser
+                flux_floor_sigma=refine_flux_floor_sigma,
+            )
+            n_ra, n_dec = nwcs.wcs_pix2world(nisp_xy_refined[:, 0], nisp_xy_refined[:, 1], 0)
+            v_ra, v_dec = vwcs.wcs_pix2world(vis_xy[:, 0], vis_xy[:, 1], 0)
+            dra = (v_ra - n_ra) * np.cos(np.deg2rad(v_dec)) * 3600.0
+            ddec = (v_dec - n_dec) * 3600.0
+            per_band_offsets[tband] = np.stack([dra, ddec], axis=1).astype(np.float32)
+
+        if not per_band_offsets:
+            continue
+
+        # Subsample sources.
+        keep = np.arange(vis_xy.shape[0])
+        if keep.size > int(max_patches_per_tile):
+            keep = rng.choice(keep, int(max_patches_per_tile), replace=False)
+            keep.sort()
+
+        tile_samples = []
+        for src_idx in keep:
+            anchor_xy = vis_xy[src_idx]
+            vis_patch = extract_vis_patch(vis_img, anchor_xy, patch_size)
+
+            # Build full multi-instrument input stamp.
+            input_patches = []
+
+            # Rubin channels.
+            for band in rubin_input_bands:
+                short = band.split('_', 1)[1]
+                bidx = RUBIN_BAND_ORDER.index(short)
+                if bidx >= rubin_cube.shape[0]:
+                    input_patches.append(np.zeros((patch_size, patch_size), dtype=np.float32))
+                else:
+                    rubin_band_img = np.nan_to_num(_to_float32(rubin_cube[bidx]), nan=0.0)
+                    input_patches.append(
+                        reproject_rubin_patch_to_vis(rubin_band_img, rwcs, vwcs, anchor_xy, patch_size)
+                    )
+
+            # NISP channels (if included as input).
+            for band in nisp_input_bands:
+                nb = band.split('_', 1)[1]
+                if nb in nisp_data:
+                    nisp_img, nwcs = nisp_data[nb]
+                    input_patches.append(
+                        reproject_nisp_patch_to_vis(nisp_img, nwcs, vwcs, anchor_xy, patch_size)
+                    )
+                else:
+                    input_patches.append(np.zeros((patch_size, patch_size), dtype=np.float32))
+
+            input_stamp = np.stack(input_patches, axis=0).astype(np.float32)  # [n_channels, H, W]
+            vis_stamp = vis_patch[None].astype(np.float32)                     # [1, H, W]
+            pix2sky = local_vis_pixel_to_sky_matrix(vwcs, anchor_xy)
+
+            # One sample per target band.
+            for tband, offsets in per_band_offsets.items():
+                tile_samples.append({
+                    'tile_id': tile_id,
+                    'anchor_xy': anchor_xy.astype(np.float32),
+                    'rubin_patch': input_stamp,  # name kept for compat, but now multi-instrument
+                    'vis_patch': vis_stamp,
+                    'target_offset_arcsec': offsets[src_idx].astype(np.float32),
+                    'pixel_to_sky': pix2sky.astype(np.float32),
+                    'input_bands': list(all_input_bands),
+                    'target_band': tband,
+                    'band_idx': BAND_TO_IDX[tband],
+                })
+
+        if tile_samples:
+            samples.extend(tile_samples)
+            kept_tiles += 1
+
+    if not samples:
+        raise RuntimeError(f'No patch samples created for split {split_name}.')
+
+    mags = np.array([
+        np.hypot(s['target_offset_arcsec'][0], s['target_offset_arcsec'][1]) * 1000.0
+        for s in samples
+    ], dtype=np.float32)
+    n_per_band = {}
+    for s in samples:
+        b = s['target_band']
+        n_per_band[b] = n_per_band.get(b, 0) + 1
+    band_str = '  '.join(f'{b}:{n}' for b, n in sorted(n_per_band.items()))
+    print(
+        f'[{split_name}] multiband samples={len(samples)} from tiles={kept_tiles} | '
+        f'|offset| median={np.median(mags):.1f} mas p68={np.percentile(mags, 68):.1f} mas\n'
+        f'  per-band: {band_str}'
+    )
+    return samples
+
+
+# ---------------------------------------------------------------------------
+# Dataset and DataLoader
+# ---------------------------------------------------------------------------
+
 class MatchedPatchDataset(torch.utils.data.Dataset):
     def __init__(self, samples: Sequence[Dict], augment: bool = False):
         self.samples = list(samples)
@@ -356,29 +662,18 @@ class MatchedPatchDataset(torch.utils.data.Dataset):
         pix2sky = s['pixel_to_sky'].copy()              # [2, 2]
 
         if self.augment:
-            # Horizontal flip (W-axis):
-            #   Both patches are flipped so relative source morphology is preserved.
-            #   The sky-coord target offset is unchanged (it's a physical measurement).
-            #   The pixel_to_sky Jacobian's x-column (col 0) must be negated because
-            #   after the flip, a +x pixel displacement maps to the opposite sky direction.
             if np.random.rand() > 0.5:
                 rubin_patch = rubin_patch[:, :, ::-1].copy()
                 vis_patch = vis_patch[:, :, ::-1].copy()
                 pix2sky = pix2sky.copy()
                 pix2sky[:, 0] = -pix2sky[:, 0]
 
-            # Vertical flip (H-axis): same logic, y-column (col 1) is negated.
             if np.random.rand() > 0.5:
                 rubin_patch = rubin_patch[:, ::-1, :].copy()
                 vis_patch = vis_patch[:, ::-1, :].copy()
                 pix2sky = pix2sky.copy()
                 pix2sky[:, 1] = -pix2sky[:, 1]
 
-        # Normalize after augmentation: per-patch background subtraction +
-        # MAD noise scaling. Applied per-channel for Rubin (each band
-        # independently) and to the single VIS channel.
-        # This makes patches cross-tile comparable regardless of depth,
-        # and turns sources into clean S/N peaks for the encoder.
         rubin_patch = np.stack(
             [_normalize_patch(rubin_patch[c]) for c in range(rubin_patch.shape[0])], axis=0
         )
@@ -386,7 +681,7 @@ class MatchedPatchDataset(torch.utils.data.Dataset):
             [_normalize_patch(vis_patch[c]) for c in range(vis_patch.shape[0])], axis=0
         )
 
-        return {
+        out = {
             'tile_id': s['tile_id'],
             'anchor_xy': torch.from_numpy(s['anchor_xy'].copy()),
             'rubin_patch': torch.from_numpy(rubin_patch),
@@ -396,10 +691,14 @@ class MatchedPatchDataset(torch.utils.data.Dataset):
             'input_bands': list(s['input_bands']),
             'target_band': s['target_band'],
         }
+        # Include band_idx if present (multi-band mode).
+        if 'band_idx' in s:
+            out['band_idx'] = int(s['band_idx'])
+        return out
 
 
 def collate_matched_patches(batch: List[Dict]) -> Dict:
-    return {
+    out = {
         'tile_id': [b['tile_id'] for b in batch],
         'anchor_xy': torch.stack([b['anchor_xy'] for b in batch], dim=0),
         'rubin_patch': torch.stack([b['rubin_patch'] for b in batch], dim=0),
@@ -409,6 +708,10 @@ def collate_matched_patches(batch: List[Dict]) -> Dict:
         'input_bands': [b['input_bands'] for b in batch],
         'target_band': [b['target_band'] for b in batch],
     }
+    # Collate band_idx if present.
+    if 'band_idx' in batch[0]:
+        out['band_idx'] = torch.tensor([b['band_idx'] for b in batch], dtype=torch.long)
+    return out
 
 
 def make_loader(dataset: MatchedPatchDataset, batch_size: int, num_workers: int, shuffle: bool):
