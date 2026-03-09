@@ -2,27 +2,38 @@
 
 ## What this is for
 
-Rubin and Euclid observe the same sky but their astrometric solutions are not perfectly aligned — there are small residual offsets between the two instruments, varying slowly across the field. For JAISP to combine Rubin and VIS data at the pixel level, we need to know, at every position in the VIS frame: "if I project a Rubin sky coordinate through the VIS WCS, by how many arcseconds is it off?"
+Rubin and Euclid observe the same sky but their astrometric solutions are not perfectly aligned. There are small residual offsets between the two instruments, varying slowly across the field. For JAISP to combine Rubin and VIS data at the pixel level, we need to know, at every position in the VIS frame: "if I project a Rubin sky coordinate through the VIS WCS, by how many arcseconds is it off?"
 
 The answer is a smooth 2D field of corrections (ΔRA*, ΔDec) stored as a coarse mesh over the VIS tile. This is the **astrometry concordance product**.
 
-Key design principle (from the JAISP data product spec):
+Key design principles (from the JAISP data product spec):
 - The correction is stored in **sky coordinates** (arcsec), not pixel offsets.
 - At every VIS pixel position (x, y): apply the correction to Rubin's sky coord before projecting onto the VIS grid.
 - Perfect alignment means ΔRA* = ΔDec = 0 everywhere.
 - WCS handles geometry; concordance handles the residual astrometric error.
-- The correction mesh is sampled every ~8 VIS pixels (DSTEP=8, i.e. 0.8"), keeping files ~100 MB rather than multi-GB. Downstream code bilinearly interpolates to native resolution at runtime.
+- The correction mesh is sampled every ~8 VIS pixels (DSTEP=8, i.e. 0.8"), keeping files compact. Downstream code bilinearly interpolates to native resolution at runtime.
 
 ---
 
 ## Why a neural network?
 
-Classical source matching gives you a discrete set of (Rubin source position, VIS source position, offset) triples — typically a few hundred per tile. To turn those sparse noisy measurements into a smooth continuous field you need to:
+Classical source matching gives you a discrete set of (Rubin source position, VIS source position, offset) triples, typically a few hundred per tile. To turn those sparse noisy measurements into a smooth continuous field you need to suppress outliers (blended sources, bad detections) and interpolate coherently across the tile.
 
-1. Suppress outliers (blended sources, bad detections).
-2. Interpolate coherently across the tile.
+A CNN matcher operating at native VIS resolution does both better than traditional approaches. It looks at the actual image morphology of each matched source pair, not just the catalog centroids. A blended source that has a clean centroid in the Rubin catalog but is clearly resolved in VIS will be flagged through a high predicted uncertainty. A faint source sitting on a diffraction spike will similarly be downweighted. Classical matching has no access to this pixel-level context without hand-crafted quality flags.
 
-A small CNN matcher operating at native VIS resolution does (1) better than sigma-clipping alone: it looks at the actual image morphology of each matched source pair and predicts how confident that measurement is. The learned uncertainty (log_sigma) then weights the control-grid field solver, so reliable point sources dominate the field and bad matches are down-weighted automatically.
+The learned uncertainty (log_sigma) then weights the control-grid field solver, so reliable point sources dominate the field and bad matches are automatically suppressed. The model also trains jointly across all tiles, so it learns shared priors about what Rubin PSFs look like and what typical offset patterns are, rather than fitting each tile independently from scratch.
+
+---
+
+## Current results
+
+On 48 ECDFS tiles with the r-band checkpoint:
+- Raw WCS median offset: **47 mas**
+- NN-corrected median offset: **38 mas** (19% reduction)
+- Target: sub-20 mas (limited by source density, not model capacity)
+- NISP-to-VIS offsets (same telescope) are 38-41 mas for comparison, confirming the cross-telescope offset is real and correctable
+
+The main bottleneck is data volume: ~50-100 matched sources per tile across ~48 tiles. Sparse-source regions leave the field solver underdetermined. More tiles, deeper detection thresholds, or multi-band joint training would directly improve coverage and precision.
 
 ---
 
@@ -47,7 +58,7 @@ Tiles on disk
     ▼  for each (rubin_patch, vis_patch, pixel_to_sky, target_offset):
 [matcher.py  LocalAstrometryMatcher]
     PatchEncoder          — lightweight CNN [C,H,W] → [hidden,H,W], per modality
-    _weighted_cost_volume — spatially-weighted cross-correlation over a (2r+1)² search window
+    _weighted_cost_volume — spatially-weighted cross-correlation via F.unfold
                             weights = rubin_feature_energy × Gaussian_center_prior
                             → soft-argmax → coarse (dx_px, dy_px)
     center-biased pooling — Gaussian-weighted spatial pooling for MLP features
@@ -56,13 +67,15 @@ Tiles on disk
     │
     ▼  per tile at inference:
 [field_solver.py  solve_control_grid_field]
-    bilinear control grid — sparse (anchor_xy, pred_offset, weight=1/sigma²) → grid coefficients
+    auto_grid_shape       — reduce grid resolution for sparse tiles (e.g. 12×12 → 5×5)
+    bilinear control grid — sparse (anchor_xy, pred_offset, weight=1/σ²) → grid coefficients
+    adaptive anchor       — per-node ridge regularization, stronger where sources are sparse
     smoothness prior      — Tikhonov regularization on finite differences of grid nodes
-    evaluate_control_grid_mesh() — interpolate to a regular mesh at DSTEP spacing
+    evaluate_control_grid_mesh() — interpolate to regular mesh at DSTEP spacing + coverage map
     │
     ▼
 [infer_concordance.py]
-    FITS output           — one DRA + DDE image HDU pair per tile, with WCS and DSTEP metadata
+    FITS output           — DRA + DDE + COV (coverage) image HDUs per tile
 ```
 
 ---
@@ -73,7 +86,7 @@ Tiles on disk
 |------|-------------|
 | `matcher.py` | `LocalAstrometryMatcher` — the neural network |
 | `dataset.py` | `build_patch_samples` builds all training samples from tile pairs; `MatchedPatchDataset` serves them with optional augmentation |
-| `field_solver.py` | Pure-numpy bilinear control-grid solver + evaluator — no learning |
+| `field_solver.py` | Pure-numpy bilinear control-grid solver + evaluator with adaptive regularization — no learning |
 | `train_local_matcher.py` | Training loop with W&B logging and tile-level diagnostic previews |
 | `infer_concordance.py` | Run a trained checkpoint over all tiles and write a FITS concordance file |
 | `viz.py` | Diagnostic figures: raw offsets on VIS, solved field, component maps, residual vectors |
@@ -86,7 +99,7 @@ Tiles on disk
 
 ### Spatially-weighted cost volume
 
-The original approach computed the global mean correlation across all patch pixels equally. The problem: most pixels in a 33×33 patch are sky background, not source. Background pixels are noise — they dilute the astrometric signal coming from the actual star/galaxy at the center.
+Most pixels in a 33×33 patch are sky background, not source. If all pixels vote equally on the displacement, background noise dilutes the astrometric signal from the actual star or galaxy at the center.
 
 The fix is to weight each pixel's contribution by:
 
@@ -96,6 +109,8 @@ spatial_w[i,j] = rubin_feature_energy[i,j] × gaussian_center_prior[i,j]
 
 - `rubin_feature_energy`: L2 norm of the Rubin feature vector at pixel (i,j). High where the source is bright/detected.
 - `gaussian_center_prior`: Gaussian peaked at the patch center (sigma = 0.5 in normalized [-1,1] coords). Suppresses edge pixels which are often noisier and less relevant.
+
+The cost volume is computed via `F.unfold` over the padded VIS features, extracting all (2r+1)² shifted views in a single operation. The spatially-weighted dot product is then a broadcast multiply + sum. No Python loop over displacements.
 
 The result: the bright point source at the anchor position dominates the offset vote.
 
@@ -111,13 +126,13 @@ The same Gaussian weights are used for the MLP's feature pooling. Instead of glo
 L = radial_error / sigma + log_sigma
 ```
 
-This is the negative log-likelihood of a Rayleigh distribution. It forces the model to be honest: if sigma is large (uncertain), the penalty is smaller, but you pay `log_sigma`. If sigma is small but the error is large, you pay `radial_error / sigma`. At inference, `weight = 1 / sigma²` is used to weight each anchor's contribution to the control-grid field solver.
+This is the negative log-likelihood of a Rayleigh distribution. It forces the model to be honest: if sigma is large (uncertain), the penalty is smaller, but you pay `log_sigma`. If sigma is small but the error is large, you pay `radial_error / sigma`. At inference, `weight = 1 / σ²` is used to weight each anchor's contribution to the control-grid field solver.
 
 Initial sigma is set to 50 mas (log(0.05) ≈ -3.0) so the loss is informative from epoch 1.
 
 ### Patch normalization
 
-Raw flux patches are not cross-tile comparable — a source with flux=100 in a shallow tile may have the same S/N as a source with flux=10 in a deep tile. Feeding raw flux to the encoder means it must learn different features for the same physical object at different depths.
+Raw flux patches are not cross-tile comparable: a source with flux=100 in a shallow tile may have the same S/N as a source with flux=10 in a deep tile.
 
 Each patch is background-subtracted and MAD-normalized before reaching the encoder:
 ```
@@ -133,10 +148,40 @@ Both Rubin and VIS patches are flipped (horizontal and/or vertical) synchronousl
 
 ---
 
+## Field solver details
+
+### Adaptive grid resolution
+
+The control grid has a fixed topology (default 12×12 = 144 nodes per axis). With only ~50 matched sources per tile, that's ~0.35 sources per node, heavily underdetermined. The solver would rely almost entirely on the regularizer, producing artifacts.
+
+`auto_grid_shape` reduces the grid resolution so the number of nodes stays below half the number of anchors. A tile with 50 sources gets a 5×5 grid; a tile with 200+ sources keeps the full 12×12. This ensures the data constrains the field rather than the regularizer hallucinating it.
+
+Enable with `--auto-grid`.
+
+### Adaptive per-node anchor regularization
+
+The smoothness prior (Tikhonov on finite differences) only penalizes differences between adjacent nodes. It's perfectly happy with a large constant offset in a source-sparse region, as long as it's locally smooth. A single noisy measurement near a corner can drag a cluster of nodes to a large value, and the smoothness prior propagates it unchecked.
+
+The fix is adaptive per-node ridge regularization. Each grid node gets a regularization strength inversely proportional to its local data support:
+
+```
+lambda_i = anchor_lambda × max(1, base_support / local_support_i)
+```
+
+where `local_support_i` is the Gaussian-weighted sum of data weights near node i. Well-constrained interior nodes are barely affected. Unconstrained edge/corner nodes get pulled firmly toward zero.
+
+Controlled by `--anchor-lambda` (base strength, default 1e-3) and `--anchor-radius-px` (Gaussian scale, auto-computed from grid cell spacing when using `--auto-grid`).
+
+### Coverage map
+
+Each tile now produces a coverage HDU (`{prefix}.COV`) recording the minimum distance (in VIS pixels) from each mesh point to the nearest anchor source. This tells downstream code where the concordance field is data-driven versus pure extrapolation. A threshold of ~100-150 VIS pixels is a reasonable cutoff for flagging unreliable regions.
+
+---
+
 ## Precision target
 
 Residuals should be below the native astrometric uncertainties of each survey:
-- Rubin (LSST coadds): ~10–20 mas RMS
+- Rubin (LSST coadds): ~10-20 mas RMS
 - Euclid VIS: ~5 mas RMS
 
 Aim for `p68_total < 20 mas` on the validation set.
@@ -176,14 +221,16 @@ Training prints per-epoch metrics in mas: `train_MAE`, `train_p68`, `val_MAE`, `
   --euclid-dir data/euclid_tiles_ecdfs \
   --checkpoint models/checkpoints/astrometry2_r/best_matcher.pt \
   --output models/checkpoints/astrometry2_r/concordance_r.fits \
-  --plot-dir models/checkpoints/astrometry2_r/plots
+  --plot-dir models/checkpoints/astrometry2_r/plots \
+  --auto-grid
 ```
 
-The output FITS file has one pair of HDUs per tile:
+The output FITS file has three HDUs per tile:
 - `{tile_id}.r.DRA` — ΔRA* field in arcsec, sampled every `dstep` VIS pixels
 - `{tile_id}.r.DDE` — ΔDec field in arcsec, sampled every `dstep` VIS pixels
+- `{tile_id}.r.COV` — coverage map: min distance (VIS px) to nearest anchor source
 
-Each HDU carries `DSTEP`, `DUNIT=arcsec`, `INTERP=bilinear`, `CONCRDNC=True`, `RBNBAND`, and a scaled WCS so the pixel coordinates map correctly to the VIS frame.
+Each offset HDU carries `DSTEP`, `DUNIT=arcsec`, `INTERP=bilinear`, `CONCRDNC=True`, `RBNBAND`, and a scaled WCS so the pixel coordinates map correctly to the VIS frame.
 
 Downstream usage:
 ```
@@ -193,6 +240,19 @@ Rubin pixel (x_r, y_r)
   → corrected sky: (RA_r + dra/cos(dec)/3600, Dec_r + ddec/3600)
   → VIS WCS inverse → VIS pixel (x_v, y_v)
 ```
+
+New inference flags:
+- `--auto-grid`: automatically reduce grid resolution for tiles with few matches
+- `--anchor-lambda`: ridge regularization base strength (default 1e-3, raised from 1e-4)
+- `--anchor-radius-px`: Gaussian scale for adaptive anchor (0 = auto-computed from grid spacing)
+
+---
+
+## Tile size considerations
+
+The defaults are tuned for ~1000×1000 VIS pixel tiles. Smaller tiles risk being source-starved: a 500×500 tile might only yield 20-30 matches, pushing the grid solver to its minimum 4×4 resolution. Larger tiles (4000×4000+) work fine but the 12×12 grid may be too coarse to capture real spatial structure; scale `--grid-h` and `--grid-w` proportionally.
+
+The patch size (33×33) and search radius (±3 pixels) are fixed by the trained model and don't change with tile size. Source detection parameters assume a certain density per unit area, not per tile.
 
 ---
 
@@ -205,3 +265,13 @@ Rubin pixel (x_r, y_r)
 **No epoch correction**: The surveys are assumed to handle proper motion and parallax internally. The concordance corrects for systematic WCS residuals only.
 
 **Scaling to Roman/NISP**: The reference frame encoder (`vis_encoder`) is hardcoded to 1-channel VIS input. To extend to NISP or Roman, instantiate a new matcher with the appropriate number of input channels for the reference instrument.
+
+---
+
+## Planned improvements
+
+**Multi-band joint training**: Currently each band trains its own checkpoint, so the r-band model never sees what a source looks like in i or z. But source color directly predicts DCR behavior. A multi-band encoder seeing all Rubin bands simultaneously could infer approximate SEDs and predict per-band offsets more accurately. This would also multiply the effective training data by sharing encoder weights across bands, which matters in the current data-limited regime.
+
+**Global or overlapping-tile field solve**: Each tile is currently solved independently, so adjacent tiles can disagree at their shared boundary. A multi-scale approach (fit a smooth large-scale field across the full mosaic first, then add local corrections where source density supports it) would eliminate boundary artifacts and capture systematic patterns that span multiple tiles. An intermediate step is overlapping tiles with blended fields in the overlap zone.
+
+**Deeper source detection**: Lowering detection thresholds or using forced photometry at known catalog positions would increase the number of matched sources per tile, directly improving field solver conditioning in sparse regions.
