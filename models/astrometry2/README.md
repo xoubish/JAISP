@@ -230,7 +230,7 @@ The output FITS file has three HDUs per tile:
 - `{tile_id}.r.DDE` — ΔDec field in arcsec, sampled every `dstep` VIS pixels
 - `{tile_id}.r.COV` — coverage map: min distance (VIS px) to nearest anchor source
 
-Each offset HDU carries `DSTEP`, `DUNIT=arcsec`, `INTERP=bilinear`, `CONCRDNC=True`, `RBNBAND`, and a scaled WCS so the pixel coordinates map correctly to the VIS frame.
+Each offset HDU carries `DSTEP`, `DUNIT=arcsec`, `INTERP=bilinear`, `CONCRDNC=True`, `RBNBAND`, and a scaled linear WCS (`CRPIX`/`CD`/`PC`/`CDELT`) so the pixel coordinates map correctly to the VIS frame. Higher-order distortion keywords are intentionally not propagated in this version.
 
 Downstream usage:
 ```
@@ -256,9 +256,11 @@ The patch size (33×33) and search radius (±3 pixels) are fixed by the trained 
 
 ---
 
-## Design decisions and open questions
+## Design decisions and current defaults
 
-**Mesh size (DSTEP)**: Default is 8 VIS pixels (0.8"). Rubin astrometric distortions from DCR vary on arcminute scales; 0.8" sampling is likely overkill. The `smooth_lambda` regularizer keeps the field smooth regardless. Empirically, DSTEP=16 or 32 may give equally good results with fewer grid nodes.
+**VIS grid adherence**: The concordance product is defined as a residual sky-offset field on top of the VIS WCS, and exported with a scaled linear WCS for mesh indexing. We intentionally defer full distortion-aware mesh WCS propagation for now; if downstream validation shows this is limiting, distortion terms can be added in a follow-up.
+
+**Mesh size (DSTEP)**: Default is 8 VIS pixels (0.8"). Rubin astrometric distortions from DCR vary on arcminute scales; 0.8" sampling is likely overkill. The `smooth_lambda` regularizer keeps the solved field smooth regardless. Empirically, DSTEP=16 or 32 may give equally good results with fewer mesh samples (smaller files), not fewer control-grid solve nodes.
 
 **One band at a time**: Each checkpoint targets one Rubin band. DCR causes wavelength-dependent offsets, so each band should have its own concordance field. Use `--context-bands` to pass additional bands as encoder input context without making them the alignment target.
 
