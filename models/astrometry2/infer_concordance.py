@@ -40,11 +40,15 @@ def _setup_imports():
 _setup_imports()
 
 from dataset import (
+    BAND_TO_IDX,
+    NISP_BAND_ORDER,
     discover_tile_pairs,
     extract_vis_patch,
     local_vis_pixel_to_sky_matrix,
+    normalize_nisp_band,
     normalize_rubin_band,
     normalize_rubin_bands,
+    reproject_nisp_patch_to_vis,
     reproject_rubin_patch_to_vis,
 )
 from field_solver import auto_grid_shape, evaluate_control_grid_mesh, solve_control_grid_field
@@ -70,10 +74,37 @@ def load_model(checkpoint_path: str, device: torch.device):
         search_radius=args.get('search_radius', 3),
         softmax_temp=args.get('softmax_temp', 0.05),
         mlp_hidden=args.get('mlp_hidden', 128),
+        n_target_bands=int(ckpt.get('n_target_bands', 1)),
+        band_embed_dim=int(args.get('band_embed_dim', 16)),
     ).to(device)
     model.load_state_dict(ckpt['model'], strict=True)
     model.eval()
     return model, ckpt
+
+
+def _normalize_any_band(name: str) -> str:
+    s = str(name).strip()
+    if not s:
+        raise ValueError('Empty band name.')
+    if s.lower().startswith('nisp_'):
+        return normalize_nisp_band(s)
+    return normalize_rubin_band(s)
+
+
+def _load_nisp_data(edata) -> Dict[str, tuple[np.ndarray, WCS]]:
+    nisp_data: Dict[str, tuple[np.ndarray, WCS]] = {}
+    for nb in NISP_BAND_ORDER:
+        img_key = f'img_{nb}'
+        wcs_key = f'wcs_{nb}'
+        if img_key not in edata or wcs_key not in edata:
+            continue
+        try:
+            img = np.nan_to_num(_to_float32(edata[img_key]), nan=0.0)
+            wcs = WCS(safe_header_from_card_string(edata[wcs_key].item()))
+            nisp_data[nb] = (img, wcs)
+        except Exception:
+            continue
+    return nisp_data
 
 
 def make_concordance_hdu(
@@ -136,7 +167,24 @@ def predict_tile(
     detect_bands: List[str],
     args,
 ) -> Optional[Dict]:
-    target_band = normalize_rubin_band(target_band)
+    try:
+        target_band = _normalize_any_band(target_band)
+    except Exception as exc:
+        print(f'[skip] {os.path.basename(rubin_path)}: invalid target band "{target_band}" ({exc})')
+        return None
+
+    input_bands_norm: List[str] = []
+    for b in input_bands:
+        try:
+            nb = _normalize_any_band(b)
+        except Exception as exc:
+            print(f'[skip] {os.path.basename(rubin_path)}: invalid input band "{b}" ({exc})')
+            return None
+        if nb not in input_bands_norm:
+            input_bands_norm.append(nb)
+    if not input_bands_norm:
+        return None
+
     try:
         rdata = np.load(rubin_path, allow_pickle=True)
         edata = np.load(euclid_path, allow_pickle=True)
@@ -148,6 +196,9 @@ def predict_tile(
     except Exception as exc:
         print(f'[skip] {os.path.basename(rubin_path)}: load/wcs failed ({exc})')
         return None
+
+    need_nisp = target_band.startswith('nisp_') or any(b.startswith('nisp_') for b in input_bands_norm)
+    nisp_data = _load_nisp_data(edata) if need_nisp else {}
 
     rubin_det = build_detection_image(rubin_cube, detect_bands, clip_sigma=args.detect_clip_sigma)
     rx, ry = detect_sources(rubin_det, nsig=args.rubin_nsig, smooth_sigma=args.rubin_smooth, min_dist=args.rubin_min_dist, max_sources=args.max_sources_rubin)
@@ -161,37 +212,63 @@ def predict_tile(
     if matched['vis_xy'].shape[0] < int(args.min_matches):
         return None
 
-    target_idx = RUBIN_BAND_ORDER.index(target_band.split('_', 1)[1])
-    rubin_target = np.nan_to_num(_to_float32(rubin_cube[target_idx]), nan=0.0)
-    rubin_xy_target = refine_centroids_in_band(
-        rubin_target,
-        matched['rubin_xy'],
-        radius=args.refine_radius,
-        flux_floor_sigma=args.refine_flux_floor_sigma,
-    )
-    r_ra, r_dec = rwcs.wcs_pix2world(rubin_xy_target[:, 0], rubin_xy_target[:, 1], 0)
-    v_ra, v_dec = vwcs.wcs_pix2world(matched['vis_xy'][:, 0], matched['vis_xy'][:, 1], 0)
-    raw_dra = (v_ra - r_ra) * np.cos(np.deg2rad(v_dec)) * 3600.0
-    raw_ddec = (v_dec - r_dec) * 3600.0
-    raw_offsets = np.stack([raw_dra, raw_ddec], axis=1).astype(np.float32)
+    vis_xy = matched['vis_xy'].astype(np.float32)
+    if target_band.startswith('rubin_'):
+        target_idx = RUBIN_BAND_ORDER.index(target_band.split('_', 1)[1])
+        rubin_target = np.nan_to_num(_to_float32(rubin_cube[target_idx]), nan=0.0)
+        rubin_xy_target = refine_centroids_in_band(
+            rubin_target,
+            matched['rubin_xy'],
+            radius=args.refine_radius,
+            flux_floor_sigma=args.refine_flux_floor_sigma,
+        )
+        r_ra, r_dec = rwcs.wcs_pix2world(rubin_xy_target[:, 0], rubin_xy_target[:, 1], 0)
+        v_ra, v_dec = vwcs.wcs_pix2world(vis_xy[:, 0], vis_xy[:, 1], 0)
+        raw_dra = (v_ra - r_ra) * np.cos(np.deg2rad(v_dec)) * 3600.0
+        raw_ddec = (v_dec - r_dec) * 3600.0
+        raw_offsets = np.stack([raw_dra, raw_ddec], axis=1).astype(np.float32)
+    else:
+        nb = target_band.split('_', 1)[1]
+        if nb not in nisp_data:
+            return None
+        nisp_img, nwcs = nisp_data[nb]
+        nisp_x, nisp_y = nwcs.wcs_world2pix(*vwcs.wcs_pix2world(vis_xy[:, 0], vis_xy[:, 1], 0), 0)
+        nisp_xy_init = np.stack([nisp_x, nisp_y], axis=1).astype(np.float32)
+        nisp_xy_refined = refine_centroids_in_band(
+            nisp_img,
+            nisp_xy_init,
+            radius=max(1, int(args.refine_radius) // 3),
+            flux_floor_sigma=args.refine_flux_floor_sigma,
+        )
+        n_ra, n_dec = nwcs.wcs_pix2world(nisp_xy_refined[:, 0], nisp_xy_refined[:, 1], 0)
+        v_ra, v_dec = vwcs.wcs_pix2world(vis_xy[:, 0], vis_xy[:, 1], 0)
+        raw_dra = (v_ra - n_ra) * np.cos(np.deg2rad(v_dec)) * 3600.0
+        raw_ddec = (v_dec - n_dec) * 3600.0
+        raw_offsets = np.stack([raw_dra, raw_ddec], axis=1).astype(np.float32)
 
     rubin_patches = []
     vis_patches = []
     pix2sky_list = []
     kept_xy = []
     kept_raw = []
-    vis_xy = matched['vis_xy'].astype(np.float32)
     for idx_anchor, anchor_xy in enumerate(vis_xy):
         vis_patch = extract_vis_patch(vis_img, anchor_xy, args.patch_size)
         band_patches = []
-        for band in input_bands:
-            idx = RUBIN_BAND_ORDER.index(band.split('_', 1)[1])
-            if idx >= rubin_cube.shape[0]:
-                continue
-            rubin_img = np.nan_to_num(_to_float32(rubin_cube[idx]), nan=0.0)
-            band_patches.append(reproject_rubin_patch_to_vis(rubin_img, rwcs, vwcs, anchor_xy, args.patch_size))
-        if len(band_patches) != len(input_bands):
-            continue
+        for band in input_bands_norm:
+            if band.startswith('rubin_'):
+                idx = RUBIN_BAND_ORDER.index(band.split('_', 1)[1])
+                if idx < rubin_cube.shape[0]:
+                    rubin_img = np.nan_to_num(_to_float32(rubin_cube[idx]), nan=0.0)
+                    band_patches.append(reproject_rubin_patch_to_vis(rubin_img, rwcs, vwcs, anchor_xy, args.patch_size))
+                else:
+                    band_patches.append(np.zeros((args.patch_size, args.patch_size), dtype=np.float32))
+            else:
+                nb = band.split('_', 1)[1]
+                if nb in nisp_data:
+                    nisp_img, nwcs = nisp_data[nb]
+                    band_patches.append(reproject_nisp_patch_to_vis(nisp_img, nwcs, vwcs, anchor_xy, args.patch_size))
+                else:
+                    band_patches.append(np.zeros((args.patch_size, args.patch_size), dtype=np.float32))
         rubin_patches.append(np.stack(band_patches, axis=0))
         vis_patches.append(vis_patch[None])
         pix2sky_list.append(local_vis_pixel_to_sky_matrix(vwcs, anchor_xy))
@@ -208,8 +285,29 @@ def predict_tile(
     preds = []
     sigmas = []
     confs = []
+    band_idx_value = BAND_TO_IDX.get(target_band)
+    model_n_target_bands = int(getattr(model, 'n_target_bands', 1))
+    use_band_idx = model_n_target_bands > 1
+    if use_band_idx and (band_idx_value is None or int(band_idx_value) >= model_n_target_bands):
+        print(
+            f'[skip] {os.path.basename(rubin_path)}: target band {target_band} not available in model '
+            f'(band_idx={band_idx_value}, n_target_bands={model_n_target_bands})'
+        )
+        return None
     for i in range(0, rubin_t.shape[0], int(args.batch_size)):
-        out = model(rubin_t[i:i + args.batch_size], vis_t[i:i + args.batch_size], pix2sky_t[i:i + args.batch_size])
+        batch_rubin = rubin_t[i:i + args.batch_size]
+        batch_vis = vis_t[i:i + args.batch_size]
+        batch_pix2sky = pix2sky_t[i:i + args.batch_size]
+        if use_band_idx:
+            batch_band_idx = torch.full(
+                (batch_rubin.shape[0],),
+                int(band_idx_value),
+                dtype=torch.long,
+                device=device,
+            )
+            out = model(batch_rubin, batch_vis, batch_pix2sky, band_idx=batch_band_idx)
+        else:
+            out = model(batch_rubin, batch_vis, batch_pix2sky)
         preds.append(out['pred_offset_arcsec'].cpu().numpy())
         sigmas.append(torch.exp(out['log_sigma']).cpu().numpy())
         confs.append(out['confidence'].cpu().numpy())
@@ -329,8 +427,31 @@ def main():
     device = torch.device(args.device if args.device else ('cuda' if torch.cuda.is_available() else 'cpu'))
     model, ckpt = load_model(args.checkpoint, device)
 
-    target_band = normalize_rubin_band(ckpt.get('target_band', ckpt.get('args', {}).get('rubin_band', 'r')))
-    input_bands = normalize_rubin_bands(args.input_bands) or [normalize_rubin_band(x) for x in ckpt.get('input_bands', [target_band])]
+    target_band_raw = ckpt.get('target_band', ckpt.get('args', {}).get('rubin_band', 'r'))
+    if str(target_band_raw) == 'multiband':
+        ckpt_target_bands = [str(b) for b in ckpt.get('target_bands', []) if str(b).strip()]
+        if ckpt_target_bands:
+            ckpt_target_bands = sorted(
+                ckpt_target_bands,
+                key=lambda b: (
+                    0 if b.startswith('rubin_') else 1,
+                    BAND_TO_IDX.get(b, 10_000),
+                ),
+            )
+            target_band_raw = ckpt_target_bands[0]
+        else:
+            target_band_raw = 'rubin_r'
+    target_band = _normalize_any_band(str(target_band_raw))
+
+    if args.input_bands:
+        input_bands_raw = [str(x) for x in args.input_bands]
+    else:
+        input_bands_raw = [str(x) for x in ckpt.get('input_bands', [target_band])]
+    input_bands = []
+    for b in input_bands_raw:
+        nb = _normalize_any_band(b)
+        if nb not in input_bands:
+            input_bands.append(nb)
     detect_bands = normalize_rubin_bands(args.detect_bands) or [f'rubin_{b}' for b in ('g', 'r', 'i', 'z')]
 
     pairs = discover_tile_pairs(args.rubin_dir, args.euclid_dir)

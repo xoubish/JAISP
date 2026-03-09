@@ -18,8 +18,10 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from dataset import (
+    ALL_BAND_ORDER,
     MatchedPatchDataset,
     build_patch_samples,
+    build_patch_samples_multiband,
     discover_tile_pairs,
     make_loader,
     normalize_rubin_band,
@@ -144,9 +146,15 @@ def make_preview(model, sample: Dict, device: torch.device, epoch: int, split_na
         ax.set_xlabel('x (VIS px)', fontsize=8)
         ax.tick_params(labelsize=7)
 
-    # (0,0) Rubin patch — what the model sees for the Rubin instrument
+    band_name = str(sample['target_band'])
+    if band_name.startswith('nisp_'):
+        patch_title = f"NISP {band_name.split('_', 1)[1]}-band\n(bkg-sub, noise-norm)"
+    else:
+        patch_title = f"Rubin {band_name.split('_', 1)[1]}-band\n(bkg-sub, noise-norm)"
+
+    # (0,0) First input patch channel
     _show_patch(fig.add_subplot(gs[0, 0]), rubin_np,
-                f"Rubin {sample['target_band'].split('_')[1]}-band\n(bkg-sub, noise-norm)",
+                patch_title,
                 'magma')
 
     # (0,1) VIS patch — the reference frame
@@ -241,7 +249,7 @@ def make_field_preview(
     model,
     device: torch.device,
     preview_pairs: Sequence[tuple[str, str, str]],
-    target_band: str,
+    target_bands: Sequence[str],
     input_bands: list[str],
     detect_bands: list[str],
     args,
@@ -249,7 +257,7 @@ def make_field_preview(
     split_name: str,
 ):
     if wandb is None:
-        return None
+        return {}
 
     preview_args = SimpleNamespace(
         patch_size=args.patch_size,
@@ -277,17 +285,19 @@ def make_field_preview(
         auto_grid=True,  # always use adaptive grid + anchor for previews
         dstep=args.preview_dstep,
     )
-    for tile_id, rubin_path, euclid_path in preview_pairs:
-        item = predict_tile(model, device, rubin_path, euclid_path, target_band, input_bands, detect_bands, preview_args)
-        if item is None:
-            continue
-        fig = make_tile_diagnostic_figure(item, tile_id, target_band, input_bands)
-        fig.suptitle(f"Epoch {epoch} | {split_name} fixed tile | standalone local matcher", y=0.99)
-        out = wandb.Image(fig)
-        import matplotlib.pyplot as plt
-        plt.close(fig)
-        return out
-    return None
+    out: Dict[str, object] = {}
+    for target_band in target_bands:
+        for tile_id, rubin_path, euclid_path in preview_pairs:
+            item = predict_tile(model, device, rubin_path, euclid_path, target_band, input_bands, detect_bands, preview_args)
+            if item is None:
+                continue
+            fig = make_tile_diagnostic_figure(item, tile_id, target_band, input_bands)
+            fig.suptitle(f"Epoch {epoch} | {split_name} fixed tile | {target_band}", y=0.99)
+            out[f'preview/fixed_tile/{target_band}'] = wandb.Image(fig)
+            import matplotlib.pyplot as plt
+            plt.close(fig)
+            break
+    return out
 
 
 def run_epoch(split_name, loader, model, optimizer, device, grad_clip: float, pixel_loss_weight: float) -> Dict[str, float]:
@@ -306,8 +316,12 @@ def run_epoch(split_name, loader, model, optimizer, device, grad_clip: float, pi
         if is_train:
             optimizer.zero_grad(set_to_none=True)
 
+        band_idx = batch.get('band_idx')
+        if band_idx is not None:
+            band_idx = band_idx.to(device)
+
         with torch.set_grad_enabled(is_train):
-            out = model(rubin, vis, pix2sky)
+            out = model(rubin, vis, pix2sky, band_idx=band_idx)
             losses = compute_loss(out, target, pix2sky, pixel_loss_weight=pixel_loss_weight)
             loss = losses['loss_total']
             if is_train:
@@ -340,6 +354,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--rubin-band', type=str, default='r')
     p.add_argument('--context-bands', type=str, nargs='+', default=[], help='Optional extra Rubin bands for the local patch matcher.')
     p.add_argument('--detect-bands', type=str, nargs='+', default=['g', 'r', 'i', 'z'])
+    # Multi-band mode
+    p.add_argument('--multiband', action='store_true',
+                   help='Train in multi-band mode: all 6 Rubin bands as input, per-band MLP head.')
+    p.add_argument('--target-bands', type=str, nargs='+', default=['all'],
+                   help='Target bands for multiband mode. "all" = all 6 Rubin bands, "all_nisp" adds NISP Y/J/H. Default: all.')
+    p.add_argument('--include-nisp', action='store_true',
+                   help='Include NISP Y/J/H as input channels (multiband mode only).')
+    p.add_argument('--band-embed-dim', type=int, default=16,
+                   help='Band embedding dimension for the multiband MLP head.')
     p.add_argument('--output-dir', type=str, default='models/checkpoints/astrometry2_matcher')
 
     p.add_argument('--patch-size', type=int, default=33)
@@ -394,16 +417,12 @@ def train(args):
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    target_band = normalize_rubin_band(args.rubin_band)
-    context_bands = normalize_rubin_bands(args.context_bands)
     detect_bands = normalize_rubin_bands(args.detect_bands) or [f'rubin_{b}' for b in ('g', 'r', 'i', 'z')]
 
     pairs = discover_tile_pairs(args.rubin_dir, args.euclid_dir)
     train_pairs, val_pairs = split_tile_pairs(pairs, args.val_frac, args.seed)
 
-    common_kwargs = dict(
-        target_band=target_band,
-        context_bands=context_bands,
+    detection_kwargs = dict(
         detect_bands=detect_bands,
         patch_size=args.patch_size,
         max_patches_per_tile=args.max_patches_per_tile,
@@ -425,8 +444,40 @@ def train(args):
         seed=args.seed,
     )
 
-    train_samples = build_patch_samples(train_pairs, split_name='train', **common_kwargs)
-    val_samples = build_patch_samples(val_pairs, split_name='val', **common_kwargs) if val_pairs else []
+    if getattr(args, 'multiband', False):
+        multiband_kwargs = dict(
+            target_bands=args.target_bands,
+            include_nisp=args.include_nisp,
+            **detection_kwargs,
+        )
+        train_samples = build_patch_samples_multiband(train_pairs, split_name='train', **multiband_kwargs)
+        val_samples = build_patch_samples_multiband(val_pairs, split_name='val', **multiband_kwargs) if val_pairs else []
+        # Samples carry global band indices (dataset.ALL_BAND_ORDER).  Size the
+        # embedding table by max index + 1 so sparse subsets remain valid.
+        all_band_idxs = sorted(set(s['band_idx'] for s in train_samples))
+        n_target_bands = max(all_band_idxs) + 1
+        if n_target_bands > len(ALL_BAND_ORDER):
+            raise RuntimeError(
+                f'Invalid band_idx in training samples: max={max(all_band_idxs)} '
+                f'but supported range is [0, {len(ALL_BAND_ORDER) - 1}]'
+            )
+        target_band = 'multiband'
+        preview_target_bands = sorted(
+            set(s['target_band'] for s in train_samples),
+            key=lambda b: ALL_BAND_ORDER.index(b) if b in ALL_BAND_ORDER else len(ALL_BAND_ORDER),
+        )
+    else:
+        target_band = normalize_rubin_band(args.rubin_band)
+        context_bands = normalize_rubin_bands(args.context_bands)
+        common_kwargs = dict(
+            target_band=target_band,
+            context_bands=context_bands,
+            **detection_kwargs,
+        )
+        train_samples = build_patch_samples(train_pairs, split_name='train', **common_kwargs)
+        val_samples = build_patch_samples(val_pairs, split_name='val', **common_kwargs) if val_pairs else []
+        n_target_bands = 1
+        preview_target_bands = [target_band]
 
     train_dataset = MatchedPatchDataset(train_samples, augment=True)
     val_dataset = MatchedPatchDataset(val_samples, augment=False) if val_samples else None
@@ -441,6 +492,8 @@ def train(args):
         search_radius=args.search_radius,
         softmax_temp=args.softmax_temp,
         mlp_hidden=args.mlp_hidden,
+        n_target_bands=n_target_bands,
+        band_embed_dim=getattr(args, 'band_embed_dim', 16),
     ).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-6)
@@ -519,19 +572,19 @@ def train(args):
                     preview = make_preview(model, preview_sample, device, epoch, preview_split)
                     if preview is not None:
                         log_data['preview/fixed_patch'] = preview
-                    field_preview = make_field_preview(
+                    field_previews = make_field_preview(
                         model,
                         device,
                         preview_pairs,
-                        target_band,
+                        preview_target_bands,
                         train_samples[0]['input_bands'],
                         detect_bands,
                         args,
                         epoch,
                         preview_split,
                     )
-                    if field_preview is not None:
-                        log_data['preview/fixed_tile'] = field_preview
+                    if field_previews:
+                        log_data.update(field_previews)
             except Exception as exc:
                 print(f'Preview rendering failed at epoch {epoch}: {exc}')
             wandb_run.log(log_data, step=epoch)
@@ -546,8 +599,11 @@ def train(args):
             'val_metrics': val_metrics,
             'args': save_args,
             'rubin_channels': rubin_channels,
+            'n_target_bands': n_target_bands,
             'input_bands': train_samples[0]['input_bands'],
             'target_band': target_band,
+            'target_bands': list(set(s['target_band'] for s in train_samples)),
+            'include_nisp': getattr(args, 'include_nisp', False),
         }
         torch.save(ckpt, out_dir / 'last_matcher.pt')
         if score < best_score:

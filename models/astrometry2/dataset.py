@@ -119,6 +119,20 @@ def normalize_rubin_bands(names: Sequence[str]) -> List[str]:
     return out
 
 
+def normalize_nisp_band(name: str) -> str:
+    band = str(name).strip()
+    if not band:
+        raise ValueError('Empty NISP band name.')
+    band_lc = band.lower()
+    if band_lc.startswith('nisp_'):
+        short = band.split('_', 1)[1].upper()
+    else:
+        raise ValueError(f'Invalid NISP band: {name}')
+    if short not in NISP_BAND_ORDER:
+        raise ValueError(f'Invalid NISP band: {name}')
+    return f'nisp_{short}'
+
+
 def discover_tile_pairs(rubin_dir: str, euclid_dir: str) -> List[Tuple[str, str, str]]:
     pairs = []
     for rubin_path in sorted(glob.glob(os.path.join(rubin_dir, 'tile_x*_y*.npz'))):
@@ -440,18 +454,21 @@ def build_patch_samples_multiband(
         raise ValueError('patch_size must be odd.')
 
     # Parse target bands.
-    target_bands_raw = [str(b).strip().lower() for b in target_bands if str(b).strip()]
+    target_bands_raw = [str(b).strip() for b in target_bands if str(b).strip()]
+    target_bands_raw_lc = [b.lower() for b in target_bands_raw]
     target_bands_norm = []
-    if any(b in ('all', 'all_rubin') for b in target_bands_raw):
+    if any(b in ('all', 'all_rubin') for b in target_bands_raw_lc):
         target_bands_norm.extend([f'rubin_{b}' for b in RUBIN_BAND_ORDER])
-    if any(b == 'all_nisp' for b in target_bands_raw):
+    if any(b == 'all_nisp' for b in target_bands_raw_lc):
         target_bands_norm.extend([f'nisp_{b}' for b in NISP_BAND_ORDER])
     # Also parse individual band names.
     for b in target_bands_raw:
-        if b.startswith('nisp_'):
-            if b not in target_bands_norm:
-                target_bands_norm.append(b)
-        elif b not in ('all', 'all_rubin', 'all_nisp'):
+        b_lc = b.lower()
+        if b_lc.startswith('nisp_'):
+            nb = normalize_nisp_band(b)
+            if nb not in target_bands_norm:
+                target_bands_norm.append(nb)
+        elif b_lc not in ('all', 'all_rubin', 'all_nisp'):
             nb = normalize_rubin_band(b)
             if nb not in target_bands_norm:
                 target_bands_norm.append(nb)

@@ -181,6 +181,15 @@ class LocalAstrometryMatcher(nn.Module):
         # Concatenate band embedding if multi-band.
         parts = [rubin_pool, vis_pool, delta_pool, coarse]
         if self.band_embedding is not None and band_idx is not None:
+            if band_idx.dtype != torch.long:
+                band_idx = band_idx.long()
+            if torch.any((band_idx < 0) | (band_idx >= self.n_target_bands)):
+                lo = int(torch.min(band_idx).item())
+                hi = int(torch.max(band_idx).item())
+                raise IndexError(
+                    f'band_idx out of range: min={lo}, max={hi}, '
+                    f'n_target_bands={self.n_target_bands}'
+                )
             band_emb = self.band_embedding(band_idx)  # [B, band_embed_dim]
             parts.append(band_emb)
         elif self.band_embedding is not None:
