@@ -274,7 +274,7 @@ def make_field_preview(
         smooth_lambda=args.preview_smooth_lambda,
         anchor_lambda=getattr(args, 'anchor_lambda', 1e-3),
         anchor_radius_px=getattr(args, 'anchor_radius_px', 0.0),
-        auto_grid=getattr(args, 'auto_grid', False),
+        auto_grid=True,  # always use adaptive grid + anchor for previews
         dstep=args.preview_dstep,
     )
     for tile_id, rubin_path, euclid_path in preview_pairs:
