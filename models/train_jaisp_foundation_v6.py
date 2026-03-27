@@ -149,14 +149,14 @@ class JAISPTrainerV6:
         if split is None:
             return None
 
-        # Move to device
-        ctx_img = {b: v.to(self.device) for b, v in split['context_images'].items()}
-        ctx_rms = {b: v.to(self.device) for b, v in split['context_rms'].items()}
+        # Move to device and add batch dimension ([1,H,W] → [1,1,H,W])
+        ctx_img = {b: v.unsqueeze(0).to(self.device) for b, v in split['context_images'].items()}
+        ctx_rms = {b: v.unsqueeze(0).to(self.device) for b, v in split['context_rms'].items()}
         targets = [
             {
                 'band':  t['band'],
-                'image': t['image'].to(self.device),
-                'rms':   t['rms'].to(self.device),
+                'image': t['image'].unsqueeze(0).to(self.device),
+                'rms':   t['rms'].unsqueeze(0).to(self.device),
             }
             for t in split['targets']
         ]
@@ -245,15 +245,15 @@ class JAISPTrainerV6:
             if split is None:
                 continue
 
-            ctx_img = {b: v.to(self.device) for b, v in split['context_images'].items()}
-            ctx_rms = {b: v.to(self.device) for b, v in split['context_rms'].items()}
+            ctx_img = {b: v.unsqueeze(0).to(self.device) for b, v in split['context_images'].items()}
+            ctx_rms = {b: v.unsqueeze(0).to(self.device) for b, v in split['context_rms'].items()}
             tgt = split['targets'][0]
 
             out = self.model(
                 ctx_img, ctx_rms,
                 tgt['band'],
-                tgt['image'].to(self.device),
-                tgt['rms'].to(self.device),
+                tgt['image'].unsqueeze(0).to(self.device),
+                tgt['rms'].unsqueeze(0).to(self.device),
             )
             val_losses.append(float(out['loss']))
 
@@ -266,78 +266,110 @@ class JAISPTrainerV6:
     @torch.no_grad()
     def _visualize(self, epoch: int) -> None:
         """
-        Show 3 example reconstructions from the validation set:
-        Context bands (1 shown) | Target (truth) | Prediction | Residual | InfoMap
+        Log reconstruction panels to W&B:
+          - Per-example: context | truth | prediction | residual | infomap
+            logged as individual wandb.Image panels so they appear as separate
+            panels in the W&B UI (grouped under vis/ex0/, vis/ex1/, vis/ex2/).
+          - Pixel scatter: predicted vs true SNR at bright pixels (info-weighted),
+            gives a direct read on whether the model is learning the right values.
+          - Reconstruction stats: per-example Pearson r and MAE at source pixels.
         """
         self.model.eval()
 
-        vis_rng = np.random.RandomState(epoch)
-        val_list = list(self.val_indices)
-        vis_indices = vis_rng.choice(val_list, size=min(3, len(val_list)), replace=False)
+        # Use fixed seeds so the same tiles are shown every epoch (easy to compare)
+        val_list = sorted(self.val_indices)
+        rng = np.random.RandomState(0)
+        vis_indices = rng.choice(val_list, size=min(3, len(val_list)), replace=False)
 
-        fig, axes = plt.subplots(len(vis_indices), 5, figsize=(18, 4 * len(vis_indices)))
-        if len(vis_indices) == 1:
-            axes = axes[None]  # ensure 2D indexing
+        log_dict = {'epoch': epoch + 1}
 
-        col_titles = ['Context (1 band)', 'Target (truth)', 'Prediction', 'Residual', 'InfoMap weights']
-        for ax, t in zip(axes[0], col_titles):
-            ax.set_title(t, fontsize=10, pad=4)
+        # Accumulate scatter data across examples
+        scatter_truth_all, scatter_pred_all = [], []
 
-        for row, tile_idx in enumerate(vis_indices):
+        for ex_idx, tile_idx in enumerate(vis_indices):
             sample = self.full_dataset[int(tile_idx)]
             split = sample_context_target(sample, np.random.RandomState(tile_idx), n_targets=1)
             if split is None:
                 continue
 
-            ctx_img = {b: v.to(self.device) for b, v in split['context_images'].items()}
-            ctx_rms = {b: v.to(self.device) for b, v in split['context_rms'].items()}
+            ctx_img = {b: v.unsqueeze(0).to(self.device) for b, v in split['context_images'].items()}
+            ctx_rms = {b: v.unsqueeze(0).to(self.device) for b, v in split['context_rms'].items()}
             tgt = split['targets'][0]
 
             out = self.model(
                 ctx_img, ctx_rms,
                 tgt['band'],
-                tgt['image'].to(self.device),
-                tgt['rms'].to(self.device),
+                tgt['image'].unsqueeze(0).to(self.device),
+                tgt['rms'].unsqueeze(0).to(self.device),
             )
 
-            # Pick one context band to display
             ctx_band = list(ctx_img.keys())[0]
-            ctx_arr = (ctx_img[ctx_band] / (ctx_rms[ctx_band] + 1e-10)).squeeze().cpu().numpy()
-            truth = out['target_norm'].squeeze().cpu().numpy()
-            pred = out['pred'].squeeze().cpu().numpy()
-            resid = pred - truth
-            info = out['info_weights'].squeeze().cpu().numpy()
+            ctx_arr  = (ctx_img[ctx_band] / (ctx_rms[ctx_band] + 1e-10)).squeeze().cpu().numpy()
+            truth    = out['target_norm'].squeeze().cpu().numpy()
+            pred     = out['pred'].squeeze().cpu().numpy()
+            resid    = pred - truth
+            info     = out['info_weights'].squeeze().cpu().numpy()
 
-            def _imshow(ax, arr, cmap='gray', percentile=True, **kwargs):
-                if percentile:
-                    vmin, vmax = np.nanpercentile(arr, [1, 99])
+            # ---- Individual image panels ------------------------------------
+            def _render(arr, cmap='gray', vrange=None) -> np.ndarray:
+                """Render a 2D array to an HxWx3 uint8 image for wandb.Image."""
+                if vrange is None:
+                    vlo, vhi = np.nanpercentile(arr, [1, 99])
                 else:
-                    vmin, vmax = arr.min(), arr.max()
-                ax.imshow(arr, cmap=cmap, vmin=vmin, vmax=vmax, origin='lower', **kwargs)
-                ax.axis('off')
+                    vlo, vhi = vrange
+                norm = plt.Normalize(vmin=vlo, vmax=vhi)
+                cm = plt.get_cmap(cmap)
+                rgba = cm(norm(arr))          # H×W×4
+                return (rgba[:, :, :3] * 255).astype(np.uint8)
 
-            _imshow(axes[row, 0], ctx_arr)
-            axes[row, 0].set_ylabel(f'Tile {sample["tile_id"]}\nctx:{ctx_band}', fontsize=7)
+            rmax = float(np.nanpercentile(np.abs(resid), 99)) or 1.0
+            prefix = f'vis/ex{ex_idx}'
+            log_dict[f'{prefix}/context ({ctx_band})']       = wandb.Image(_render(ctx_arr),  caption=f'context: {ctx_band}')
+            log_dict[f'{prefix}/truth ({tgt["band"]})']      = wandb.Image(_render(truth),    caption=f'truth: {tgt["band"]}')
+            log_dict[f'{prefix}/prediction']                  = wandb.Image(_render(pred),     caption='prediction')
+            log_dict[f'{prefix}/residual (pred − truth)']    = wandb.Image(_render(resid, cmap='RdBu_r', vrange=(-rmax, rmax)), caption='residual')
+            log_dict[f'{prefix}/infomap']                     = wandb.Image(_render(info, cmap='inferno', vrange=(info.min(), info.max())), caption='InfoMap weights')
 
-            _imshow(axes[row, 1], truth)
-            axes[row, 1].set_ylabel(f'target:{tgt["band"]}', fontsize=7)
+            # ---- Reconstruction stats at bright pixels ----------------------
+            # Use the info map as a mask: keep the top 10% highest-weight pixels
+            thresh = np.nanpercentile(info, 90)
+            bright = info >= thresh
+            if bright.sum() > 10:
+                t_bright = truth[bright]
+                p_bright = pred[bright]
+                corr = float(np.corrcoef(t_bright, p_bright)[0, 1]) if len(t_bright) > 1 else 0.0
+                mae  = float(np.mean(np.abs(p_bright - t_bright)))
+                log_dict[f'{prefix}/pearson_r_bright'] = corr
+                log_dict[f'{prefix}/mae_bright_px']    = mae
 
-            _imshow(axes[row, 2], pred)
+                # Collect for pooled scatter
+                # Sub-sample to keep scatter manageable (max 2000 pts per example)
+                n = min(2000, bright.sum())
+                idx = np.random.choice(bright.sum(), n, replace=False)
+                scatter_truth_all.append(t_bright[idx])
+                scatter_pred_all.append(p_bright[idx])
 
-            # Residual with diverging colormap
-            rmax = np.nanpercentile(np.abs(resid), 99)
-            axes[row, 3].imshow(resid, cmap='RdBu_r', vmin=-rmax, vmax=rmax, origin='lower')
-            axes[row, 3].axis('off')
+        # ---- Pixel scatter: pred vs truth (all examples pooled) ------------
+        if scatter_truth_all:
+            t_cat = np.concatenate(scatter_truth_all)
+            p_cat = np.concatenate(scatter_pred_all)
 
-            _imshow(axes[row, 4], info, cmap='inferno', percentile=False)
+            fig, ax = plt.subplots(figsize=(5, 5))
+            ax.hexbin(t_cat, p_cat, gridsize=60, cmap='viridis', mincnt=1)
+            lim = max(np.abs(t_cat).max(), np.abs(p_cat).max())
+            lim = min(lim, 30)  # cap at 30σ for display
+            ax.plot([-lim, lim], [-lim, lim], 'r--', lw=1, label='y=x')
+            r = float(np.corrcoef(t_cat, p_cat)[0, 1])
+            ax.set_xlabel('Truth (noise units)')
+            ax.set_ylabel('Prediction (noise units)')
+            ax.set_title(f'Pred vs Truth at bright pixels  |  r = {r:.3f}')
+            ax.legend(fontsize=8)
+            plt.tight_layout()
+            log_dict['vis/scatter_pred_vs_truth'] = wandb.Image(fig)
+            plt.close(fig)
+            log_dict['vis/pearson_r_all'] = r
 
-        plt.suptitle(f'Epoch {epoch+1} Reconstructions (noise-normalized units)', fontsize=11)
-        plt.tight_layout()
-
-        fig_path = self.output_dir / f'vis_epoch_{epoch+1:03d}.png'
-        plt.savefig(fig_path, dpi=100, bbox_inches='tight')
-        plt.close(fig)
-        wandb.log({'vis/reconstructions': wandb.Image(str(fig_path)), 'epoch': epoch + 1})
+        wandb.log(log_dict)
 
     # -----------------------------------------------------------------------
     # Checkpoint save / load
