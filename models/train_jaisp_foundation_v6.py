@@ -3,13 +3,16 @@
 # Training script for JAISP Foundation v6 - Masked Band Prediction
 #
 # Training objective:
-#   For each tile, randomly hold out 1 Rubin band (the target).
-#   Feed the remaining N-1 bands through the encoder-decoder.
+#   For each tile, randomly hold out 1 band as the target.
+#   Feed the remaining bands through the encoder-decoder.
 #   Minimize InformationMap-weighted L1 between predicted and true target.
 #
 # Curriculum:
-#   Phase A (this script): within-instrument only (all Rubin bands)
-#   Phase B (future):      cross-instrument (Rubin → Euclid VIS)
+#   Phase A (cross_instrument_prob=0.0): within-instrument only (Rubin bands)
+#   Phase B (cross_instrument_prob=1.0): full joint pool — any band from
+#     {rubin_u/g/r/i/z/y + euclid_VIS/Y/J/H} can be context or target.
+#     Euclid bands are downsampled to Rubin resolution (512×512) before pooling.
+#     Tiles without Euclid data automatically fall back to Phase A.
 #
 # Key design choices:
 #   - Gradient accumulation: accumulate 4 steps before optimizer step
@@ -156,7 +159,7 @@ class JAISPTrainerV6:
             and sample.get('has_euclid', False)
         )
         if use_phase_b:
-            split = sample_context_target_phaseB(sample)
+            split = sample_context_target_phaseB(sample, self.rng)
         else:
             split = sample_context_target(sample, self.rng, n_targets=self.n_targets)
         if split is None:

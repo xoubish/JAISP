@@ -84,10 +84,12 @@ Tiles on disk
 
 | File | What it does |
 |------|-------------|
-| `matcher.py` | `LocalAstrometryMatcher` — the neural network |
+| `matcher.py` | `LocalAstrometryMatcher` — baseline neural network (single-band Rubin, random-init VIS CNN) |
+| `matcher_v6.py` | `V6AstrometryMatcher` — Phase B backbone: frozen v6 Rubin + VIS BandStems + trainable adapters |
 | `dataset.py` | `build_patch_samples` builds all training samples from tile pairs; `MatchedPatchDataset` serves them with optional augmentation |
 | `field_solver.py` | Pure-numpy bilinear control-grid solver + evaluator with adaptive regularization — no learning |
-| `train_local_matcher.py` | Training loop with W&B logging and tile-level diagnostic previews |
+| `train_local_matcher.py` | Training loop with W&B logging and tile-level diagnostic previews (used by both matchers) |
+| `train_astro_v6.py` | Thin wrapper around `train_local_matcher.py` that instantiates `V6AstrometryMatcher` |
 | `infer_concordance.py` | Run a trained checkpoint over all tiles and write a FITS concordance file |
 | `viz.py` | Diagnostic figures: raw offsets on VIS, solved field, component maps, residual vectors |
 
@@ -190,26 +192,46 @@ Aim for `p68_total < 20 mas` on the validation set.
 
 ## Training
 
+### Baseline matcher (single-band, no foundation model)
+
 ```bash
-/home/shemmati/venvs/superres/bin/python models/astrometry2/train_local_matcher.py \
-  --rubin-dir data/rubin_tiles_ecdfs \
-  --euclid-dir data/euclid_tiles_ecdfs \
+python train_local_matcher.py \
+  --rubin-dir  ../../data/rubin_tiles_ecdfs \
+  --euclid-dir ../../data/euclid_tiles_ecdfs \
   --rubin-band r \
-  --output-dir models/checkpoints/astrometry2_r \
-  --epochs 30 \
-  --batch-size 64 \
-  --wandb-mode online
+  --output-dir ../checkpoints/astrometry2_r \
+  --epochs 30 --batch-size 64
 ```
 
-Key arguments:
-- `--rubin-band`: which Rubin band to use as the alignment target (e.g. `r`, `i`, `z`)
-- `--context-bands`: optional additional Rubin bands fed to the encoder alongside the target band
-- `--detect-bands`: bands used to build the multi-band detection image for source finding (default: g r i z)
-- `--max-patches-per-tile`: max matched sources to use per tile (default 64). With small data, raise this.
-- `--search-radius`: half-width of the pixel-shift search window (default 3, meaning ±3 VIS pixels = ±0.3")
+### v6 Phase B matcher (recommended)
+
+Requires a Phase B foundation checkpoint (`jaisp_v6_phaseB*/checkpoint_best.pt`).
+Uses frozen v6 BandStems for both Rubin and VIS encoders — both live in the same cross-instrument feature space learned during Phase B.
+
+```bash
+python train_astro_v6.py \
+  --v6-checkpoint ../checkpoints/jaisp_v6_phaseB/checkpoint_best.pt \
+  --rubin-dir     ../../data/rubin_tiles_ecdfs \
+  --euclid-dir    ../../data/euclid_tiles_ecdfs \
+  --output-dir    ../checkpoints/astrometry_v6 \
+  --epochs 30 --batch-size 64 \
+  --wandb-project JAISP-Astrometry-v6
+```
+
+Key arguments (both scripts):
+- `--rubin-band`: target Rubin band for alignment (e.g. `r`, `i`, `z`)
+- `--context-bands`: additional Rubin bands fed to the encoder alongside the target band
+- `--detect-bands`: bands used for multi-band source detection (default: g r i z)
+- `--max-patches-per-tile`: max matched sources per tile (default 64)
+- `--search-radius`: pixel-shift search half-width (default 3 = ±0.3" at VIS scale)
 - `--patch-size`: must be odd (default 33 = 3.3" at VIS resolution)
 
-Training prints per-epoch metrics in mas: `train_MAE`, `train_p68`, `val_MAE`, `val_p68`, plus pixel-space error and loss components.
+Extra arguments for `train_astro_v6.py`:
+- `--v6-checkpoint`: path to Phase B foundation checkpoint (required)
+- `--adapter-blocks`: trainable ConvNeXt adapter blocks on top of frozen stems (default 2)
+- `--unfreeze-stems`: fine-tune the v6 stems (default: frozen)
+
+Training prints per-epoch metrics in mas: `train_MAE`, `train_p68`, `val_MAE`, `val_p68`.
 
 ---
 
@@ -266,14 +288,14 @@ The patch size (33×33) and search radius (±3 pixels) are fixed by the trained 
 
 **No epoch correction**: The surveys are assumed to handle proper motion and parallax internally. The concordance corrects for systematic WCS residuals only.
 
-**Scaling to Roman/NISP**: The reference frame encoder (`vis_encoder`) is hardcoded to 1-channel VIS input. To extend to NISP or Roman, instantiate a new matcher with the appropriate number of input channels for the reference instrument.
+**Scaling to Roman/NISP**: The v6 VIS encoder reuses the `euclid_VIS` BandStem from the Phase B foundation model. To extend to NISP or Roman, a Phase B checkpoint with a BandStem trained on the target instrument's band is needed — or fall back to the baseline `LocalAstrometryMatcher` with a fresh CNN for that channel.
 
 ---
 
 ## Planned improvements
 
-**Multi-band joint training**: Currently each band trains its own checkpoint, so the r-band model never sees what a source looks like in i or z. But source color directly predicts DCR behavior. A multi-band encoder seeing all Rubin bands simultaneously could infer approximate SEDs and predict per-band offsets more accurately. This would also multiply the effective training data by sharing encoder weights across bands, which matters in the current data-limited regime.
-
 **Global or overlapping-tile field solve**: Each tile is currently solved independently, so adjacent tiles can disagree at their shared boundary. A multi-scale approach (fit a smooth large-scale field across the full mosaic first, then add local corrections where source density supports it) would eliminate boundary artifacts and capture systematic patterns that span multiple tiles. An intermediate step is overlapping tiles with blended fields in the overlap zone.
 
 **Deeper source detection**: Lowering detection thresholds or using forced photometry at known catalog positions would increase the number of matched sources per tile, directly improving field solver conditioning in sparse regions.
+
+**Unfreeze stems after warmup**: The current v6 matcher freezes the Phase B stems throughout training. A two-stage schedule — freeze for the first N epochs to stabilize the adapter, then unfreeze with a lower LR — may improve astrometric precision by allowing the stems to specialize toward centroid localization.

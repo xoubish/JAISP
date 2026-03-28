@@ -1,4 +1,4 @@
-"""Astrometry matcher with v6 foundation model backbone for Rubin features.
+"""Astrometry matcher with v6 foundation model backbone for Rubin+VIS features.
 
 Key differences from LocalAstrometryMatcher (matcher.py):
 
@@ -9,13 +9,13 @@ Key differences from LocalAstrometryMatcher (matcher.py):
       mean-aggregated into a single feature map.
     - Small trainable ConvNeXt adapter blocks on top allow astrometry-specific
       refinement while keeping v6 weights frozen.
-    - Net result: richer, cross-band-consistent Rubin features from a model
-      trained to reconstruct all bands from each other at pixel precision.
 
-  VIS encoder:
-    - Unchanged lightweight trainable CNN. v6 was trained on Rubin only
-      (Phase A), so there are no pre-trained VIS weights to reuse yet.
-    - After Phase B cross-instrument training, this can also be replaced.
+  VIS encoder (Phase B):
+    - Uses the frozen v6 euclid_VIS BandStem, trained during Phase B to encode
+      VIS in a feature space consistent with Rubin features.
+    - Same adapter pattern as Rubin encoder.
+    - Net result: Rubin and VIS features live in the same learned cross-instrument
+      space — the cost volume compares like with like.
 
   Cost volume, soft-argmax, MLP refinement, band embedding, Jacobian:
     - Identical to LocalAstrometryMatcher. No changes.
@@ -24,7 +24,7 @@ Usage:
     from matcher_v6 import V6AstrometryMatcher, load_v6_matcher
 
     matcher = load_v6_matcher(
-        v6_checkpoint='checkpoints/jaisp_v6/checkpoint_best.pt',
+        v6_checkpoint='checkpoints/jaisp_v6_phaseB2/checkpoint_best.pt',
         n_rubin_bands=6,
         n_target_bands=6,
     )
@@ -120,15 +120,65 @@ class V6RubinEncoder(nn.Module):
 
 
 # ============================================================
+# V6 VIS Encoder (Phase B)
+# ============================================================
+
+class V6VISEncoder(nn.Module):
+    """
+    Euclid VIS patch encoder reusing the frozen v6 euclid_VIS BandStem.
+
+    After Phase B cross-instrument training the v6 model has a BandStem for
+    euclid_VIS that was trained jointly with the Rubin stems — it encodes VIS
+    in a feature space consistent with Rubin features. Using it here means the
+    cost volume compares like with like instead of matching a random CNN to
+    frozen Rubin stems.
+
+    Input : [B, 1, H, W]  pre-noise-normalized VIS patch
+    Output: [B, out_ch, H, W]
+    """
+
+    def __init__(
+        self,
+        v6_model: JAISPFoundationV6,
+        out_ch: int = 64,
+        n_adapter_blocks: int = 2,
+        freeze_stem: bool = True,
+    ):
+        super().__init__()
+        stem_ch = v6_model.encoder.stem_ch
+
+        self.vis_stem = v6_model.encoder.stems['euclid_VIS'].net
+
+        if freeze_stem:
+            for p in self.vis_stem.parameters():
+                p.requires_grad = False
+
+        adapter: list = [ConvNeXtBlock(stem_ch) for _ in range(n_adapter_blocks)]
+        if out_ch != stem_ch:
+            adapter.append(nn.Conv2d(stem_ch, out_ch, kernel_size=1))
+        self.adapter = nn.Sequential(*adapter)
+
+    def forward(self, vis_patch: torch.Tensor) -> torch.Tensor:
+        """
+        vis_patch: [B, 1, H, W] pre-normalized
+        returns:   [B, out_ch, H, W]
+        """
+        return self.adapter(self.vis_stem(vis_patch))
+
+
+# ============================================================
 # V6 Astrometry Matcher
 # ============================================================
 
 class V6AstrometryMatcher(nn.Module):
     """
-    Drop-in replacement for LocalAstrometryMatcher using the v6 backbone.
+    Drop-in replacement for LocalAstrometryMatcher using the v6 Phase B backbone.
 
-    Rubin encoder  : V6RubinEncoder (frozen v6 stems + trainable adapter)
-    VIS encoder    : lightweight trainable CNN (4-layer, GroupNorm)
+    Rubin encoder  : V6RubinEncoder  — frozen v6 Rubin BandStems + trainable adapter
+    VIS encoder    : V6VISEncoder    — frozen v6 euclid_VIS BandStem + trainable adapter
+                     Both encoders share the same Phase B feature space, so the
+                     cost volume compares representations trained jointly across
+                     instruments rather than matching Rubin stems to a random CNN.
     Cost volume    : spatially-weighted cross-correlation (identical to astrometry2)
     Soft-argmax    : differentiable coarse offset
     MLP refinement : coarse + pooled features → (dx, dy, log_sigma)
@@ -166,20 +216,14 @@ class V6AstrometryMatcher(nn.Module):
             freeze_stems=freeze_stems,
         )
 
-        # VIS: 4-layer CNN (GroupNorm, no BN — stable at small batch sizes)
-        self.vis_encoder = nn.Sequential(
-            nn.Conv2d(1, 32, 3, padding=1, bias=False),
-            nn.GroupNorm(4, 32),
-            nn.GELU(),
-            nn.Conv2d(32, hidden_channels, 3, padding=1, bias=False),
-            nn.GroupNorm(8, hidden_channels),
-            nn.GELU(),
-            nn.Conv2d(hidden_channels, hidden_channels, 3, padding=1, bias=False),
-            nn.GroupNorm(8, hidden_channels),
-            nn.GELU(),
-            nn.Conv2d(hidden_channels, hidden_channels, 3, padding=1, bias=False),
-            nn.GroupNorm(8, hidden_channels),
-            nn.GELU(),
+        # VIS: frozen v6 euclid_VIS BandStem + trainable adapter.
+        # Phase B trained VIS in the same feature space as Rubin stems, so the
+        # cost volume now compares representations learned jointly.
+        self.vis_encoder = V6VISEncoder(
+            v6_model=v6_model,
+            out_ch=hidden_channels,
+            n_adapter_blocks=n_adapter_blocks,
+            freeze_stem=freeze_stems,
         )
 
         # ---- Cost volume projection heads ----------------------------------
@@ -375,11 +419,19 @@ def load_v6_matcher(
     mlp_hidden: int = 128,
 ) -> V6AstrometryMatcher:
     """
-    Load a v6 foundation model checkpoint and wrap it in V6AstrometryMatcher.
+    Load a v6 Phase B foundation model checkpoint and wrap it in V6AstrometryMatcher.
 
-    Only the BandStem CNNs are reused from v6. The VIS encoder, adapter,
-    projection heads, MLP, and band embedding are freshly initialized and
-    trained from scratch on the astrometry task.
+    Reused from v6 (frozen by default):
+      - Rubin BandStem CNNs  (rubin_u/g/r/i/z/y)
+      - euclid_VIS BandStem  (trained cross-instrument in Phase B)
+
+    Freshly initialized and trained on the astrometry task:
+      - ConvNeXt adapter blocks on top of each frozen stem
+      - Cost-volume projection heads, soft-argmax, MLP refinement
+      - Band embedding
+
+    Requires a Phase B checkpoint (jaisp_v6_phaseB* or later) so that the
+    euclid_VIS BandStem weights exist and have cross-instrument training.
     """
     if device is None:
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')

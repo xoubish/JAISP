@@ -277,17 +277,15 @@ def sample_context_target(
     sample: Dict,
     rng: np.random.RandomState,
     n_targets: int = 1,
-    prefer_rubin: bool = True,
 ) -> Optional[Dict]:
     """
     Given a dataset sample, randomly select context and target bands.
 
     Parameters
     ----------
-    sample:       output of JAISPDatasetV6.__getitem__
-    rng:          random state (caller controls reproducibility)
-    n_targets:    number of bands to mask (1 or 2)
-    prefer_rubin: if True, only use Rubin bands for within-instrument phase
+    sample:    output of JAISPDatasetV6.__getitem__
+    rng:       random state (caller controls reproducibility)
+    n_targets: number of bands to mask (1 or 2)
 
     Returns None if not enough bands are available.
     Returns dict:
@@ -322,43 +320,62 @@ def sample_context_target(
 
 def sample_context_target_phaseB(
     sample: Dict,
+    rng: np.random.RandomState,
+    n_targets: int = 1,
 ) -> Optional[Dict]:
     """
-    Phase B: cross-instrument reconstruction.
-    Context = all available Rubin bands (512×512).
-    Target  = Euclid VIS downsampled via bilinear interpolation to Rubin resolution.
+    Phase B: joint Rubin+Euclid masked band prediction.
 
-    Returns None if the sample has no Euclid VIS band.
+    Pools ALL available bands (Rubin 512×512 + Euclid downsampled to 512×512),
+    randomly holds out n_targets bands as prediction targets, and uses the rest
+    as context — same logic as Phase A but across both instruments.
+
+    This forces the encoder to learn cross-instrument spatial correspondence:
+    it must predict any band from any combination of the others.
+
+    Returns None if fewer than n_targets+1 bands are available.
     """
-    if not sample.get('has_euclid') or 'euclid_VIS' not in sample.get('euclid', {}):
+    if not sample.get('has_euclid'):
         return None
 
-    rubin = sample['rubin']
-    if not rubin:
+    rubin  = sample['rubin']
+    euclid = sample.get('euclid', {})
+    if not rubin or not euclid:
         return None
 
-    # Use all Rubin bands as context
-    context_images = {b: rubin[b]['image'] for b in rubin}
-    context_rms    = {b: rubin[b]['rms']   for b in rubin}
-
-    # Downsample Euclid VIS (1050×1050) → Rubin resolution (512×512)
+    # Downsample all Euclid bands to Rubin resolution once
     rubin_h, rubin_w = next(iter(rubin.values()))['image'].shape[-2:]
-    vis_img = sample['euclid']['euclid_VIS']['image']   # [1, 1050, 1050]
-    vis_rms = sample['euclid']['euclid_VIS']['rms']     # [1, 1050, 1050]
+    euclid_ds = {}
+    for band, data in euclid.items():
+        img_ds = F.interpolate(
+            data['image'].unsqueeze(0).float(), size=(rubin_h, rubin_w),
+            mode='bilinear', align_corners=False,
+        ).squeeze(0)
+        rms_ds = F.interpolate(
+            data['rms'].unsqueeze(0).float(), size=(rubin_h, rubin_w),
+            mode='bilinear', align_corners=False,
+        ).squeeze(0).clamp(min=1e-10)
+        euclid_ds[band] = {'image': img_ds, 'rms': rms_ds}
 
-    vis_img_ds = F.interpolate(
-        vis_img.unsqueeze(0).float(), size=(rubin_h, rubin_w),
-        mode='bilinear', align_corners=False,
-    ).squeeze(0)
-    vis_rms_ds = F.interpolate(
-        vis_rms.unsqueeze(0).float(), size=(rubin_h, rubin_w),
-        mode='bilinear', align_corners=False,
-    ).squeeze(0).clamp(min=1e-10)
+    # Merge into one pool
+    pool = {**rubin, **euclid_ds}
+    avail = list(pool.keys())
+
+    if len(avail) < n_targets + 1:
+        return None
+
+    # Random split: n_targets as targets, rest as context
+    order = rng.permutation(len(avail)).tolist()
+    target_bands  = [avail[order[i]] for i in range(n_targets)]
+    context_bands = [avail[order[i]] for i in range(n_targets, len(avail))]
 
     return {
-        'context_images': context_images,
-        'context_rms':    context_rms,
-        'targets': [{'band': 'euclid_VIS', 'image': vis_img_ds, 'rms': vis_rms_ds}],
+        'context_images': {b: pool[b]['image'] for b in context_bands},
+        'context_rms':    {b: pool[b]['rms']   for b in context_bands},
+        'targets': [
+            {'band': b, 'image': pool[b]['image'], 'rms': pool[b]['rms']}
+            for b in target_bands
+        ],
     }
 
 

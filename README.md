@@ -1,78 +1,115 @@
 ## Overview
 
 JAISP (Joint AI Survey Processing) is a **self-supervised, multi-instrument foundation model for astronomical imaging**.
-It learns a shared latent representation of the same sky region across different telescopes, bands, resolutions, and noise regimes.
+It learns a shared pixel-precise representation of the same sky region across different telescopes, bands, resolutions, and noise regimes.
 
-The core objective is representation learning, not supervised prediction.
-The learned embeddings are intended to support downstream tasks such as:
+The core objective is dense reconstruction learning, not contrastive embedding.
+The learned representations support downstream tasks such as:
 
-- astrometric alignment
-- cross-band/instrument matching
+- astrometric alignment between Rubin and Euclid
+- cross-band/instrument matching and transfer
 - deblending and morphology analysis
 - photometric consistency checks
-- reconstruction or generative heads on top of the latent space
 
 ---
 
-## Current Model (v5)
+## Current Model (v6)
 
-The active foundation model is **JAISP Foundation v5** (`models/jaisp_foundation_v5.py`).
+The active foundation model is **JAISP Foundation v6** (`models/jaisp_foundation_v6.py`).
+
+v6 replaces the previous JEPA-based v5 with a **Masked Autoencoder (MAE)** architecture trained to reconstruct masked bands at pixel precision.
 
 Key characteristics:
 
-- **Band-specific stems + shared encoder**
-  Each band has its own shallow stem, but all bands share a common transformer encoder and projection space.
+- **ConvNeXt encoder + U-Net decoder**
+  No patch tokenization — full-resolution convolutional processing preserves sub-pixel spatial information critical for precision astrometry.
 
-- **Strict spatial alignment objective**
-  v5 enforces token-to-token matching at corresponding spatial positions (`shift_px=0`).
-  This is designed to preserve precise position correspondence across views.
+- **Band-specific stems with GroupNorm**
+  Each band has its own shallow stem handling its noise/PSF characteristics. Stems are shared across instruments during Phase B.
 
-- **Student/Teacher self-supervision**
-  Training uses a student branch with predictor and an EMA teacher target branch.
+- **FiLM conditioning in the decoder**
+  The decoder is conditioned on the target band identity, enabling the same encoder to reconstruct any band.
 
-- **Information-weighted alignment**
-  Loss is weighted using signal-based information maps (SNR + gradients) so training emphasizes informative regions over empty sky.
+- **InformationMap-weighted L1 loss**
+  Loss is weighted by SNR + gradient-based pixel importance so training emphasizes sources over empty sky.
 
-- **VICReg regularization**
-  Variance and covariance terms are used to reduce representation collapse and redundancy.
+- **Fixed 2D sinusoidal position embeddings**
+  Not learned, not interpolated — stable at any resolution.
 
----
+### Training curriculum
 
-## Core Training Setup
+| Phase | `cross_instrument_prob` | Pool | Objective |
+|-------|------------------------|------|-----------|
+| A | 0.0 | Rubin only (u/g/r/i/z/y) | Predict any Rubin band from the other 5 |
+| B | 1.0 | All 10 bands (Rubin + Euclid VIS/Y/J/H) | Predict any band from any combination of the other 9 |
 
-For each sample, the model sees two views of the same sky tile (often cross-instrument) and learns aligned token embeddings.
-
-Training behavior is implemented in:
-- `models/train_jaisp_foundation_v5.py`
-- `models/jaisp_dataset_v4.py`
-
-Dataset behavior (current):
-- Supports Rubin + Euclid band pairs sampled from available data
-- Preserves native image sizes (e.g., Rubin ~512x512, Euclid ~1050x1050)
-- Handles alignment at token-grid level via interpolation inside the model/loss
+Phase A builds within-instrument spatial understanding; Phase B encodes cross-instrument correspondence.
+Euclid bands are downsampled to Rubin resolution (512×512) during Phase B training.
 
 ---
 
-## Diagnostics and Validation
+## Training
 
-Model diagnostics and exploratory evaluations are kept in the `models/` folder
-(notably notebooks and training/evaluation scripts).  
-The exact experiments may evolve over time, while the high-level goal remains:
-verify cross-view consistency and spatial reliability of the learned embeddings.
+```bash
+# Phase A (Rubin only)
+python models/train_jaisp_foundation_v6.py \
+  --rubin_dir  data/rubin_tiles_ecdfs \
+  --euclid_dir data/euclid_tiles_ecdfs \
+  --output_dir models/checkpoints/jaisp_v6 \
+  --cross_instrument_prob 0.0 \
+  --epochs 60
+
+# Phase B (all 10 bands, resume from Phase A)
+python models/train_jaisp_foundation_v6.py \
+  --rubin_dir  data/rubin_tiles_ecdfs \
+  --euclid_dir data/euclid_tiles_ecdfs \
+  --output_dir models/checkpoints/jaisp_v6_phaseB \
+  --resume     models/checkpoints/jaisp_v6/checkpoint_best.pt \
+  --cross_instrument_prob 1.0 \
+  --epochs 120
+```
 
 ---
 
-## Reconstruction Extension
+## Downstream: Astrometry
 
-On top of the v5 foundation model, a downstream reconstruction pipeline is now included in:
-- `models/reconstruction/`
+`models/astrometry2/` contains the Rubin → Euclid VIS astrometric concordance pipeline.
 
-This is a downstream head stack (separate from foundation pretraining) for
-masked-region reconstruction and related experiments.
+The v6 astrometry matcher (`matcher_v6.py`) reuses frozen Phase B BandStem weights for both the Rubin encoder and the VIS encoder, so the cost volume compares representations trained jointly in the same cross-instrument feature space.
+
+```bash
+# Train astrometry matcher (requires Phase B checkpoint)
+cd models/astrometry2
+python train_astro_v6.py \
+  --v6-checkpoint ../checkpoints/jaisp_v6_phaseB/checkpoint_best.pt \
+  --rubin_dir  ../../data/rubin_tiles_ecdfs \
+  --euclid_dir ../../data/euclid_tiles_ecdfs
+```
+
+See `models/astrometry2/README.md` for full pipeline documentation.
 
 ---
 
-## Project Scope
+## Key files
 
-This repository focuses on building and validating the **foundation representation** and related downstream prototypes.
-It is an active research codebase, so architecture and training procedures are still evolving.
+| File | Description |
+|------|-------------|
+| `models/jaisp_foundation_v6.py` | v6 MAE foundation model (20.8M params) |
+| `models/jaisp_dataset_v6.py` | Dataset: all bands per tile + Phase A/B sampling |
+| `models/train_jaisp_foundation_v6.py` | Training loop with W&B visualization |
+| `models/eval_foundation_v6.py` | Evaluation: reconstruction quality + spatial precision |
+| `models/astrometry2/matcher_v6.py` | Astrometry matcher with v6 Phase B backbone |
+| `models/astrometry2/train_astro_v6.py` | Astrometry training using v6 stems |
+
+---
+
+## Project scope
+
+This repository focuses on building and validating the **foundation representation** and the astrometric concordance product.
+It is an active research codebase; architecture and training procedures continue to evolve.
+
+### Archive
+
+Earlier approaches are preserved in `models/older_architectures/`:
+- v5: JEPA-based student/teacher with VICReg (deprecated — patch tokenization lost sub-pixel precision)
+- reconstruction2, astrometry (v1): earlier downstream heads
