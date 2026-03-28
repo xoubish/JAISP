@@ -36,7 +36,7 @@ import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 
 from jaisp_foundation_v6 import JAISPFoundationV6, create_optimizer, create_scheduler, ALL_BANDS
-from jaisp_dataset_v6 import make_loader_v6, sample_context_target
+from jaisp_dataset_v6 import make_loader_v6, sample_context_target, sample_context_target_phaseB
 
 
 class JAISPTrainerV6:
@@ -63,6 +63,7 @@ class JAISPTrainerV6:
         n_targets_per_step: int = 1,   # mask 1 band per tile (increase for harder task)
         val_fraction: float = 0.05,    # fraction of tiles held for validation
         vis_every_n_epochs: int = 2,   # visualization frequency
+        cross_instrument_prob: float = 0.3,  # fraction of steps using Phase B (Rubin→Euclid VIS)
         # W&B
         wandb_project: str = 'JAISP-Foundation-v6',
         wandb_name: str = None,
@@ -79,6 +80,7 @@ class JAISPTrainerV6:
         self.grad_clip = grad_clip
         self.n_targets = n_targets_per_step
         self.vis_every = vis_every_n_epochs
+        self.cross_instrument_prob = cross_instrument_prob
 
         self.rng = np.random.RandomState(42)
 
@@ -90,7 +92,7 @@ class JAISPTrainerV6:
             batch_size=batch_size,
             num_workers=num_workers,
             augment=True,
-            load_euclid=False,   # Phase A: Rubin only
+            load_euclid=True,    # Phase A+B: load Euclid for cross-instrument training
         )
         self.full_dataset = full_dataset
 
@@ -129,6 +131,7 @@ class JAISPTrainerV6:
                 'lr': lr, 'weight_decay': weight_decay,
                 'epochs': epochs, 'warmup_epochs': warmup_epochs,
                 'accum_steps': accum_steps, 'n_targets': n_targets_per_step,
+                'cross_instrument_prob': cross_instrument_prob,
                 'train_tiles': len(self.train_indices), 'val_tiles': n_val,
             }
         )
@@ -143,9 +146,19 @@ class JAISPTrainerV6:
     def _prepare_batch(self, sample: dict) -> dict:
         """
         Given a raw dataset sample, sample context/target split and move to device.
+        Randomly chooses Phase A (within-instrument Rubin→Rubin) or Phase B
+        (cross-instrument Rubin→Euclid VIS) based on cross_instrument_prob.
         Returns None if the tile can't produce a valid split.
         """
-        split = sample_context_target(sample, self.rng, n_targets=self.n_targets)
+        use_phase_b = (
+            self.cross_instrument_prob > 0.0
+            and self.rng.random() < self.cross_instrument_prob
+            and sample.get('has_euclid', False)
+        )
+        if use_phase_b:
+            split = sample_context_target_phaseB(sample)
+        else:
+            split = sample_context_target(sample, self.rng, n_targets=self.n_targets)
         if split is None:
             return None
 
@@ -476,6 +489,8 @@ def main():
     parser.add_argument('--grad_clip',    type=float, default=1.0)
     parser.add_argument('--n_targets',    type=int,   default=1,
                         help='Number of bands to mask per tile (1=easy, 2=harder)')
+    parser.add_argument('--cross_instrument_prob', type=float, default=0.3,
+                        help='Fraction of steps using Phase B cross-instrument (Rubin→Euclid VIS)')
     parser.add_argument('--num_workers',  type=int,   default=4)
     # W&B
     parser.add_argument('--wandb_project', default='JAISP-Foundation-v6')
@@ -499,6 +514,7 @@ def main():
         accum_steps=args.accum_steps,
         grad_clip=args.grad_clip,
         n_targets_per_step=args.n_targets,
+        cross_instrument_prob=args.cross_instrument_prob,
         num_workers=args.num_workers,
         wandb_project=args.wandb_project,
         wandb_name=args.wandb_name,

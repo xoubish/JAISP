@@ -15,6 +15,7 @@ import os
 import glob
 import numpy as np
 import torch
+import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -316,6 +317,48 @@ def sample_context_target(
         'context_images': context_images,
         'context_rms':    context_rms,
         'targets':        targets,
+    }
+
+
+def sample_context_target_phaseB(
+    sample: Dict,
+) -> Optional[Dict]:
+    """
+    Phase B: cross-instrument reconstruction.
+    Context = all available Rubin bands (512×512).
+    Target  = Euclid VIS downsampled via bilinear interpolation to Rubin resolution.
+
+    Returns None if the sample has no Euclid VIS band.
+    """
+    if not sample.get('has_euclid') or 'euclid_VIS' not in sample.get('euclid', {}):
+        return None
+
+    rubin = sample['rubin']
+    if not rubin:
+        return None
+
+    # Use all Rubin bands as context
+    context_images = {b: rubin[b]['image'] for b in rubin}
+    context_rms    = {b: rubin[b]['rms']   for b in rubin}
+
+    # Downsample Euclid VIS (1050×1050) → Rubin resolution (512×512)
+    rubin_h, rubin_w = next(iter(rubin.values()))['image'].shape[-2:]
+    vis_img = sample['euclid']['euclid_VIS']['image']   # [1, 1050, 1050]
+    vis_rms = sample['euclid']['euclid_VIS']['rms']     # [1, 1050, 1050]
+
+    vis_img_ds = F.interpolate(
+        vis_img.unsqueeze(0).float(), size=(rubin_h, rubin_w),
+        mode='bilinear', align_corners=False,
+    ).squeeze(0)
+    vis_rms_ds = F.interpolate(
+        vis_rms.unsqueeze(0).float(), size=(rubin_h, rubin_w),
+        mode='bilinear', align_corners=False,
+    ).squeeze(0).clamp(min=1e-10)
+
+    return {
+        'context_images': context_images,
+        'context_rms':    context_rms,
+        'targets': [{'band': 'euclid_VIS', 'image': vis_img_ds, 'rms': vis_rms_ds}],
     }
 
 
