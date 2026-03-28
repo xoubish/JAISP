@@ -53,6 +53,11 @@ from dataset import (
 )
 from field_solver import auto_grid_shape, evaluate_control_grid_mesh, solve_control_grid_field
 from matcher import LocalAstrometryMatcher
+try:
+    from matcher_v6 import load_v6_matcher
+    _V6_AVAILABLE = True
+except ImportError:
+    _V6_AVAILABLE = False
 from viz import save_tile_diagnostic
 from jaisp_dataset_v4 import RUBIN_BAND_ORDER, _to_float32
 from source_matching import (
@@ -64,20 +69,47 @@ from source_matching import (
 )
 
 
-def load_model(checkpoint_path: str, device: torch.device):
+def load_model(checkpoint_path: str, device: torch.device, v6_checkpoint: str = ''):
+    """Load a matcher checkpoint.
+
+    If v6_checkpoint is provided, loads a V6AstrometryMatcher using the Phase B
+    foundation weights and the astrometry adapter weights from checkpoint_path.
+    Otherwise loads a baseline LocalAstrometryMatcher.
+    """
     ckpt = torch.load(checkpoint_path, map_location=device)
-    args = ckpt.get('args', {})
-    model = LocalAstrometryMatcher(
-        rubin_channels=int(ckpt.get('rubin_channels', len(ckpt.get('input_bands', ['rubin_r'])))),
-        hidden_channels=args.get('hidden_channels', 32),
-        encoder_depth=args.get('encoder_depth', 4),
-        search_radius=args.get('search_radius', 3),
-        softmax_temp=args.get('softmax_temp', 0.05),
-        mlp_hidden=args.get('mlp_hidden', 128),
-        n_target_bands=int(ckpt.get('n_target_bands', 1)),
-        band_embed_dim=int(args.get('band_embed_dim', 16)),
-    ).to(device)
-    model.load_state_dict(ckpt['model'], strict=True)
+
+    if v6_checkpoint:
+        if not _V6_AVAILABLE:
+            raise ImportError('matcher_v6.py not found — cannot load v6 model.')
+        cfg = ckpt.get('args', {})
+        n_rubin = int(ckpt.get('rubin_channels', len(ckpt.get('input_bands', ['rubin_r']))))
+        model = load_v6_matcher(
+            v6_checkpoint   = v6_checkpoint,
+            device          = device,
+            n_rubin_bands   = n_rubin,
+            hidden_channels = cfg.get('hidden_channels', 64),
+            n_adapter_blocks= cfg.get('adapter_blocks', 2),
+            freeze_stems    = True,
+            search_radius   = cfg.get('search_radius', 3),
+            n_target_bands  = int(ckpt.get('n_target_bands', 1)),
+            band_embed_dim  = int(cfg.get('band_embed_dim', 16)),
+            mlp_hidden      = cfg.get('mlp_hidden', 128),
+        )
+        model.load_state_dict(ckpt['model'], strict=True)
+    else:
+        args = ckpt.get('args', {})
+        model = LocalAstrometryMatcher(
+            rubin_channels=int(ckpt.get('rubin_channels', len(ckpt.get('input_bands', ['rubin_r'])))),
+            hidden_channels=args.get('hidden_channels', 32),
+            encoder_depth=args.get('encoder_depth', 4),
+            search_radius=args.get('search_radius', 3),
+            softmax_temp=args.get('softmax_temp', 0.05),
+            mlp_hidden=args.get('mlp_hidden', 128),
+            n_target_bands=int(ckpt.get('n_target_bands', 1)),
+            band_embed_dim=int(args.get('band_embed_dim', 16)),
+        ).to(device)
+        model.load_state_dict(ckpt['model'], strict=True)
+
     model.eval()
     return model, ckpt
 
@@ -395,7 +427,14 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description='Run the standalone local matcher and export smooth concordance FITS fields.')
     p.add_argument('--rubin-dir', type=str, required=True)
     p.add_argument('--euclid-dir', type=str, required=True)
-    p.add_argument('--checkpoint', type=str, required=True)
+    p.add_argument('--checkpoint', type=str, required=True,
+                   help='Path to astrometry matcher checkpoint_best.pt')
+    p.add_argument('--v6-checkpoint', type=str, default='',
+                   help='Path to jaisp_foundation_v6 Phase B checkpoint. '
+                        'Required when the matcher checkpoint is a V6AstrometryMatcher.')
+    p.add_argument('--all-bands', action='store_true', default=False,
+                   help='Export concordance for every target band in a multiband checkpoint '
+                        'in one FITS file (one DRA/DDE/COV triplet per band per tile).')
     p.add_argument('--output', type=str, required=True)
     p.add_argument('--summary-json', type=str, default='')
     p.add_argument('--tile-id', type=str, default='')
@@ -439,23 +478,36 @@ def build_parser() -> argparse.ArgumentParser:
 def main():
     args = build_parser().parse_args()
     device = torch.device(args.device if args.device else ('cuda' if torch.cuda.is_available() else 'cpu'))
-    model, ckpt = load_model(args.checkpoint, device)
+    v6_ckpt = getattr(args, 'v6_checkpoint', '') or ''
+    model, ckpt = load_model(args.checkpoint, device, v6_checkpoint=v6_ckpt)
 
+    # Determine which target bands to export
     target_band_raw = ckpt.get('target_band', ckpt.get('args', {}).get('rubin_band', 'r'))
-    if str(target_band_raw) == 'multiband':
-        ckpt_target_bands = [str(b) for b in ckpt.get('target_bands', []) if str(b).strip()]
-        if ckpt_target_bands:
-            ckpt_target_bands = sorted(
-                ckpt_target_bands,
+    is_multiband = str(target_band_raw) == 'multiband'
+
+    ckpt_target_bands_raw = []
+    if is_multiband:
+        ckpt_target_bands_raw = [str(b) for b in ckpt.get('target_bands', []) if str(b).strip()]
+        if ckpt_target_bands_raw:
+            ckpt_target_bands_raw = sorted(
+                ckpt_target_bands_raw,
                 key=lambda b: (
                     0 if b.startswith('rubin_') else 1,
                     BAND_TO_IDX.get(b, 10_000),
                 ),
             )
-            target_band_raw = ckpt_target_bands[0]
-        else:
-            target_band_raw = 'rubin_r'
-    target_band = _normalize_any_band(str(target_band_raw))
+
+    if getattr(args, 'all_bands', False) and ckpt_target_bands_raw:
+        target_bands_to_export = [_normalize_any_band(b) for b in ckpt_target_bands_raw]
+        print(f'Exporting concordance for all {len(target_bands_to_export)} bands: {target_bands_to_export}')
+    else:
+        # Single band: use first from multiband ckpt or the stored target band
+        single = ckpt_target_bands_raw[0] if ckpt_target_bands_raw else str(target_band_raw)
+        if not single or single == 'multiband':
+            single = 'rubin_r'
+        target_bands_to_export = [_normalize_any_band(single)]
+
+    target_band = target_bands_to_export[0]  # kept for legacy single-band path below
 
     if args.input_bands:
         input_bands_raw = [str(x) for x in args.input_bands]
@@ -483,31 +535,31 @@ def main():
     for tile_id, rubin_path, euclid_path in pairs:
         if args.tile_id and tile_id != args.tile_id:
             continue
-        item = predict_tile(model, device, rubin_path, euclid_path, target_band, input_bands, detect_bands, args)
-        if item is None:
-            continue
-        band_key = target_band.split('_', 1)[1]
-        prefix = f'{tile_id}.{band_key}'
-        hdus.append(make_concordance_hdu(item['mesh']['dra'], f'{prefix}.DRA', args.dstep, target_band, tile_id, item['vis_wcs_header']))
-        hdus.append(make_concordance_hdu(item['mesh']['ddec'], f'{prefix}.DDE', args.dstep, target_band, tile_id, item['vis_wcs_header']))
-        # Coverage HDU.
-        if 'coverage' in item['mesh']:
-            hdus.append(make_coverage_hdu(item['mesh']['coverage'], f'{prefix}.COV', args.dstep, tile_id))
+        for tband in target_bands_to_export:
+            item = predict_tile(model, device, rubin_path, euclid_path, tband, input_bands, detect_bands, args)
+            if item is None:
+                continue
+            band_key = tband.split('_', 1)[1]
+            prefix = f'{tile_id}.{band_key}'
+            hdus.append(make_concordance_hdu(item['mesh']['dra'], f'{prefix}.DRA', args.dstep, tband, tile_id, item['vis_wcs_header']))
+            hdus.append(make_concordance_hdu(item['mesh']['ddec'], f'{prefix}.DDE', args.dstep, tband, tile_id, item['vis_wcs_header']))
+            if 'coverage' in item['mesh']:
+                hdus.append(make_coverage_hdu(item['mesh']['coverage'], f'{prefix}.COV', args.dstep, tile_id))
 
-        row = {'tile_id': tile_id, 'rubin_band': target_band}
-        row.update(item['summary'])
-        results.append(row)
-        gs = item.get('grid_shape_used', (args.grid_h, args.grid_w))
-        ar = item.get('anchor_radius_used', 0.0)
-        print(
-            f"[tile] {tile_id}:{target_band} matches={row['matches']} "
-            f"grid={gs[0]}x{gs[1]} anchor_r={ar:.0f}px "
-            f"raw_med={row['raw_median_mas']:.1f}mas "
-            f"pred_med={row['pred_median_mas']:.1f}mas sigma_med={row['sigma_median_mas']:.1f}mas"
-        )
-        if args.plot_dir:
-            plot_path = os.path.join(args.plot_dir, f'{prefix}.png')
-            save_tile_diagnostic(item, tile_id, target_band, input_bands, plot_path)
+            row = {'tile_id': tile_id, 'rubin_band': tband}
+            row.update(item['summary'])
+            results.append(row)
+            gs = item.get('grid_shape_used', (args.grid_h, args.grid_w))
+            ar = item.get('anchor_radius_used', 0.0)
+            print(
+                f"[tile] {tile_id}:{tband} matches={row['matches']} "
+                f"grid={gs[0]}x{gs[1]} anchor_r={ar:.0f}px "
+                f"raw_med={row['raw_median_mas']:.1f}mas "
+                f"pred_med={row['pred_median_mas']:.1f}mas sigma_med={row['sigma_median_mas']:.1f}mas"
+            )
+            if args.plot_dir:
+                plot_path = os.path.join(args.plot_dir, f'{prefix}.png')
+                save_tile_diagnostic(item, tile_id, tband, input_bands, plot_path)
 
     if len(hdus) == 1:
         raise RuntimeError('No tiles were exported.')

@@ -27,13 +27,21 @@ The learned uncertainty (log_sigma) then weights the control-grid field solver, 
 
 ## Current results
 
-On 48 ECDFS tiles with the r-band checkpoint:
-- Raw WCS median offset: **47 mas**
-- NN-corrected median offset: **38 mas** (19% reduction)
-- Target: sub-20 mas (limited by source density, not model capacity)
-- NISP-to-VIS offsets (same telescope) are 38-41 mas for comparison, confirming the cross-telescope offset is real and correctable
+On 144 ECDFS tiles:
 
-The main bottleneck is data volume: ~50-100 matched sources per tile across ~48 tiles. Sparse-source regions leave the field solver underdetermined. More tiles, deeper detection thresholds, or multi-band joint training would directly improve coverage and precision.
+| Model | val MAE | p68 | frac < 0.1" | Notes |
+|-------|---------|-----|-------------|-------|
+| Raw WCS | ~47 mas | — | — | No correction |
+| astrometry2 baseline CNN | ~38 mas | — | — | Single-band, random-init VIS encoder |
+| v6 Phase A stems | ~60 mas | — | — | Frozen Rubin stems, random VIS CNN — cost volume mismatched |
+| **v6 Phase B all-bands** | **31.9 mas** | **34.6 mas** | **96.1%** | Frozen Rubin + VIS stems from joint Phase B training |
+
+The Phase B improvement is the key result: both the Rubin and VIS encoders now share a cross-instrument feature space learned during Phase B masked-band reconstruction, so the cost volume compares representations that were trained to be spatially consistent with each other. Phase A v6 was actually worse than baseline because the VIS encoder was a random CNN being compared against frozen Rubin stems — incompatible feature spaces.
+
+Target: sub-20 mas (limited by source density and tile count, not model capacity).
+NISP-to-VIS offsets (same telescope) are 38–41 mas for comparison, confirming the cross-telescope residual is real and correctable.
+
+The main bottleneck is data volume: ~50 matched sources per tile across 144 tiles. More tiles or deeper detection would directly improve field solver conditioning and astrometric precision.
 
 ---
 
@@ -203,7 +211,7 @@ python train_local_matcher.py \
   --epochs 30 --batch-size 64
 ```
 
-### v6 Phase B matcher (recommended)
+### v6 Phase B matcher — single band
 
 Requires a Phase B foundation checkpoint (`jaisp_v6_phaseB*/checkpoint_best.pt`).
 Uses frozen v6 BandStems for both Rubin and VIS encoders — both live in the same cross-instrument feature space learned during Phase B.
@@ -218,9 +226,45 @@ python train_astro_v6.py \
   --wandb-project JAISP-Astrometry-v6
 ```
 
+### v6 Phase B matcher — all Rubin bands (recommended with more data)
+
+Train a single model for all 6 Rubin bands simultaneously using `--multiband`.
+A shared encoder sees all bands; a learned band embedding handles per-band DCR corrections.
+Each Rubin band gets its own DRA/DDE/COV concordance field in the output FITS.
+
+```bash
+# 1. Train multiband matcher
+python train_astro_v6.py \
+  --v6-checkpoint ../checkpoints/jaisp_v6_phaseB/checkpoint_best.pt \
+  --rubin-dir     ../../data/rubin_tiles_ecdfs \
+  --euclid-dir    ../../data/euclid_tiles_ecdfs \
+  --output-dir    ../checkpoints/astrometry_v6_multiband \
+  --multiband \
+  --epochs 30 --batch-size 64 \
+  --wandb-project JAISP-Astrometry-v6 \
+  --wandb-run-name v6_multiband
+
+# 2. Export concordance FITS for all 6 Rubin bands in one run
+python infer_concordance.py \
+  --rubin-dir    ../../data/rubin_tiles_ecdfs \
+  --euclid-dir   ../../data/euclid_tiles_ecdfs \
+  --checkpoint   ../checkpoints/astrometry_v6_multiband/checkpoint_best.pt \
+  --v6-checkpoint ../checkpoints/jaisp_v6_phaseB/checkpoint_best.pt \
+  --output       ../checkpoints/astrometry_v6_multiband/concordance_all_bands.fits \
+  --all-bands \
+  --auto-grid \
+  --plot-dir     ../checkpoints/astrometry_v6_multiband/plots \
+  --summary-json ../checkpoints/astrometry_v6_multiband/summary.json
+```
+
+The output FITS contains `{tile_id}.{band}.DRA`, `{tile_id}.{band}.DDE`, `{tile_id}.{band}.COV`
+triplets for every tile × band combination (e.g. `tile_x0_y0.r.DRA`, `tile_x0_y0.i.DRA`, …).
+
 Key arguments (both scripts):
-- `--rubin-band`: target Rubin band for alignment (e.g. `r`, `i`, `z`)
-- `--context-bands`: additional Rubin bands fed to the encoder alongside the target band
+- `--rubin-band`: target Rubin band (single-band mode, e.g. `r`, `i`, `z`)
+- `--multiband`: train/infer for all Rubin bands simultaneously
+- `--all-bands`: (infer only) export concordance for every band in a multiband checkpoint
+- `--context-bands`: additional Rubin bands fed to the encoder (single-band mode)
 - `--detect-bands`: bands used for multi-band source detection (default: g r i z)
 - `--max-patches-per-tile`: max matched sources per tile (default 64)
 - `--search-radius`: pixel-shift search half-width (default 3 = ±0.3" at VIS scale)
