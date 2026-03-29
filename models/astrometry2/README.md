@@ -47,43 +47,79 @@ The main bottleneck is data volume: ~50 matched sources per tile across 144 tile
 
 ## Pipeline overview
 
+### Per-tile concordance (fast, independent tiles)
+
 ```
 Tiles on disk
     │
     ▼
 [source_matching.py]
-    detect_sources()       — local-peak detection + subpixel centroiding in Rubin & VIS
-    match_sources_wcs()    — mutual-nearest-neighbor match in sky coords + sigma-clip
+    detect_sources()           — local-peak detection + subpixel centroiding in Rubin & VIS
+    match_sources_wcs()        — mutual-nearest-neighbor match in sky coords + sigma-clip
     refine_centroids_in_band() — flux-weighted centroid refinement in the target Rubin band
     │
     ▼  per matched source pair:
 [dataset.py]
     reproject_rubin_patch_to_vis()  — warp a 33×33 Rubin stamp onto the VIS pixel grid via WCS
     extract_vis_patch()             — cut the corresponding VIS stamp
-    local_vis_pixel_to_sky_matrix() — compute the 2×2 pixel→sky Jacobian at that position
+    local_vis_pixel_to_sky_matrix() — 2×2 pixel→sky Jacobian at that position
     target_offset_arcsec            — (VIS_ra - Rubin_ra)*cos(dec)*3600, (VIS_dec - Rubin_dec)*3600
     │
     ▼  for each (rubin_patch, vis_patch, pixel_to_sky, target_offset):
-[matcher.py  LocalAstrometryMatcher]
-    PatchEncoder          — lightweight CNN [C,H,W] → [hidden,H,W], per modality
-    _weighted_cost_volume — spatially-weighted cross-correlation via F.unfold
-                            weights = rubin_feature_energy × Gaussian_center_prior
+[matcher_v6.py  V6AstrometryMatcher]
+    V6RubinEncoder        — frozen v6 Phase B Rubin BandStem + trainable ConvNeXt adapter
+    V6VISEncoder          — frozen v6 Phase B VIS BandStem + trainable ConvNeXt adapter
+    _weighted_cost_volume — spatially-weighted cross-correlation (rubin_energy × Gaussian_prior)
                             → soft-argmax → coarse (dx_px, dy_px)
-    center-biased pooling — Gaussian-weighted spatial pooling for MLP features
     residual MLP          — refine coarse estimate, predict log_sigma
-    pixel_to_sky Jacobian — convert pixel shift to (DRA*, DDec) in arcsec
+    pixel_to_sky Jacobian — convert pixel shift to (ΔRA*, ΔDec) in arcsec
     │
     ▼  per tile at inference:
 [field_solver.py  solve_control_grid_field]
-    auto_grid_shape       — reduce grid resolution for sparse tiles (e.g. 12×12 → 5×5)
-    bilinear control grid — sparse (anchor_xy, pred_offset, weight=1/σ²) → grid coefficients
-    adaptive anchor       — per-node ridge regularization, stronger where sources are sparse
-    smoothness prior      — Tikhonov regularization on finite differences of grid nodes
-    evaluate_control_grid_mesh() — interpolate to regular mesh at DSTEP spacing + coverage map
+    auto_grid_shape              — reduce grid resolution for sparse tiles
+    bilinear control grid        — (anchor_xy, pred_offset, weight=1/σ²) → grid coefficients
+    adaptive per-node anchor     — ridge regularization stronger where sources are sparse
+    smoothness prior             — Tikhonov regularization on finite differences
+    evaluate_control_grid_mesh() — regular mesh at DSTEP spacing + coverage map
     │
     ▼
 [infer_concordance.py]
-    FITS output           — DRA + DDE + COV (coverage) image HDUs per tile
+    FITS output  —  DRA + DDE + COV image HDUs per tile
+```
+
+### Global concordance (single smooth field, no tile boundaries)
+
+```
+[infer_global_concordance.py]
+    collect_all_predictions()
+        — runs the matcher on every tile
+        — converts VIS pixel positions → (RA, Dec) via VIS WCS
+    │
+    ▼  all sources in a common sky frame
+    sigma-clip: reject |pred| > clip_arcsec (default 300 mas)
+    │
+    ▼
+    solve_global_field()   [--solver grid]
+        convert (RA, Dec) → local tangent-plane arcsec offsets
+        solve_control_grid_field() over the entire mosaic footprint
+        → single smooth (ΔRA*, ΔDec) field covering all tiles
+    ──── OR ────
+    solve_global_field()   [--solver nn]
+        fit DistortionMLP: (x_arcsec, y_arcsec) → (ΔRA*, ΔDec)
+        Adam + cosine LR + weight-decay smoothness prior
+        → infinitely differentiable field, no grid resolution to choose
+    │
+    ▼
+    FITS output  —  GLOBAL.DRA + GLOBAL.DDE + GLOBAL.COV
+                    with sky-coordinate WCS (CRVAL = field RA/Dec origin)
+    │
+    ▼
+[GlobalConcordanceMap]
+    correction_at_sky(ra, dec)
+        — interpolates the global field at any sky position
+        — no tile_id needed, no boundary discontinuities
+    rubin_to_vis(rubin_x, rubin_y, rubin_wcs, vis_wcs)
+        — same API as ConcordanceMap.rubin_to_vis
 ```
 
 ---
@@ -96,10 +132,14 @@ Tiles on disk
 | `matcher_v6.py` | `V6AstrometryMatcher` — Phase B backbone: frozen v6 Rubin + VIS BandStems + trainable adapters |
 | `dataset.py` | `build_patch_samples` builds all training samples from tile pairs; `MatchedPatchDataset` serves them with optional augmentation |
 | `field_solver.py` | Pure-numpy bilinear control-grid solver + evaluator with adaptive regularization — no learning |
+| `nn_field_solver.py` | MLP-based global field solver — `DistortionMLP` + `fit_nn_field` + `evaluate_nn_mesh` |
 | `train_local_matcher.py` | Training loop with W&B logging and tile-level diagnostic previews (used by both matchers) |
 | `train_astro_v6.py` | Thin wrapper around `train_local_matcher.py` that instantiates `V6AstrometryMatcher` |
-| `infer_concordance.py` | Run a trained checkpoint over all tiles and write a FITS concordance file |
-| `viz.py` | Diagnostic figures: raw offsets on VIS, solved field, component maps, residual vectors |
+| `infer_concordance.py` | Run a trained checkpoint over all tiles and write a per-tile FITS concordance file |
+| `infer_global_concordance.py` | Collect predictions from all tiles and fit a single global field (no tile boundaries); supports `--solver grid` and `--solver nn` |
+| `apply_concordance.py` | `ConcordanceMap` — load per-tile FITS and apply corrections at any sky position |
+| `sky_cube.py` | `SkyCubeExtractor` — given RA/Dec returns an aligned 10-band [10, H, W] sky cube with concordance applied |
+| `viz.py` | Diagnostic figures: per-tile offset maps, global field plots, coverage maps |
 
 `source_matching.py` lives in `../astrometry/` and is shared with the older pipeline.
 
@@ -279,7 +319,133 @@ Training prints per-epoch metrics in mas: `train_MAE`, `train_p68`, `val_MAE`, `
 
 ---
 
-## Export concordance FITS
+## Applying the concordance in practice
+
+`apply_concordance.py` provides `ConcordanceMap` — load once, apply anywhere.
+
+### Point source / catalog matching
+
+```python
+import numpy as np
+from astropy.wcs import WCS
+from apply_concordance import ConcordanceMap
+
+cmap = ConcordanceMap('concordance_r.fits')
+
+# Project a Rubin source onto the VIS pixel grid
+vis_x, vis_y = cmap.rubin_to_vis(
+    rubin_x=247.3, rubin_y=183.1,
+    rubin_wcs=rubin_wcs,          # astropy WCS for the Rubin tile
+    vis_wcs=vis_wcs,              # astropy WCS for the VIS tile
+    tile_id='tile_x01024_y00000',
+    band='r',
+)
+```
+
+### Full-image reprojection (Rubin → VIS pixel grid)
+
+```python
+from scipy.ndimage import map_coordinates
+
+H, W = rubin_img.shape
+yy, xx = np.mgrid[0:H, 0:W]
+
+# Get corrected VIS coords for every Rubin pixel
+vis_coords = cmap.rubin_grid_to_vis(
+    rubin_xs=xx.ravel(), rubin_ys=yy.ravel(),
+    rubin_wcs=rubin_wcs, vis_wcs=vis_wcs,
+    tile_id='tile_x01024_y00000', band='r',
+)
+# vis_coords: [H*W, 2]  columns = (vis_x, vis_y)
+
+# Resample Rubin image onto VIS pixel grid
+vis_H, vis_W = vis_img.shape
+rubin_on_vis = map_coordinates(
+    rubin_img,
+    [vis_coords[:, 1].reshape(vis_H, vis_W),   # row = y
+     vis_coords[:, 0].reshape(vis_H, vis_W)],   # col = x
+    order=1, mode='constant', cval=np.nan,
+)
+```
+
+### Masking unreliable regions
+
+```python
+# Coverage = min distance (VIS px) to nearest anchor source
+# High coverage means the field is extrapolated, not data-driven
+vis_xy = np.stack([vis_coords[:, 0], vis_coords[:, 1]], axis=1).astype(np.float32)
+cov = cmap.coverage('tile_x01024_y00000', 'r', vis_xy)
+reliable_mask = cov < 150   # VIS pixels within 150px of an anchor
+```
+
+---
+
+## Global concordance (recommended for production)
+
+Per-tile fields are independent, so adjacent tiles can disagree at their shared boundary.
+`infer_global_concordance.py` solves a **single** smooth field over the entire mosaic
+in sky coordinates — no tile edges, no boundary artefacts.
+
+### Running
+
+```bash
+python infer_global_concordance.py \
+    --rubin-dir  ../../data/rubin_tiles_ecdfs \
+    --euclid-dir ../../data/euclid_tiles_ecdfs \
+    --checkpoint ../checkpoints/astrometry_v6_phaseB2/checkpoint_best.pt \
+    --v6-checkpoint ../checkpoints/jaisp_v6_phaseB2/checkpoint_best.pt \
+    --output     ../checkpoints/astrometry_v6_phaseB2/global_concordance_r.fits \
+    --dstep-arcsec 1.0 \
+    --clip-arcsec 0.3 \
+    --auto-grid \
+    --solver nn \
+    --plot       ../checkpoints/astrometry_v6_phaseB2/global_concordance_plot.png \
+    --summary-json ../checkpoints/astrometry_v6_phaseB2/global_summary.json
+```
+
+### Solver options
+
+| Flag | Description |
+|------|-------------|
+| `--solver grid` | Control-grid least-squares (fast, default). Uses `--grid-h-global`, `--grid-w-global`, `--smooth-lambda`, `--anchor-lambda`. |
+| `--solver nn` | MLP trained with Adam + weight-decay smoothness prior. No grid resolution to choose; SiLU activations give an infinitely differentiable field. |
+| `--nn-hidden-dim` | Neurons per hidden layer (default 64) |
+| `--nn-layers` | Number of hidden layers (default 4) |
+| `--nn-steps` | Adam training steps (default 2000) |
+| `--nn-lr` | Initial learning rate (default 1e-3) |
+| `--nn-weight-decay` | L2 weight decay — higher = smoother field (default 1e-4, try 1e-3 if spiky) |
+| `--clip-arcsec` | Reject sources with \|pred offset\| > this value before solving (default 0.3" = 300 mas) |
+| `--dstep-arcsec` | Output mesh resolution in arcsec (default 1.0) |
+
+### Using the global field
+
+```python
+from infer_global_concordance import GlobalConcordanceMap
+
+gcmap = GlobalConcordanceMap('global_concordance_r.fits')
+
+# Apply correction at any sky position — no tile_id needed
+vis_x, vis_y = gcmap.rubin_to_vis(
+    rubin_x, rubin_y,
+    rubin_wcs=rubin_wcs,
+    vis_wcs=vis_wcs,
+)
+
+# Check coverage (arcsec to nearest source anchor)
+dra, ddec = gcmap.correction_at_sky(ra_array, dec_array)
+cov = gcmap.coverage_at_sky(ra_array, dec_array)
+reliable = cov < 150   # arcsec
+```
+
+### Why the NN solver
+
+The control-grid solver requires choosing a grid resolution: too coarse → can't resolve real spatial structure; too fine → underdetermined, spiky.  The MLP sidesteps this entirely.  Weight decay acts as a continuous smoothness prior — the same mechanism as Tikhonov regularization but without an explicit grid.  SiLU activations produce a field that is smooth to all orders, avoiding the piecewise-linear artefacts that can appear at control-grid cell boundaries.  Smoothness is tuned via `--nn-weight-decay` alone.
+
+With the current data (~5000 sources over 48 tiles) both solvers produce comparable results.  The NN advantage will grow as data volume increases and the field develops real small-scale structure that a fixed grid resolution cannot resolve without also fitting noise.
+
+---
+
+## Export per-tile concordance FITS
 
 ```bash
 /home/shemmati/venvs/superres/bin/python models/astrometry2/infer_concordance.py \
@@ -338,8 +504,10 @@ The patch size (33×33) and search radius (±3 pixels) are fixed by the trained 
 
 ## Planned improvements
 
-**Global or overlapping-tile field solve**: Each tile is currently solved independently, so adjacent tiles can disagree at their shared boundary. A multi-scale approach (fit a smooth large-scale field across the full mosaic first, then add local corrections where source density supports it) would eliminate boundary artifacts and capture systematic patterns that span multiple tiles. An intermediate step is overlapping tiles with blended fields in the overlap zone.
+**Multiband concordance**: Re-train with `--multiband` once more tile data arrives, then export per-band global concordance with `--all-bands`. Each Rubin band has its own DCR-driven offset pattern; a shared model with band embeddings handles this efficiently.
 
-**Deeper source detection**: Lowering detection thresholds or using forced photometry at known catalog positions would increase the number of matched sources per tile, directly improving field solver conditioning in sparse regions.
+**Deeper source detection**: Lowering detection thresholds or using forced photometry at known catalog positions would increase the number of matched sources per tile, directly improving field solver conditioning in sparse regions. Target: 200+ sources/tile → enables a finer NN field or a denser control grid.
 
 **Unfreeze stems after warmup**: The current v6 matcher freezes the Phase B stems throughout training. A two-stage schedule — freeze for the first N epochs to stabilize the adapter, then unfreeze with a lower LR — may improve astrometric precision by allowing the stems to specialize toward centroid localization.
+
+**True super-resolution in sky_cube.py**: `SkyCubeExtractor` currently uses bicubic resampling (order=3) to bring Rubin from 0.2"/px to VIS resolution (0.1"/px). This is geometric resampling — no new information. The v6 Phase B decoder conditioned on `euclid_VIS` would produce a physically motivated super-resolution; wire it in as an optional `mode='sr'` path once the decoder is validated.

@@ -30,8 +30,7 @@ def _setup_imports():
     import sys
     script_dir = Path(__file__).resolve().parent
     models_dir = script_dir.parent
-    astrometry_dir = models_dir / 'astrometry'
-    for p in (astrometry_dir, models_dir, script_dir):
+    for p in (models_dir, script_dir):
         sp = str(p)
         if sp in sys.path:
             sys.path.remove(sp)

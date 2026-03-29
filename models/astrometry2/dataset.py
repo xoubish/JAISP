@@ -21,14 +21,14 @@ from astropy.wcs import WCS
 import sys
 SCRIPT_DIR = Path(__file__).resolve().parent
 MODELS_DIR = SCRIPT_DIR.parent
-ASTROMETRY_DIR = MODELS_DIR / 'astrometry'
-for p in (MODELS_DIR, ASTROMETRY_DIR):
+for p in (SCRIPT_DIR, MODELS_DIR):
     sp = str(p)
     if sp not in sys.path:
         sys.path.insert(0, sp)
 
-from jaisp_dataset_v4 import RUBIN_BAND_ORDER, _to_float32
 from source_matching import (
+    RUBIN_BAND_ORDER,
+    _to_float32,
     build_detection_image,
     detect_sources,
     match_sources_wcs,

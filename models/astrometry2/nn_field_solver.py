@@ -1,0 +1,230 @@
+"""Neural-network based global concordance field solver.
+
+Fits a small MLP  (x_arcsec, y_arcsec) → (ΔRA*, ΔDec)  directly to the
+per-source predictions instead of using the control-grid least-squares solve.
+
+Advantages over the control grid
+---------------------------------
+- No grid resolution hyperparameter — smoothness comes from the architecture
+  and weight-decay regularisation, not from the grid cell count.
+- SiLU activations produce infinitely differentiable interpolants; no
+  aliasing artefacts at tile boundaries.
+- Scales continuously: the same model can represent a 50-source field or
+  a 50 000-source field without changing any parameter.
+
+The mesh output format is identical to evaluate_control_grid_mesh so all
+downstream code (FITS writing, plotting, GlobalConcordanceMap) is unchanged.
+"""
+
+from __future__ import annotations
+
+from typing import Optional, Tuple
+
+import numpy as np
+import torch
+import torch.nn as nn
+from scipy.spatial import KDTree
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Model
+# ──────────────────────────────────────────────────────────────────────────────
+
+class DistortionMLP(nn.Module):
+    """
+    Compact MLP: normalised (x, y) sky position → (ΔRA*, ΔDec) in arcsec.
+
+    Architecture
+    ------------
+    - Input:  2-d normalised tangent-plane position (both in [-1, 1])
+    - Hidden: n_layers × hidden_dim neurons, SiLU activation
+              (smooth, non-saturating, avoids vanishing-gradient issues)
+    - Output: 2-d offset vector (ΔRA*, ΔDec); units restored by caller
+
+    Smoothness is controlled entirely by:
+      1. Architecture depth/width (shallower/narrower → smoother)
+      2. Weight decay in the Adam optimiser (higher → smoother)
+    """
+
+    def __init__(self, hidden_dim: int = 64, n_layers: int = 4):
+        super().__init__()
+        layers: list[nn.Module] = [nn.Linear(2, hidden_dim), nn.SiLU()]
+        for _ in range(n_layers - 1):
+            layers += [nn.Linear(hidden_dim, hidden_dim), nn.SiLU()]
+        layers.append(nn.Linear(hidden_dim, 2))
+        self.net = nn.Sequential(*layers)
+
+    def forward(self, xy: torch.Tensor) -> torch.Tensor:
+        return self.net(xy)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Training
+# ──────────────────────────────────────────────────────────────────────────────
+
+def fit_nn_field(
+    pos_arcsec: np.ndarray,
+    offsets_arcsec: np.ndarray,
+    weights: np.ndarray,
+    hidden_dim: int = 64,
+    n_layers: int = 4,
+    n_steps: int = 2000,
+    lr: float = 1e-3,
+    weight_decay: float = 1e-4,
+    device: Optional[torch.device] = None,
+    verbose: bool = True,
+) -> Tuple[DistortionMLP, dict]:
+    """
+    Fit a smooth MLP to per-source astrometric offset predictions.
+
+    Parameters
+    ----------
+    pos_arcsec      : [N, 2] tangent-plane positions in arcsec (x, y)
+    offsets_arcsec  : [N, 2] (ΔRA*, ΔDec) targets in arcsec
+    weights         : [N]    per-source weights (typically 1/σ²)
+    hidden_dim      : neurons per hidden layer
+    n_layers        : number of hidden layers
+    n_steps         : gradient-descent steps (Adam + cosine LR schedule)
+    lr              : initial Adam learning rate
+    weight_decay    : L2 regularisation — higher = smoother field
+    device          : torch device (auto-detected if None)
+    verbose         : print loss every 500 steps
+
+    Returns
+    -------
+    model : DistortionMLP  (CPU, eval mode)
+    meta  : dict — normalisation constants + training stats
+    """
+    if device is None:
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+    # ── Input normalisation: scale to [-1, 1] ────────────────────────────────
+    pos_min   = pos_arcsec.min(axis=0).astype(np.float32)
+    pos_max   = pos_arcsec.max(axis=0).astype(np.float32)
+    pos_scale = np.maximum(pos_max - pos_min, 1e-6)
+    pos_norm  = (pos_arcsec.astype(np.float32) - pos_min) / pos_scale * 2.0 - 1.0
+
+    # ── Target normalisation: unit scale helps the LR ────────────────────────
+    off_scale = float(np.percentile(np.abs(offsets_arcsec), 95)) or 1.0
+    off_norm  = (offsets_arcsec / off_scale).astype(np.float32)
+
+    # ── Tensors ──────────────────────────────────────────────────────────────
+    xy  = torch.tensor(pos_norm, dtype=torch.float32, device=device)
+    tgt = torch.tensor(off_norm, dtype=torch.float32, device=device)
+    w   = torch.tensor(
+        (weights / weights.mean()).astype(np.float32),
+        device=device,
+    )
+
+    # ── Model + optimiser ────────────────────────────────────────────────────
+    model = DistortionMLP(hidden_dim=hidden_dim, n_layers=n_layers).to(device)
+    opt   = torch.optim.Adam(
+        model.parameters(), lr=lr, weight_decay=weight_decay,
+    )
+    sched = torch.optim.lr_scheduler.CosineAnnealingLR(
+        opt, T_max=n_steps, eta_min=lr * 0.01,
+    )
+
+    # ── Training loop ────────────────────────────────────────────────────────
+    model.train()
+    losses = []
+    for step in range(n_steps):
+        opt.zero_grad()
+        pred_out = model(xy)
+        loss = (w[:, None] * (pred_out - tgt) ** 2).mean()
+        loss.backward()
+        opt.step()
+        sched.step()
+        losses.append(float(loss))
+        if verbose and (step + 1) % 500 == 0:
+            print(f'    NN step {step+1:4d}/{n_steps}  loss={loss.item():.5f}')
+
+    model.eval().cpu()
+
+    meta = {
+        'pos_min':    pos_min,
+        'pos_scale':  pos_scale,
+        'off_scale':  off_scale,
+        'n_sources':  int(len(pos_arcsec)),
+        'final_loss': float(losses[-1]),
+        'hidden_dim': hidden_dim,
+        'n_layers':   n_layers,
+        'n_steps':    n_steps,
+        'weight_decay': weight_decay,
+    }
+    if verbose:
+        print(f'  NN converged: final loss={losses[-1]:.5f}  '
+              f'({hidden_dim}×{n_layers}, wd={weight_decay})')
+    return model, meta
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Mesh evaluation
+# ──────────────────────────────────────────────────────────────────────────────
+
+def evaluate_nn_mesh(
+    model: DistortionMLP,
+    meta: dict,
+    field_h: int,
+    field_w: int,
+    dstep: int = 1,
+    pos_arcsec_anchors: Optional[np.ndarray] = None,
+    batch_size: int = 65536,
+) -> dict:
+    """
+    Evaluate the trained MLP on a regular grid.
+
+    Returns the same dict format as ``evaluate_control_grid_mesh``:
+      {'dra': [H_mesh, W_mesh], 'ddec': [H_mesh, W_mesh],
+       'coverage': [H_mesh, W_mesh] or None,
+       'x_mesh': [W_mesh], 'y_mesh': [H_mesh]}
+
+    Parameters
+    ----------
+    field_h, field_w        : field dimensions in arcsec (1 arcsec = 1 px here)
+    dstep                   : mesh step in arcsec (same as dstep_arcsec)
+    pos_arcsec_anchors      : [N, 2] training positions — used to build the
+                              coverage map (min dist to nearest anchor source).
+                              If None, coverage is not computed.
+    batch_size              : GPU batch size for large grids
+    """
+    pos_min   = meta['pos_min']
+    pos_scale = meta['pos_scale']
+    off_scale = meta['off_scale']
+
+    # Regular arcsec grid (same coordinate system as training)
+    x_mesh = np.arange(0, field_w, dstep, dtype=np.float32)
+    y_mesh = np.arange(0, field_h, dstep, dtype=np.float32)
+    xx, yy = np.meshgrid(x_mesh, y_mesh)
+    grid_pos = np.stack([xx.ravel(), yy.ravel()], axis=1).astype(np.float32)
+
+    # Apply the same normalisation used during training
+    grid_norm = (grid_pos - pos_min) / pos_scale * 2.0 - 1.0
+
+    # Batched forward pass (avoids OOM on large grids)
+    preds = []
+    model.eval()
+    with torch.no_grad():
+        for i in range(0, len(grid_norm), batch_size):
+            chunk = torch.tensor(grid_norm[i:i + batch_size], dtype=torch.float32)
+            preds.append(model(chunk).numpy())
+    pred_np = np.concatenate(preds, axis=0) * off_scale   # → arcsec
+
+    mesh_shape = (len(y_mesh), len(x_mesh))
+    dra  = pred_np[:, 0].reshape(mesh_shape).astype(np.float32)
+    ddec = pred_np[:, 1].reshape(mesh_shape).astype(np.float32)
+
+    # Coverage: min distance (arcsec) to nearest training anchor
+    coverage = None
+    if pos_arcsec_anchors is not None:
+        tree = KDTree(pos_arcsec_anchors)
+        dists, _ = tree.query(grid_pos)
+        coverage = dists.reshape(mesh_shape).astype(np.float32)
+
+    return {
+        'dra':      dra,
+        'ddec':     ddec,
+        'coverage': coverage,
+        'x_mesh':   x_mesh,
+        'y_mesh':   y_mesh,
+    }
