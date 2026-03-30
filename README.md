@@ -6,14 +6,14 @@ JAISP is a multi-instrument foundation model stack for Rubin + Euclid imaging.
 
 The workflow has two layers:
 
-1. Foundation pretraining (`JAISPFoundationV6`): self-supervised masked band reconstruction.
+1. Foundation pretraining (`JAISPFoundationV6` stable, `JAISPFoundationV7` experimental): self-supervised masked band reconstruction.
 2. Downstream heads: detection, astrometry concordance, and PSF/forced photometry.
 
 The central idea is to learn one spatially precise shared representation, then attach task-specific heads that reuse it.
 
-## Current Architecture (v6)
+## Foundation Architectures
 
-### Foundation model (`models/jaisp_foundation_v6.py`)
+### Stable: v6 (`models/jaisp_foundation_v6.py`)
 
 `JAISPFoundationV6` is a dense masked autoencoder trained on Rubin + Euclid tiles.
 
@@ -34,6 +34,19 @@ Key design choices:
 - Tiles without Euclid coverage automatically fall back to Rubin-only behavior.
 
 This Phase B training is the key bridge that makes downstream Rubin/Euclid alignment easier.
+
+### Experimental: v7 mixed resolution (`models/jaisp_foundation_v7.py`)
+
+`JAISPFoundationV7` keeps early Rubin, VIS, and NISP processing at native resolution, then fuses streams on a shared latent physical grid.
+
+Key design choices:
+
+- Rubin, VIS, and NISP each have their own native-resolution branch depth before fusion.
+- Cross-stream fusion happens after resizing latent features to a common physical scale, not by resizing raw inputs to one image grid.
+- The decoder is target-aware and reconstructs back to the held-out band's native resolution.
+- The objective is still InformationMap-weighted L1 in noise-normalized units, so the learning signal stays close to `v6`.
+
+This is the architecture to try when we want to preserve more Euclid VIS detail for downstream astrometry and detection.
 
 ## Downstream Heads
 
@@ -101,6 +114,14 @@ python models/train_jaisp_foundation_v6.py \
   --resume models/checkpoints/jaisp_v6/checkpoint_best.pt \
   --cross_instrument_prob 1.0 \
   --epochs 120
+
+# Experimental v7 mixed-resolution training
+python models/train_jaisp_foundation_v7.py \
+  --rubin_dir data/rubin_tiles_ecdfs \
+  --euclid_dir data/euclid_tiles_ecdfs \
+  --output_dir models/checkpoints/jaisp_v7 \
+  --cross_instrument_prob 1.0 \
+  --epochs 80
 ```
 
 ### Detection head training
@@ -142,6 +163,8 @@ python models/photometry/train_psf_net.py \
 
 ## Important Current Status Notes
 
+- `v6` remains the stable default foundation path.
+- `v7` is an experimental mixed-resolution path intended to test whether retaining native VIS structure improves downstream astrometry and detection.
 - Detection labels are pseudo-labels (not a curated catalog), so detection metrics should be interpreted as bootstrap quality, not final science quality.
 - The detection module is new and intended as a foundation-aligned head that can later swap pseudo-labels for survey catalogs.
 - This repository is an active research codebase. Architecture and training defaults evolve as new experiments land.

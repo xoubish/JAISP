@@ -1,0 +1,369 @@
+"""JAISP Foundation v7 - mixed-resolution masked band prediction.
+
+Key idea:
+  - Keep Rubin, VIS, and NISP streams at native resolution in the early encoder.
+  - Fuse streams at a shared latent physical scale instead of forcing one input grid.
+  - Decode back to the target band's native resolution.
+
+This keeps v6's per-band stems and reconstruction objective while removing the
+Phase B Euclid-downsampling assumption.
+"""
+
+import sys
+from pathlib import Path
+from typing import Dict, List, Tuple
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+_HERE = Path(__file__).resolve().parent
+if str(_HERE) not in sys.path:
+    sys.path.insert(0, str(_HERE))
+
+from jaisp_foundation_v6 import (
+    ALL_BANDS,
+    BandStem,
+    ConvNeXtBlock,
+    DownBlock,
+    FiLM,
+    InformationMap,
+    LayerNorm2d,
+    TransformerBlock,
+    create_optimizer,
+    create_scheduler,
+)
+
+
+RUBIN_BANDS = ["rubin_u", "rubin_g", "rubin_r", "rubin_i", "rubin_z", "rubin_y"]
+EUCLID_BANDS = ["euclid_VIS", "euclid_Y", "euclid_J", "euclid_H"]
+STREAM_ORDER = ["rubin", "vis", "nisp"]
+STREAM_PIXEL_SCALES = {
+    "rubin": 0.2,
+    "vis": 0.1,
+    "nisp": 0.3,
+}
+STREAM_BRANCH_DEPTHS = {
+    "rubin": 2,  # 512 -> 128 at 0.8"/px
+    "vis": 3,    # 1050 -> ~131 at 0.8"/px
+    "nisp": 1,   # 350 -> 175, then interpolate to common latent grid
+}
+
+
+def band_group(band_name: str) -> str:
+    if band_name in RUBIN_BANDS:
+        return "rubin"
+    if band_name == "euclid_VIS":
+        return "vis"
+    if band_name in ("euclid_Y", "euclid_J", "euclid_H"):
+        return "nisp"
+    raise KeyError(f"Unknown band: {band_name}")
+
+
+class StreamEncoder(nn.Module):
+    """Per-stream ConvNeXt encoder before cross-stream fusion."""
+
+    def __init__(
+        self,
+        in_ch: int,
+        hidden_ch: int,
+        depth: int,
+        blocks_per_stage: int = 2,
+    ):
+        super().__init__()
+        stages = []
+        cur_ch = in_ch
+        for _ in range(depth):
+            stages.append(DownBlock(cur_ch, hidden_ch, blocks_per_stage))
+            cur_ch = hidden_ch
+        self.stages = nn.ModuleList(stages)
+
+    def forward(self, x: torch.Tensor) -> List[torch.Tensor]:
+        feats = [x]
+        for stage in self.stages:
+            x = stage(x)
+            feats.append(x)
+        return feats
+
+
+class DecoderStage(nn.Module):
+    """Interpolate to a target size, project channels, then refine."""
+
+    def __init__(self, in_ch: int, out_ch: int, num_bands: int, blocks: int = 2):
+        super().__init__()
+        self.proj = nn.Conv2d(in_ch, out_ch, kernel_size=1)
+        self.blocks = nn.Sequential(*[ConvNeXtBlock(out_ch) for _ in range(blocks)])
+        self.film = FiLM(num_bands, out_ch)
+
+    def forward(self, x: torch.Tensor, band_idx: torch.Tensor, size: Tuple[int, int]) -> torch.Tensor:
+        x = F.interpolate(x, size=size, mode="bilinear", align_corners=False)
+        x = self.proj(x)
+        x = self.blocks(x)
+        return self.film(x, band_idx)
+
+
+class TargetDecoder(nn.Module):
+    """Target-resolution decoder without requiring same-stream context skips."""
+
+    def __init__(
+        self,
+        in_ch: int,
+        stage_channels: List[int],
+        num_bands: int,
+        blocks_per_stage: int = 2,
+    ):
+        super().__init__()
+        stages = []
+        cur_ch = in_ch
+        for out_ch in stage_channels:
+            stages.append(
+                DecoderStage(cur_ch, out_ch, num_bands=num_bands, blocks=blocks_per_stage)
+            )
+            cur_ch = out_ch
+        self.stages = nn.ModuleList(stages)
+        self.out_head = nn.Sequential(
+            LayerNorm2d(cur_ch),
+            nn.Conv2d(cur_ch, 1, kernel_size=1),
+        )
+
+    def forward(self, x: torch.Tensor, band_idx: torch.Tensor, target_hw: Tuple[int, int]) -> torch.Tensor:
+        h_t, w_t = target_hw
+        cur_h, cur_w = x.shape[-2:]
+        n_stages = len(self.stages)
+        for i, stage in enumerate(self.stages):
+            if i == n_stages - 1:
+                next_size = (h_t, w_t)
+            else:
+                next_size = (
+                    min(h_t, cur_h * 2),
+                    min(w_t, cur_w * 2),
+                )
+            x = stage(x, band_idx, next_size)
+            cur_h, cur_w = next_size
+        return self.out_head(x)
+
+
+class JAISPMixedEncoderV7(nn.Module):
+    """Encode mixed-resolution context bands and fuse them on a common latent grid."""
+
+    def __init__(
+        self,
+        band_names: List[str],
+        stem_ch: int = 64,
+        hidden_ch: int = 256,
+        blocks_per_stage: int = 2,
+        transformer_depth: int = 4,
+        transformer_heads: int = 8,
+        fused_pixel_scale_arcsec: float = 0.8,
+    ):
+        super().__init__()
+        self.band_names = list(band_names)
+        self.stem_ch = stem_ch
+        self.hidden_ch = hidden_ch
+        self.fused_pixel_scale_arcsec = float(fused_pixel_scale_arcsec)
+
+        self.stems = nn.ModuleDict({b: BandStem(stem_ch) for b in band_names})
+        self.info_maps = nn.ModuleDict({b: InformationMap() for b in band_names})
+
+        self.stream_encoders = nn.ModuleDict({
+            stream: StreamEncoder(
+                in_ch=stem_ch,
+                hidden_ch=hidden_ch,
+                depth=STREAM_BRANCH_DEPTHS[stream],
+                blocks_per_stage=blocks_per_stage,
+            )
+            for stream in STREAM_ORDER
+        })
+        self.stream_embeddings = nn.Embedding(len(STREAM_ORDER), hidden_ch)
+
+        self.transformer = nn.ModuleList(
+            [TransformerBlock(hidden_ch, transformer_heads) for _ in range(transformer_depth)]
+        )
+        self.transformer_norm = nn.LayerNorm(hidden_ch)
+
+    @staticmethod
+    def _make_2d_sincos(H: int, W: int, dim: int, device: torch.device) -> torch.Tensor:
+        assert dim % 4 == 0, "dim must be divisible by 4 for 2D sincos PE"
+        d = dim // 2
+        freq = torch.pow(10000.0, -torch.arange(0, d, 2, device=device, dtype=torch.float32) / d)
+
+        y_pos = torch.arange(H, device=device, dtype=torch.float32)
+        x_pos = torch.arange(W, device=device, dtype=torch.float32)
+        y_sin = torch.outer(y_pos, freq).sin()
+        y_cos = torch.outer(y_pos, freq).cos()
+        x_sin = torch.outer(x_pos, freq).sin()
+        x_cos = torch.outer(x_pos, freq).cos()
+
+        pe_y = torch.cat([y_sin, y_cos], dim=-1)
+        pe_x = torch.cat([x_sin, x_cos], dim=-1)
+        pe = torch.cat([
+            pe_y.unsqueeze(1).expand(-1, W, -1),
+            pe_x.unsqueeze(0).expand(H, -1, -1),
+        ], dim=-1)
+        return pe.reshape(1, H * W, dim)
+
+    def _estimate_fused_hw(self, context_images: Dict[str, torch.Tensor]) -> Tuple[int, int]:
+        heights = []
+        widths = []
+        for band, img in context_images.items():
+            scale = STREAM_PIXEL_SCALES[band_group(band)]
+            heights.append(int(round(img.shape[-2] * scale / self.fused_pixel_scale_arcsec)))
+            widths.append(int(round(img.shape[-1] * scale / self.fused_pixel_scale_arcsec)))
+        h = max(1, int(round(sum(heights) / max(1, len(heights)))))
+        w = max(1, int(round(sum(widths) / max(1, len(widths)))))
+        return h, w
+
+    def forward(
+        self,
+        context_images: Dict[str, torch.Tensor],
+        context_rms: Dict[str, torch.Tensor],
+    ) -> Dict:
+        stem_feats = {stream: [] for stream in STREAM_ORDER}
+        for band, img in context_images.items():
+            rms = context_rms[band]
+            stream = band_group(band)
+            stem_feats[stream].append(self.stems[band](img, rms))
+
+        fused_hw = self._estimate_fused_hw(context_images)
+        stream_maps = {}
+        stream_encoded = []
+
+        for stream_idx, stream in enumerate(STREAM_ORDER):
+            feats = stem_feats[stream]
+            if not feats:
+                continue
+            x = torch.stack(feats, dim=0).mean(dim=0)
+            pyramids = self.stream_encoders[stream](x)
+            latent = pyramids[-1]
+            latent = F.interpolate(latent, size=fused_hw, mode="bilinear", align_corners=False)
+            latent = latent + self.stream_embeddings.weight[stream_idx].view(1, -1, 1, 1)
+            stream_maps[stream] = latent
+            stream_encoded.append(latent)
+
+        if not stream_encoded:
+            raise ValueError("No context streams available for v7 encoder.")
+
+        x = torch.stack(stream_encoded, dim=0).mean(dim=0)
+
+        B, C, H, W = x.shape
+        tokens = x.flatten(2).transpose(1, 2)
+        pe = self._make_2d_sincos(H, W, C, x.device)
+        tokens = tokens + pe
+        for blk in self.transformer:
+            tokens = blk(tokens)
+        tokens = self.transformer_norm(tokens)
+        bottleneck = tokens.transpose(1, 2).view(B, C, H, W)
+
+        return {
+            "bottleneck": bottleneck,
+            "stream_maps": stream_maps,
+            "fused_hw": fused_hw,
+        }
+
+
+class JAISPFoundationV7(nn.Module):
+    """Mixed-resolution foundation model for Rubin + Euclid."""
+
+    def __init__(
+        self,
+        band_names: List[str] = ALL_BANDS,
+        stem_ch: int = 64,
+        hidden_ch: int = 256,
+        blocks_per_stage: int = 2,
+        transformer_depth: int = 4,
+        transformer_heads: int = 8,
+        fused_pixel_scale_arcsec: float = 0.8,
+    ):
+        super().__init__()
+        self.band_names = list(band_names)
+        self.band_to_idx = {b: i for i, b in enumerate(self.band_names)}
+
+        self.encoder = JAISPMixedEncoderV7(
+            band_names=self.band_names,
+            stem_ch=stem_ch,
+            hidden_ch=hidden_ch,
+            blocks_per_stage=blocks_per_stage,
+            transformer_depth=transformer_depth,
+            transformer_heads=transformer_heads,
+            fused_pixel_scale_arcsec=fused_pixel_scale_arcsec,
+        )
+
+        num_bands = len(self.band_names)
+        self.target_decoders = nn.ModuleDict({
+            "rubin": TargetDecoder(hidden_ch, [256, 128], num_bands, blocks_per_stage),
+            "vis": TargetDecoder(hidden_ch, [256, 128, 64], num_bands, blocks_per_stage),
+            "nisp": TargetDecoder(hidden_ch, [256, 128], num_bands, blocks_per_stage),
+        })
+
+        self._init_weights()
+        n_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        print(f"JAISPFoundationV7: {n_params/1e6:.1f}M trainable parameters")
+        print(f"  stem_ch={stem_ch}, hidden_ch={hidden_ch}, fused_scale={fused_pixel_scale_arcsec:.2f}\"/px")
+
+    def _init_weights(self) -> None:
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity="relu")
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+            elif isinstance(m, nn.Linear):
+                nn.init.xavier_uniform_(m.weight)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+            elif isinstance(m, (nn.LayerNorm, nn.GroupNorm)):
+                nn.init.ones_(m.weight)
+                nn.init.zeros_(m.bias)
+
+    def encode(
+        self,
+        context_images: Dict[str, torch.Tensor],
+        context_rms: Dict[str, torch.Tensor],
+    ) -> Dict:
+        return self.encoder(context_images, context_rms)
+
+    def forward(
+        self,
+        context_images: Dict[str, torch.Tensor],
+        context_rms: Dict[str, torch.Tensor],
+        target_band: str,
+        target_image: torch.Tensor,
+        target_rms: torch.Tensor,
+    ) -> Dict:
+        enc_out = self.encoder(context_images, context_rms)
+
+        B = target_image.shape[0]
+        band_idx = torch.full(
+            (B,),
+            self.band_to_idx[target_band],
+            dtype=torch.long,
+            device=target_image.device,
+        )
+        target_stream = band_group(target_band)
+        pred = self.target_decoders[target_stream](
+            enc_out["bottleneck"],
+            band_idx,
+            target_image.shape[-2:],
+        )
+
+        target_norm = (target_image / (target_rms + 1e-10)).clamp(-10.0, 100.0)
+        info_w = self.encoder.info_maps[target_band](target_image, target_rms)
+        loss = (info_w * (pred - target_norm).abs()).mean()
+
+        return {
+            "loss": loss,
+            "pred": pred.detach(),
+            "target_norm": target_norm.detach(),
+            "info_weights": info_w.detach(),
+            "fused_hw": enc_out["fused_hw"],
+        }
+
+
+__all__ = [
+    "ALL_BANDS",
+    "EUCLID_BANDS",
+    "JAISPFoundationV7",
+    "RUBIN_BANDS",
+    "band_group",
+    "create_optimizer",
+    "create_scheduler",
+]
