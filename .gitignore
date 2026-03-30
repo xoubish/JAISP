@@ -77,3 +77,5 @@ Thumbs.db
 .vscode/
 .idea/
 
+# Codex session artifact
+.codex

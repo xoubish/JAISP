@@ -4,6 +4,13 @@
 
 It learns to reconstruct any masked band at pixel precision from the remaining bands, forcing the encoder to maintain exact spatial layout across instruments.
 
+This document covers the foundation model only.
+For downstream heads, see:
+
+- `detection/README.md` (DETR-style source detection)
+- `astrometry2/README.md` (Rubin -> Euclid VIS concordance)
+- `photometry/README.md` (PSF modeling + forced photometry)
+
 ---
 
 ## Why MAE, not JEPA (v5 → v6)
@@ -57,6 +64,17 @@ Euclid bands are bilinearly downsampled to 512×512 before entering the pool.
 Tiles without Euclid coverage fall back to Phase A automatically.
 
 Phase B encodes cross-instrument spatial correspondence directly into the BandStem weights, which the astrometry matcher then reuses.
+
+---
+
+## Why This Transfers To Downstream Tasks
+
+The main representation design choices were made to support detection, astrometry, and photometry heads without task-specific re-encoding:
+
+- No patch tokens: preserves sub-pixel spatial information needed by centroid-level tasks.
+- Per-band stems + shared aggregation: allows band-specific noise handling while learning a common latent frame.
+- Phase B cross-instrument masking: encourages Rubin/Euclid correspondence directly in encoder features.
+- Dense bottleneck features (`[B, 512, H/8, W/8]`): reusable for set prediction (detection) and local offset matching (astrometry).
 
 ---
 
