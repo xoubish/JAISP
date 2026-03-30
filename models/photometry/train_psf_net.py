@@ -131,7 +131,7 @@ def _find_stars_in_tile(
     rwcs = WCS(Header(rubin_wcs_hdr))
 
     # --- Detect compact sources ---
-    xs, ys = _detect_star_positions(rubin_np, stamp_size, n_stars)
+    xs, ys = _detect_star_positions(rubin_np, stamp_size, n_stars, nsig=15.0)
     if xs.size == 0:
         return None
 
@@ -189,13 +189,32 @@ def _find_stars_in_tile(
         stamps     = rubin_stamps   # [N, 6, S, S] — only Rubin bands
         rms_stamps = rubin_rms_s
 
-    # --- Compactness filter: central pixel SNR > 5 in reference band ---
-    # (peak/total fails on non-background-subtracted stamps; SNR does not)
-    ref_idx = 6 if has_euclid else 2   # euclid_VIS or rubin_r
+    # --- Star/galaxy separation using concentration index ---
+    # Use background-subtracted Rubin r-band (index 2) — always available
+    # and at native Rubin scale so concentration thresholds are consistent.
     S = stamp_size
-    peak = stamps[:, ref_idx, S//2, S//2]                       # [N]
-    noise = rms_stamps[:, ref_idx, S//2, S//2].clamp(min=1e-12) # [N]
-    compact = (peak / noise) > 5.0
+    half_s = (S - 1) / 2.0
+    yy, xx = torch.meshgrid(
+        torch.arange(S, dtype=torch.float32, device=stamps.device),
+        torch.arange(S, dtype=torch.float32, device=stamps.device),
+        indexing='ij',
+    )
+    r_map = ((xx - half_s) ** 2 + (yy - half_s) ** 2).sqrt()
+
+    # Subtract per-source background estimate before measuring concentration
+    bg_est = estimate_local_background(stamps, inner_radius=7.0, outer_radius=9.5)
+    stamps_bgsub = stamps - bg_est.unsqueeze(-1).unsqueeze(-1)
+
+    ref_idx = 2   # rubin_r: good S/N, always present
+    ref_band = stamps_bgsub[:, ref_idx].clamp(min=0)            # [N, S, S]
+    flux_inner = (ref_band * (r_map < 2.0).float()).sum((-2, -1))
+    flux_outer = (ref_band * (r_map < 5.0).float()).sum((-2, -1)).clamp(min=1e-6)
+    concentration = flux_inner / flux_outer                      # [N]  stars > 0.5
+
+    # Also require central pixel to be a genuine detection
+    noise = rms_stamps[:, ref_idx, S//2, S//2].clamp(min=1e-12)
+    snr_peak = stamps_bgsub[:, ref_idx, S//2, S//2] / noise
+    compact = (concentration > 0.5) & (snr_peak > 10.0)
     if compact.sum() == 0:
         return None
     stamps     = stamps[compact]
