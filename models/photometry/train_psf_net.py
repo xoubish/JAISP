@@ -36,22 +36,31 @@ from psf_net import PSFNet, BAND_ORDER
 # Star extraction  — tile-first, fully batched (no per-star Python loop)
 # ---------------------------------------------------------------------------
 
-def _load_tile_tensor(path: Path, key_img: str = 'img', key_var: str = 'var'):
-    """Load a tile npz and return (img [C,H,W], rms [C,H,W]) float32 tensors."""
+_EUCLID_BANDS = ['VIS', 'Y', 'J', 'H']
+
+
+def _load_rubin_tile(path: Path):
+    """Returns (img [6,H,W], rms [6,H,W], wcs_hdr str) float32."""
     data = np.load(path, allow_pickle=True, mmap_mode='r')
-    img = np.asarray(data[key_img], dtype=np.float32)
-    if key_var in data:
-        var = np.asarray(data[key_var], dtype=np.float32)
-        rms = np.sqrt(np.clip(var, 1e-20, None))
-    else:
-        # Fall back: MAD estimate per band
-        rms = np.zeros_like(img)
-        for bi in range(img.shape[0]):
-            flat = img[bi].ravel()
-            flat = flat[np.isfinite(flat)]
-            mad = np.median(np.abs(flat - np.median(flat))) if len(flat) > 10 else 1.0
-            rms[bi] = max(1.4826 * mad, 1e-10)
-    return torch.from_numpy(img), torch.from_numpy(rms)
+    img = np.asarray(data['img'], dtype=np.float32)
+    var = np.asarray(data['var'], dtype=np.float32)
+    rms = np.sqrt(np.clip(var, 1e-20, None))
+    wcs_hdr = data['wcs_hdr'].item()   # string header for band 0 (all share same WCS)
+    return torch.from_numpy(img), torch.from_numpy(rms), wcs_hdr
+
+
+def _load_euclid_tile(path: Path):
+    """Returns (img [4,H,W], rms [4,H,W], wcs_hdrs list[str]) float32."""
+    data = np.load(path, allow_pickle=True, mmap_mode='r')
+    imgs, rmss, hdrs = [], [], []
+    for band in _EUCLID_BANDS:
+        imgs.append(np.asarray(data[f'img_{band}'], dtype=np.float32))
+        var = np.asarray(data[f'var_{band}'], dtype=np.float32)
+        rmss.append(np.sqrt(np.clip(var, 1e-20, None)))
+        hdrs.append(str(data[f'wcs_{band}']))
+    img_t = torch.from_numpy(np.stack(imgs))   # [4, H, W]
+    rms_t = torch.from_numpy(np.stack(rmss))
+    return img_t, rms_t, hdrs
 
 
 def _detect_star_positions(
@@ -93,10 +102,16 @@ def _find_stars_in_tile(
     """
     from stamp_extractor import extract_stamps
 
+    from astropy.wcs import WCS
+    from astropy.io.fits import Header
+    from astrometry2.source_matching import safe_header_from_card_string
+
     # --- Load Rubin tile ---
-    rubin_img_t, rubin_rms_t = _load_tile_tensor(tile_info['rubin_path'])
+    rubin_img_t, rubin_rms_t, rubin_wcs_hdr = _load_rubin_tile(tile_info['rubin_path'])
     rubin_np = rubin_img_t.numpy()           # [6, H, W]  for detection (CPU)
     _, H, W = rubin_img_t.shape
+    # rubin wcs_hdr is a dict; WCS accepts it directly
+    rwcs = WCS(Header(rubin_wcs_hdr))
 
     # --- Detect compact sources ---
     xs, ys = _detect_star_positions(rubin_np, stamp_size, n_stars)
@@ -106,18 +121,17 @@ def _find_stars_in_tile(
     # --- Load Euclid tile if available ---
     euclid_path = tile_info.get('euclid_path')
     if euclid_path and Path(euclid_path).exists():
-        euclid_img_t, euclid_rms_t = _load_tile_tensor(euclid_path)
-        # Euclid is at 0.1"/px (2× Rubin): downsample positions by 0.5
-        # (Rubin px → Euclid px assuming same field centre, scale factor 2)
-        # A better approach would use WCS; this is a fast approximation good
-        # enough for PSF training on isolated stars.
-        ex = xs * 0.5
-        ey = ys * 0.5
+        euclid_img_t, euclid_rms_t, euclid_wcs_hdrs = _load_euclid_tile(euclid_path)
+        # Use VIS WCS to map Rubin pixel positions → Euclid pixel positions
+        ewcs = WCS(safe_header_from_card_string(euclid_wcs_hdrs[0]))
+        ra_arr, dec_arr = rwcs.wcs_pix2world(xs.astype(float), ys.astype(float), 0)
+        ex_f, ey_f = ewcs.wcs_world2pix(ra_arr, dec_arr, 0)
         eH, eW = euclid_img_t.shape[1], euclid_img_t.shape[2]
         em = stamp_size // 2 + 2
-        e_good = (ex >= em) & (ex < eW - em) & (ey >= em) & (ey < eH - em)
+        e_good = (ex_f >= em) & (ex_f < eW - em) & (ey_f >= em) & (ey_f < eH - em)
         xs, ys = xs[e_good], ys[e_good]
-        ex, ey = ex[e_good], ey[e_good]
+        ex = ex_f[e_good]
+        ey = ey_f[e_good]
         has_euclid = True
     else:
         has_euclid = False
@@ -145,7 +159,7 @@ def _find_stars_in_tile(
         ey = ey[:n_stars]
         positions_euclid = torch.from_numpy(
             np.stack([ex, ey], axis=1).astype(np.float32)
-        )
+        )  # [N, 2]
         euclid_stamps = extract_stamps(
             euclid_img_t.to(device), positions_euclid, stamp_size
         )  # [N, 4, S, S]
@@ -260,6 +274,46 @@ def _psf_radial_profiles(psf_net: PSFNet, device: torch.device):
     return img
 
 
+def _psf_power_spectra(psf_net: PSFNet, device: torch.device):
+    """
+    Log log-scale power spectrum (|FFT|) for all bands at tile centre.
+
+    Zero-pads 4× before FFT for a smoother frequency grid.
+    Diffraction spikes appear as radial lines; ringing as excess mid-frequency
+    power; PSF width maps directly to MTF roll-off rate.
+    """
+    import wandb
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+
+    psf_net.eval()
+    S = psf_net.stamp_size
+    pad = 4   # zero-pad to 4S×4S
+
+    fig, axes = plt.subplots(2, 5, figsize=(13, 5))
+    with torch.no_grad():
+        xn = torch.tensor([0.5], device=device)
+        yn = torch.tensor([0.5], device=device)
+        for bi, (band, ax) in enumerate(zip(BAND_ORDER[:psf_net.n_bands], axes.flat)):
+            band_idx = torch.tensor([bi], dtype=torch.long, device=device)
+            psf = psf_net(xn, yn, band_idx)[0].cpu()   # [S, S]
+            mtf = torch.fft.fftshift(
+                torch.fft.fft2(psf, s=(S * pad, S * pad)).abs()
+            ).numpy()
+            ax.imshow(np.log1p(mtf), origin='lower', cmap='magma',
+                      interpolation='nearest')
+            ax.set_title(band, fontsize=7)
+            ax.axis('off')
+
+    fig.suptitle('log|MTF| — tile centre  (spikes → radial lines, ringing → mid-freq ring)', fontsize=8)
+    plt.tight_layout()
+    img = wandb.Image(fig)
+    plt.close(fig)
+    psf_net.train()
+    return img
+
+
 # ---------------------------------------------------------------------------
 # Training loop
 # ---------------------------------------------------------------------------
@@ -345,6 +399,7 @@ def train(args):
             if (epoch + 1) % args.vis_every == 0 or epoch == 0 or epoch == args.epochs - 1:
                 log_dict.update(_psf_grid_images(psf_net, device))
                 log_dict['psf/radial_profiles'] = _psf_radial_profiles(psf_net, device)
+                log_dict['psf/power_spectra']   = _psf_power_spectra(psf_net, device)
             wandb.log(log_dict)
 
         if mean_loss < best_loss:
