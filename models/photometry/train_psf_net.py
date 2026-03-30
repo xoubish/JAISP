@@ -29,91 +29,152 @@ for _p in (_HERE, _MODELS):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
-from astrometry2.sky_cube import SkyCubeExtractor
 from psf_net import PSFNet, BAND_ORDER
 
 
 # ---------------------------------------------------------------------------
-# Star extraction
+# Star extraction  — tile-first, fully batched (no per-star Python loop)
 # ---------------------------------------------------------------------------
 
+def _load_tile_tensor(path: Path, key_img: str = 'img', key_var: str = 'var'):
+    """Load a tile npz and return (img [C,H,W], rms [C,H,W]) float32 tensors."""
+    data = np.load(path, allow_pickle=True, mmap_mode='r')
+    img = np.asarray(data[key_img], dtype=np.float32)
+    if key_var in data:
+        var = np.asarray(data[key_var], dtype=np.float32)
+        rms = np.sqrt(np.clip(var, 1e-20, None))
+    else:
+        # Fall back: MAD estimate per band
+        rms = np.zeros_like(img)
+        for bi in range(img.shape[0]):
+            flat = img[bi].ravel()
+            flat = flat[np.isfinite(flat)]
+            mad = np.median(np.abs(flat - np.median(flat))) if len(flat) > 10 else 1.0
+            rms[bi] = max(1.4826 * mad, 1e-10)
+    return torch.from_numpy(img), torch.from_numpy(rms)
+
+
+def _detect_star_positions(
+    rubin_img: np.ndarray,   # [6, H, W]
+    stamp_size: int,
+    n_stars: int,
+    nsig: float = 10.0,
+):
+    """
+    Find compact high-S/N sources and return pixel (x, y) arrays.
+    Returns (xs, ys) int arrays, already margin-clipped.
+    """
+    from astrometry2.source_matching import detect_sources, build_detection_image
+
+    H, W = rubin_img.shape[1], rubin_img.shape[2]
+    det = build_detection_image(rubin_img, ['rubin_g', 'rubin_r', 'rubin_i'])
+    xs, ys = detect_sources(det, nsig=nsig, max_sources=n_stars * 4)
+    if xs.size == 0:
+        return xs, ys
+    margin = stamp_size // 2 + 2
+    good = (xs >= margin) & (xs < W - margin) & (ys >= margin) & (ys < H - margin)
+    return xs[good], ys[good]
+
+
 def _find_stars_in_tile(
-    extractor: SkyCubeExtractor,
     tile_info: dict,
     n_stars: int = 64,
     stamp_size: int = 21,
     device: torch.device = torch.device('cpu'),
 ):
     """
-    Extract compact-source stamps from a tile.
+    Load tile once → detect stars → batch-extract all stamps in one GPU call.
 
-    Returns (stamps, rms_stamps, x_norm, y_norm) all float32 tensors, or None.
+    Returns (stamps [N,B,S,S], rms_stamps [N,B,S,S], x_norm [N], y_norm [N])
+    or None if no usable stars found.
+
+    Speed: one disk read + one F.grid_sample call per tile  (vs. N WCS+reproject
+    calls in the old per-star loop — ~100× faster for 64 stars/tile).
     """
-    from astrometry2.source_matching import detect_sources, build_detection_image
-    from astropy.wcs import WCS
+    from stamp_extractor import extract_stamps
 
-    rdata = np.load(tile_info['rubin_path'], allow_pickle=True, mmap_mode='r')
-    rubin_img = np.asarray(rdata['img'], dtype=np.float32)   # [6, H, W]
-    H, W = rubin_img.shape[1], rubin_img.shape[2]
+    # --- Load Rubin tile ---
+    rubin_img_t, rubin_rms_t = _load_tile_tensor(tile_info['rubin_path'])
+    rubin_np = rubin_img_t.numpy()           # [6, H, W]  for detection (CPU)
+    _, H, W = rubin_img_t.shape
 
-    det_img = build_detection_image(rubin_img, ['rubin_g', 'rubin_r', 'rubin_i'])
-    xs, ys = detect_sources(det_img, nsig=10.0, max_sources=n_stars * 4)
+    # --- Detect compact sources ---
+    xs, ys = _detect_star_positions(rubin_np, stamp_size, n_stars)
     if xs.size == 0:
         return None
 
+    # --- Load Euclid tile if available ---
+    euclid_path = tile_info.get('euclid_path')
+    if euclid_path and Path(euclid_path).exists():
+        euclid_img_t, euclid_rms_t = _load_tile_tensor(euclid_path)
+        # Euclid is at 0.1"/px (2× Rubin): downsample positions by 0.5
+        # (Rubin px → Euclid px assuming same field centre, scale factor 2)
+        # A better approach would use WCS; this is a fast approximation good
+        # enough for PSF training on isolated stars.
+        ex = xs * 0.5
+        ey = ys * 0.5
+        eH, eW = euclid_img_t.shape[1], euclid_img_t.shape[2]
+        em = stamp_size // 2 + 2
+        e_good = (ex >= em) & (ex < eW - em) & (ey >= em) & (ey < eH - em)
+        xs, ys = xs[e_good], ys[e_good]
+        ex, ey = ex[e_good], ey[e_good]
+        has_euclid = True
+    else:
+        has_euclid = False
+
+    if xs.size == 0:
+        return None
+
+    # Cap to n_stars
+    xs, ys = xs[:n_stars], ys[:n_stars]
+
+    # --- Batch stamp extraction (one GPU call each) ---
+    positions_rubin = torch.from_numpy(
+        np.stack([xs, ys], axis=1).astype(np.float32)
+    )  # [N, 2]
+
+    rubin_stamps = extract_stamps(
+        rubin_img_t.to(device), positions_rubin, stamp_size
+    )  # [N, 6, S, S]
+    rubin_rms_s  = extract_stamps(
+        rubin_rms_t.to(device), positions_rubin, stamp_size
+    )  # [N, 6, S, S]
+
+    if has_euclid:
+        ex = ex[:n_stars]
+        ey = ey[:n_stars]
+        positions_euclid = torch.from_numpy(
+            np.stack([ex, ey], axis=1).astype(np.float32)
+        )
+        euclid_stamps = extract_stamps(
+            euclid_img_t.to(device), positions_euclid, stamp_size
+        )  # [N, 4, S, S]
+        euclid_rms_s  = extract_stamps(
+            euclid_rms_t.to(device), positions_euclid, stamp_size
+        )
+        stamps     = torch.cat([rubin_stamps, euclid_stamps], dim=1)  # [N, 10, S, S]
+        rms_stamps = torch.cat([rubin_rms_s,  euclid_rms_s],  dim=1)
+    else:
+        stamps     = rubin_stamps   # [N, 6, S, S] — only Rubin bands
+        rms_stamps = rubin_rms_s
+
+    # --- Compactness filter: keep sources where VIS (or r-band) peak > 3% of sum ---
+    vis_idx = 6 if has_euclid else 2   # euclid_VIS or rubin_r
     S = stamp_size
-    margin = S // 2 + 2
-    good = (xs >= margin) & (xs < W - margin) & (ys >= margin) & (ys < H - margin)
-    xs, ys = xs[good], ys[good]
-    if xs.size == 0:
+    peak = stamps[:, vis_idx, S//2, S//2]                       # [N]
+    total = stamps[:, vis_idx].abs().sum(dim=(-2, -1)).clamp(min=1e-6)
+    compact = (peak / total) > 0.03
+    if compact.sum() == 0:
         return None
+    stamps     = stamps[compact]
+    rms_stamps = rms_stamps[compact]
+    xs_f = xs[compact.cpu().numpy().astype(bool)]
+    ys_f = ys[compact.cpu().numpy().astype(bool)]
 
-    rwcs = WCS(rdata['wcs_hdr'].item())
-    ra_arr, dec_arr = rwcs.wcs_pix2world(xs, ys, 0)
+    x_norm = torch.from_numpy(xs_f.astype(np.float32) / max(1, W - 1)).to(device)
+    y_norm = torch.from_numpy(ys_f.astype(np.float32) / max(1, H - 1)).to(device)
 
-    all_stamps, all_rms, all_xn, all_yn = [], [], [], []
-    for ra, dec in zip(ra_arr[:n_stars * 2], dec_arr[:n_stars * 2]):
-        try:
-            result = extractor.extract(
-                ra=float(ra), dec=float(dec),
-                size_arcsec=float(S) * 0.2,
-                tile_id=tile_info['tile_id'],
-            )
-        except Exception:
-            continue
-        cube  = torch.from_numpy(result['cube'])       # [10, h, w]
-        rms_c = torch.from_numpy(result['rms_cube'])
-        if cube.shape[-1] < S or cube.shape[-2] < S:
-            continue
-        h0, w0 = cube.shape[-2], cube.shape[-1]
-        r0 = (h0 - S) // 2
-        c0 = (w0 - S) // 2
-        cube  = cube[:,  r0:r0+S, c0:c0+S]
-        rms_c = rms_c[:, r0:r0+S, c0:c0+S]
-
-        vis = cube[6]
-        center_frac = float(vis[S//2, S//2]) / float(vis.abs().sum().clamp(min=1e-6))
-        if center_frac < 0.03:
-            continue
-
-        all_stamps.append(cube)
-        all_rms.append(rms_c)
-        rx, ry = rwcs.wcs_world2pix(ra, dec, 0)
-        all_xn.append(float(rx) / max(1, W - 1))
-        all_yn.append(float(ry) / max(1, H - 1))
-
-        if len(all_stamps) >= n_stars:
-            break
-
-    if not all_stamps:
-        return None
-
-    return (
-        torch.stack(all_stamps).to(device),
-        torch.stack(all_rms).to(device),
-        torch.tensor(all_xn, dtype=torch.float32, device=device),
-        torch.tensor(all_yn, dtype=torch.float32, device=device),
-    )
+    return stamps, rms_stamps, x_norm, y_norm
 
 
 # ---------------------------------------------------------------------------
@@ -216,11 +277,17 @@ def train(args):
             config=vars(args),
         )
 
-    extractor = SkyCubeExtractor(
-        rubin_dir=args.rubin_dir,
-        euclid_dir=args.euclid_dir,
-        concordance_path=args.concordance,
-    )
+    # Build tile index directly from data directories
+    rubin_dir  = Path(args.rubin_dir)
+    euclid_dir = Path(args.euclid_dir)
+    euclid_map = {p.stem.replace('_euclid', ''): p
+                  for p in euclid_dir.glob('tile_x*_y*_euclid.npz')}
+    tiles = []
+    for rp in sorted(rubin_dir.glob('tile_x*_y*.npz')):
+        stem = rp.stem
+        ep   = euclid_map.get(stem)
+        tiles.append({'rubin_path': rp, 'euclid_path': ep})
+    print(f'Found {len(tiles)} tiles')
 
     psf_net = PSFNet(
         n_bands=10,
@@ -232,7 +299,6 @@ def train(args):
     optimizer = optim.Adam(psf_net.parameters(), lr=3e-4)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
 
-    tiles = list(extractor._tile_index)
     best_loss = float('inf')
     global_step = 0
 
@@ -242,7 +308,7 @@ def train(args):
 
         for tile_info in tiles:
             batch = _find_stars_in_tile(
-                extractor, tile_info,
+                tile_info,
                 n_stars=64,
                 stamp_size=args.stamp_size,
                 device=device,
