@@ -30,6 +30,7 @@ for _p in (_HERE, _MODELS):
         sys.path.insert(0, str(_p))
 
 from psf_net import PSFNet, BAND_ORDER
+from stamp_extractor import estimate_local_background
 
 
 # ---------------------------------------------------------------------------
@@ -39,13 +40,28 @@ from psf_net import PSFNet, BAND_ORDER
 _EUCLID_BANDS = ['VIS', 'Y', 'J', 'H']
 
 
+def _var_to_rms(var: np.ndarray) -> np.ndarray:
+    """
+    sqrt(var), with bad pixels (NaN/zero) replaced by the per-band median rms.
+    Prevents chi² explosion when masked pixels have var≈0.
+    """
+    rms = np.sqrt(np.clip(var, 0.0, None))          # [C, H, W] or [H, W]
+    bands = rms if rms.ndim == 3 else rms[None]
+    out = bands.copy()
+    for bi in range(bands.shape[0]):
+        good = bands[bi] > 1e-6
+        med = float(np.median(bands[bi][good])) if good.any() else 1.0
+        out[bi] = np.where(good, bands[bi], med)
+    return out if rms.ndim == 3 else out[0]
+
+
 def _load_rubin_tile(path: Path):
-    """Returns (img [6,H,W], rms [6,H,W], wcs_hdr str) float32."""
+    """Returns (img [6,H,W], rms [6,H,W], wcs_hdr dict) float32."""
     data = np.load(path, allow_pickle=True, mmap_mode='r')
-    img = np.asarray(data['img'], dtype=np.float32)
-    var = np.asarray(data['var'], dtype=np.float32)
-    rms = np.sqrt(np.clip(var, 1e-20, None))
-    wcs_hdr = data['wcs_hdr'].item()   # string header for band 0 (all share same WCS)
+    img = np.nan_to_num(np.asarray(data['img'], dtype=np.float32), nan=0.0)
+    var = np.nan_to_num(np.asarray(data['var'], dtype=np.float32), nan=0.0)
+    rms = _var_to_rms(var)
+    wcs_hdr = data['wcs_hdr'].item()
     return torch.from_numpy(img), torch.from_numpy(rms), wcs_hdr
 
 
@@ -54,11 +70,12 @@ def _load_euclid_tile(path: Path):
     data = np.load(path, allow_pickle=True, mmap_mode='r')
     imgs, rmss, hdrs = [], [], []
     for band in _EUCLID_BANDS:
-        imgs.append(np.asarray(data[f'img_{band}'], dtype=np.float32))
-        var = np.asarray(data[f'var_{band}'], dtype=np.float32)
-        rmss.append(np.sqrt(np.clip(var, 1e-20, None)))
+        img = np.nan_to_num(np.asarray(data[f'img_{band}'], dtype=np.float32), nan=0.0)
+        var = np.nan_to_num(np.asarray(data[f'var_{band}'], dtype=np.float32), nan=0.0)
+        rmss.append(_var_to_rms(var))
+        imgs.append(img)
         hdrs.append(str(data[f'wcs_{band}']))
-    img_t = torch.from_numpy(np.stack(imgs))   # [4, H, W]
+    img_t = torch.from_numpy(np.stack(imgs))
     rms_t = torch.from_numpy(np.stack(rmss))
     return img_t, rms_t, hdrs
 
@@ -172,12 +189,13 @@ def _find_stars_in_tile(
         stamps     = rubin_stamps   # [N, 6, S, S] — only Rubin bands
         rms_stamps = rubin_rms_s
 
-    # --- Compactness filter: keep sources where VIS (or r-band) peak > 3% of sum ---
-    vis_idx = 6 if has_euclid else 2   # euclid_VIS or rubin_r
+    # --- Compactness filter: central pixel SNR > 5 in reference band ---
+    # (peak/total fails on non-background-subtracted stamps; SNR does not)
+    ref_idx = 6 if has_euclid else 2   # euclid_VIS or rubin_r
     S = stamp_size
-    peak = stamps[:, vis_idx, S//2, S//2]                       # [N]
-    total = stamps[:, vis_idx].abs().sum(dim=(-2, -1)).clamp(min=1e-6)
-    compact = (peak / total) > 0.03
+    peak = stamps[:, ref_idx, S//2, S//2]                       # [N]
+    noise = rms_stamps[:, ref_idx, S//2, S//2].clamp(min=1e-12) # [N]
+    compact = (peak / noise) > 5.0
     if compact.sum() == 0:
         return None
     stamps     = stamps[compact]
@@ -238,7 +256,10 @@ def _psf_grid_images(psf_net: PSFNet, device: torch.device):
 
 def _psf_radial_profiles(psf_net: PSFNet, device: torch.device):
     """
-    Log radial profiles at tile centre for all bands as a single overlay plot.
+    Azimuthally-averaged radial profiles at tile centre for all bands.
+
+    Pixels are binned by radius; mean taken within each bin — smooth even
+    for asymmetric PSFs (real PSFs are not round).
     """
     import wandb
     import matplotlib
@@ -249,9 +270,15 @@ def _psf_radial_profiles(psf_net: PSFNet, device: torch.device):
     S = psf_net.stamp_size
     half = (S - 1) / 2.0
     y, x = np.mgrid[:S, :S]
-    r = np.sqrt((x - half) ** 2 + (y - half) ** 2).ravel()
-    order = np.argsort(r)
-    r_sorted = r[order]
+    r = np.sqrt((x - half) ** 2 + (y - half) ** 2).ravel()  # [S²]
+
+    # Build radial bins (~1px width — enough pixels per bin for a stable mean)
+    r_max = half * np.sqrt(2)
+    n_bins = int(np.ceil(r_max))
+    bin_edges = np.linspace(0, r_max, n_bins + 1)
+    bin_centres = 0.5 * (bin_edges[:-1] + bin_edges[1:])
+    bin_idx = np.digitize(r, bin_edges) - 1
+    bin_idx = np.clip(bin_idx, 0, n_bins - 1)
 
     fig, ax = plt.subplots(figsize=(6, 4))
     with torch.no_grad():
@@ -259,12 +286,13 @@ def _psf_radial_profiles(psf_net: PSFNet, device: torch.device):
         yn = torch.tensor([0.5], device=device)
         for bi, band in enumerate(BAND_ORDER[:psf_net.n_bands]):
             band_idx = torch.tensor([bi], dtype=torch.long, device=device)
-            psf = psf_net(xn, yn, band_idx).cpu().numpy()[0]  # [S, S]
-            profile = psf.ravel()[order]
-            ax.plot(r_sorted, profile / profile.max(), label=band, lw=1.2)
+            psf = psf_net(xn, yn, band_idx).cpu().numpy()[0].ravel()  # [S²]
+            profile = np.array([psf[bin_idx == k].mean() for k in range(n_bins)])
+            profile /= profile.max()
+            ax.plot(bin_centres, profile, label=band, lw=1.5)
 
     ax.set_xlabel('Radius (px)')
-    ax.set_ylabel('Normalised PSF')
+    ax.set_ylabel('Normalised PSF (azimuthal mean)')
     ax.legend(fontsize=6, ncol=2)
     ax.set_title('PSF radial profiles — tile centre')
     plt.tight_layout()
@@ -370,6 +398,10 @@ def train(args):
             if batch is None:
                 continue
             stamps, rms_stamps, x_norm, y_norm = batch
+
+            # Subtract local sky — background dominates chi² without this
+            bg = estimate_local_background(stamps, inner_radius=7.0, outer_radius=9.5)
+            stamps = stamps - bg.unsqueeze(-1).unsqueeze(-1)
 
             optimizer.zero_grad()
             loss = psf_net.training_loss(stamps, rms_stamps, x_norm, y_norm)
