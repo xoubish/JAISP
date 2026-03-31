@@ -6,7 +6,7 @@ JAISP is a multi-instrument foundation model stack for Rubin + Euclid imaging.
 
 The workflow has two layers:
 
-1. Foundation pretraining (`JAISPFoundationV6` stable, `JAISPFoundationV7` experimental): self-supervised masked band reconstruction.
+1. Foundation pretraining (`JAISPFoundationV6` single-grid MAE, `JAISPFoundationV7` mixed-resolution MAE — current active path): self-supervised masked band reconstruction.
 2. Downstream heads: detection, astrometry concordance, and PSF/forced photometry.
 
 The central idea is to learn one spatially precise shared representation, then attach task-specific heads that reuse it.
@@ -26,27 +26,25 @@ Key design choices:
 - U-Net decoder with FiLM conditioning by target band identity.
 - InformationMap-weighted L1 loss to focus learning on informative source pixels.
 
-### Curriculum
+### v6 Curriculum
 
 - Phase A (`cross_instrument_prob=0.0`): Rubin-only masked band prediction.
 - Phase B (`cross_instrument_prob=1.0`): Rubin + Euclid masked band prediction.
 - Euclid inputs are downsampled to Rubin resolution (512x512) in Phase B.
 - Tiles without Euclid coverage automatically fall back to Rubin-only behavior.
 
-This Phase B training is the key bridge that makes downstream Rubin/Euclid alignment easier.
+### Current: v7 mixed resolution (`models/jaisp_foundation_v7.py`)
 
-### Experimental: v7 mixed resolution (`models/jaisp_foundation_v7.py`)
-
-`JAISPFoundationV7` keeps early Rubin, VIS, and NISP processing at native resolution, then fuses streams on a shared latent physical grid.
+`JAISPFoundationV7` is the active foundation path. It keeps Rubin, VIS, and NISP processing at native resolution throughout, then fuses streams on a shared latent physical grid. This avoids the v6 limitation where Euclid VIS (1050×1050, 0.1"/px) was force-downsampled to Rubin's 512×512 grid before entering the encoder.
 
 Key design choices:
 
-- Rubin, VIS, and NISP each have their own native-resolution branch depth before fusion.
-- Cross-stream fusion happens after resizing latent features to a common physical scale, not by resizing raw inputs to one image grid.
-- The decoder is target-aware and reconstructs back to the held-out band's native resolution.
-- The objective is still InformationMap-weighted L1 in noise-normalized units, so the learning signal stays close to `v6`.
-
-This is the architecture to try when we want to preserve more Euclid VIS detail for downstream astrometry and detection.
+- Rubin (2 stages), VIS (3 stages), and NISP (1 stage) each downsample independently to a common 0.8"/px latent scale before fusion.
+- Cross-stream fusion happens in latent space, not by resizing raw inputs to one pixel grid.
+- The decoder reconstructs back to the held-out band's native resolution (VIS → 1050×1050, NISP → 350×350, Rubin → 512×512).
+- Skip connections from each stream's pyramid are routed to the decoder at the closest matching physical scale.
+- No separate Phase A / Phase B: training is unified. Tiles with Euclid always use cross-instrument masking (`cross_instrument_prob=1.0`); Rubin-only tiles fall back to within-instrument prediction automatically.
+- The objective is the same InformationMap-weighted L1 as v6.
 
 ## Downstream Heads
 
@@ -98,7 +96,33 @@ See `models/photometry/README.md`.
 ### Foundation training
 
 ```bash
-# Phase A (Rubin only)
+# v7 mixed-resolution training (current path)
+python models/train_jaisp_foundation_v7.py \
+  --rubin_dir  data/rubin_tiles_ecdfs \
+  --euclid_dir data/euclid_tiles_ecdfs \
+  --output_dir models/checkpoints/jaisp_v7_baseline \
+  --hidden_ch 256 \
+  --transformer_depth 4 \
+  --transformer_heads 8 \
+  --fused_pixel_scale_arcsec 0.8 \
+  --n_targets_per_step 2 \
+  --accum_steps 8 \
+  --epochs 100 \
+  --warmup_epochs 8 \
+  --val_fraction 0.1 \
+  --vis_every_n_epochs 5 \
+  --cross_instrument_prob 1.0 \
+  --wandb_name v7_h256_d4_fused0.8
+
+# v7 resume from checkpoint
+python models/train_jaisp_foundation_v7.py \
+  --rubin_dir  data/rubin_tiles_ecdfs \
+  --euclid_dir data/euclid_tiles_ecdfs \
+  --output_dir models/checkpoints/jaisp_v7_baseline \
+  --resume     models/checkpoints/jaisp_v7_baseline/checkpoint_latest.pt \
+  --wandb_name v7_h256_d4_fused0.8
+
+# v6 Phase A (Rubin only, archived)
 python models/train_jaisp_foundation_v6.py \
   --rubin_dir data/rubin_tiles_ecdfs \
   --euclid_dir data/euclid_tiles_ecdfs \
@@ -106,7 +130,7 @@ python models/train_jaisp_foundation_v6.py \
   --cross_instrument_prob 0.0 \
   --epochs 60
 
-# Phase B (Rubin + Euclid, resume from Phase A)
+# v6 Phase B (resume from Phase A, archived)
 python models/train_jaisp_foundation_v6.py \
   --rubin_dir data/rubin_tiles_ecdfs \
   --euclid_dir data/euclid_tiles_ecdfs \
@@ -114,14 +138,6 @@ python models/train_jaisp_foundation_v6.py \
   --resume models/checkpoints/jaisp_v6/checkpoint_best.pt \
   --cross_instrument_prob 1.0 \
   --epochs 120
-
-# Experimental v7 mixed-resolution training
-python models/train_jaisp_foundation_v7.py \
-  --rubin_dir data/rubin_tiles_ecdfs \
-  --euclid_dir data/euclid_tiles_ecdfs \
-  --output_dir models/checkpoints/jaisp_v7 \
-  --cross_instrument_prob 1.0 \
-  --epochs 80
 ```
 
 ### Detection head training
@@ -163,8 +179,9 @@ python models/photometry/train_psf_net.py \
 
 ## Important Current Status Notes
 
-- `v6` remains the stable default foundation path.
-- `v7` is an experimental mixed-resolution path intended to test whether retaining native VIS structure improves downstream astrometry and detection.
+- `v7` is the active foundation path. `v6` is archived for reference.
+- The key motivation for v7: v6 Phase B force-downsampled Euclid VIS (0.1"/px) to Rubin's 512×512 grid, discarding the resolution advantage that makes VIS valuable for astrometry and deblending. v7 preserves VIS at native resolution end-to-end.
+- v7 has no separate Phase A / Phase B stages. Training is unified from epoch 1.
 - Detection labels are pseudo-labels (not a curated catalog), so detection metrics should be interpreted as bootstrap quality, not final science quality.
-- The detection module is new and intended as a foundation-aligned head that can later swap pseudo-labels for survey catalogs.
+- The detection and astrometry heads are currently built on v6 encoder weights and will need updating once a v7 checkpoint is trained.
 - This repository is an active research codebase. Architecture and training defaults evolve as new experiments land.

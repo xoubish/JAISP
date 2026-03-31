@@ -10,12 +10,14 @@ Phase B Euclid-downsampling assumption.
 """
 
 import sys
+import math
 from pathlib import Path
 from typing import Dict, List, Tuple
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 
 _HERE = Path(__file__).resolve().parent
 if str(_HERE) not in sys.path:
@@ -81,23 +83,33 @@ class StreamEncoder(nn.Module):
     def forward(self, x: torch.Tensor) -> List[torch.Tensor]:
         feats = [x]
         for stage in self.stages:
-            x = stage(x)
+            x = checkpoint(stage, x, use_reentrant=False)
             feats.append(x)
         return feats
 
 
 class DecoderStage(nn.Module):
-    """Interpolate to a target size, project channels, then refine."""
+    """Interpolate to a target size, fuse skip features, then refine."""
 
-    def __init__(self, in_ch: int, out_ch: int, num_bands: int, blocks: int = 2):
+    def __init__(self, in_ch: int, skip_ch: int, out_ch: int, num_bands: int, blocks: int = 2):
         super().__init__()
-        self.proj = nn.Conv2d(in_ch, out_ch, kernel_size=1)
+        self.up_proj = nn.Conv2d(in_ch, out_ch, kernel_size=1)
+        self.skip_proj = nn.Conv2d(skip_ch, out_ch, kernel_size=1)
         self.blocks = nn.Sequential(*[ConvNeXtBlock(out_ch) for _ in range(blocks)])
         self.film = FiLM(num_bands, out_ch)
 
-    def forward(self, x: torch.Tensor, band_idx: torch.Tensor, size: Tuple[int, int]) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        band_idx: torch.Tensor,
+        size: Tuple[int, int],
+        skip: torch.Tensor = None,
+    ) -> torch.Tensor:
         x = F.interpolate(x, size=size, mode="bilinear", align_corners=False)
-        x = self.proj(x)
+        x = self.up_proj(x)
+        if skip is not None:
+            skip = F.interpolate(skip, size=size, mode="bilinear", align_corners=False)
+            x = x + self.skip_proj(skip)
         x = self.blocks(x)
         return self.film(x, band_idx)
 
@@ -108,6 +120,7 @@ class TargetDecoder(nn.Module):
     def __init__(
         self,
         in_ch: int,
+        skip_ch: int,
         stage_channels: List[int],
         num_bands: int,
         blocks_per_stage: int = 2,
@@ -117,7 +130,7 @@ class TargetDecoder(nn.Module):
         cur_ch = in_ch
         for out_ch in stage_channels:
             stages.append(
-                DecoderStage(cur_ch, out_ch, num_bands=num_bands, blocks=blocks_per_stage)
+                DecoderStage(cur_ch, skip_ch, out_ch, num_bands=num_bands, blocks=blocks_per_stage)
             )
             cur_ch = out_ch
         self.stages = nn.ModuleList(stages)
@@ -126,11 +139,12 @@ class TargetDecoder(nn.Module):
             nn.Conv2d(cur_ch, 1, kernel_size=1),
         )
 
-    def forward(self, x: torch.Tensor, band_idx: torch.Tensor, target_hw: Tuple[int, int]) -> torch.Tensor:
+    def stage_sizes(self, bottleneck_hw: Tuple[int, int], target_hw: Tuple[int, int]) -> List[Tuple[int, int]]:
+        cur_h, cur_w = bottleneck_hw
         h_t, w_t = target_hw
-        cur_h, cur_w = x.shape[-2:]
+        sizes = []
         n_stages = len(self.stages)
-        for i, stage in enumerate(self.stages):
+        for i in range(n_stages):
             if i == n_stages - 1:
                 next_size = (h_t, w_t)
             else:
@@ -138,8 +152,26 @@ class TargetDecoder(nn.Module):
                     min(h_t, cur_h * 2),
                     min(w_t, cur_w * 2),
                 )
-            x = stage(x, band_idx, next_size)
+            sizes.append(next_size)
             cur_h, cur_w = next_size
+        return sizes
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        band_idx: torch.Tensor,
+        target_hw: Tuple[int, int],
+        skip_maps: List[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        h_t, w_t = target_hw
+        stage_sizes = self.stage_sizes(x.shape[-2:], (h_t, w_t))
+        if skip_maps is None:
+            skip_maps = [None] * len(stage_sizes)
+        for stage, next_size, skip in zip(self.stages, stage_sizes, skip_maps):
+            if self.training:
+                x = checkpoint(stage, x, band_idx, next_size, skip, use_reentrant=False)
+            else:
+                x = stage(x, band_idx, next_size, skip=skip)
         return self.out_head(x)
 
 
@@ -172,6 +204,17 @@ class JAISPMixedEncoderV7(nn.Module):
                 depth=STREAM_BRANCH_DEPTHS[stream],
                 blocks_per_stage=blocks_per_stage,
             )
+            for stream in STREAM_ORDER
+        })
+        self.skip_projs = nn.ModuleDict({
+            stream: nn.ModuleList([
+                nn.Sequential(
+                    nn.Conv2d(stem_ch if level == 0 else hidden_ch, hidden_ch, kernel_size=1),
+                    LayerNorm2d(hidden_ch),
+                    nn.GELU(),
+                )
+                for level in range(STREAM_BRANCH_DEPTHS[stream] + 1)
+            ])
             for stream in STREAM_ORDER
         })
         self.stream_embeddings = nn.Embedding(len(STREAM_ORDER), hidden_ch)
@@ -213,6 +256,54 @@ class JAISPMixedEncoderV7(nn.Module):
         w = max(1, int(round(sum(widths) / max(1, len(widths)))))
         return h, w
 
+    @staticmethod
+    def _stream_feature_scales(stream: str, n_levels: int) -> List[float]:
+        base = STREAM_PIXEL_SCALES[stream]
+        return [base * (2 ** level) for level in range(n_levels)]
+
+    @staticmethod
+    def _closest_scale_index(scales: List[float], desired_scale: float) -> int:
+        desired_scale = max(float(desired_scale), 1e-6)
+        return min(
+            range(len(scales)),
+            key=lambda idx: abs(math.log2(max(scales[idx], 1e-6) / desired_scale)),
+        )
+
+    def build_target_skips(
+        self,
+        stream_pyramids: Dict[str, List[torch.Tensor]],
+        target_band: str,
+        target_hw: Tuple[int, int],
+        stage_sizes: List[Tuple[int, int]],
+    ) -> List[torch.Tensor]:
+        target_stream = band_group(target_band)
+        target_scale = STREAM_PIXEL_SCALES[target_stream]
+        target_h, target_w = target_hw
+        skip_maps = []
+
+        for size in stage_sizes:
+            stage_h, stage_w = size
+            desired_scale_y = target_scale * (target_h / max(stage_h, 1))
+            desired_scale_x = target_scale * (target_w / max(stage_w, 1))
+            desired_scale = 0.5 * (desired_scale_y + desired_scale_x)
+
+            fused = []
+            for stream_idx, stream in enumerate(STREAM_ORDER):
+                pyramids = stream_pyramids.get(stream)
+                if not pyramids:
+                    continue
+                scales = self._stream_feature_scales(stream, len(pyramids))
+                level_idx = self._closest_scale_index(scales, desired_scale)
+                feat = self.skip_projs[stream][level_idx](pyramids[level_idx])
+                feat = F.interpolate(feat, size=size, mode="bilinear", align_corners=False)
+                feat = feat + self.stream_embeddings.weight[stream_idx].view(1, -1, 1, 1)
+                fused.append(feat)
+
+            skip = torch.stack(fused, dim=0).mean(dim=0) if fused else None
+            skip_maps.append(skip)
+
+        return skip_maps
+
     def forward(
         self,
         context_images: Dict[str, torch.Tensor],
@@ -226,6 +317,7 @@ class JAISPMixedEncoderV7(nn.Module):
 
         fused_hw = self._estimate_fused_hw(context_images)
         stream_maps = {}
+        stream_pyramids = {}
         stream_encoded = []
 
         for stream_idx, stream in enumerate(STREAM_ORDER):
@@ -234,6 +326,7 @@ class JAISPMixedEncoderV7(nn.Module):
                 continue
             x = torch.stack(feats, dim=0).mean(dim=0)
             pyramids = self.stream_encoders[stream](x)
+            stream_pyramids[stream] = pyramids
             latent = pyramids[-1]
             latent = F.interpolate(latent, size=fused_hw, mode="bilinear", align_corners=False)
             latent = latent + self.stream_embeddings.weight[stream_idx].view(1, -1, 1, 1)
@@ -257,6 +350,7 @@ class JAISPMixedEncoderV7(nn.Module):
         return {
             "bottleneck": bottleneck,
             "stream_maps": stream_maps,
+            "stream_pyramids": stream_pyramids,
             "fused_hw": fused_hw,
         }
 
@@ -290,9 +384,9 @@ class JAISPFoundationV7(nn.Module):
 
         num_bands = len(self.band_names)
         self.target_decoders = nn.ModuleDict({
-            "rubin": TargetDecoder(hidden_ch, [256, 128], num_bands, blocks_per_stage),
-            "vis": TargetDecoder(hidden_ch, [256, 128, 64], num_bands, blocks_per_stage),
-            "nisp": TargetDecoder(hidden_ch, [256, 128], num_bands, blocks_per_stage),
+            "rubin": TargetDecoder(hidden_ch, hidden_ch, [256, 128], num_bands, blocks_per_stage),
+            "vis": TargetDecoder(hidden_ch, hidden_ch, [256, 128, 64], num_bands, blocks_per_stage),
+            "nisp": TargetDecoder(hidden_ch, hidden_ch, [256, 128], num_bands, blocks_per_stage),
         })
 
         self._init_weights()
@@ -339,10 +433,19 @@ class JAISPFoundationV7(nn.Module):
             device=target_image.device,
         )
         target_stream = band_group(target_band)
-        pred = self.target_decoders[target_stream](
+        decoder = self.target_decoders[target_stream]
+        stage_sizes = decoder.stage_sizes(enc_out["bottleneck"].shape[-2:], target_image.shape[-2:])
+        skip_maps = self.encoder.build_target_skips(
+            enc_out["stream_pyramids"],
+            target_band,
+            target_image.shape[-2:],
+            stage_sizes,
+        )
+        pred = decoder(
             enc_out["bottleneck"],
             band_idx,
             target_image.shape[-2:],
+            skip_maps=skip_maps,
         )
 
         target_norm = (target_image / (target_rms + 1e-10)).clamp(-10.0, 100.0)

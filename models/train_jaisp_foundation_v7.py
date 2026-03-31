@@ -26,6 +26,29 @@ except ImportError:
     wandb = None
 
 
+def pearson_r(a: np.ndarray, b: np.ndarray) -> float:
+    if len(a) < 2:
+        return float("nan")
+    c = np.corrcoef(a.ravel(), b.ravel())
+    return float(c[0, 1])
+
+
+def info_weighted_mask(info: np.ndarray, top_frac: float = 0.10) -> np.ndarray:
+    thresh = np.nanpercentile(info, (1.0 - top_frac) * 100.0)
+    return info >= thresh
+
+
+def available_band_pool(sample: dict) -> dict:
+    pool = {}
+    pool.update(sample.get("rubin", {}))
+    pool.update(sample.get("euclid", {}))
+    return pool
+
+
+def short_band_name(band: str) -> str:
+    return band.split("_", 1)[1]
+
+
 class JAISPTrainerV7:
     def __init__(
         self,
@@ -176,7 +199,8 @@ class JAISPTrainerV7:
             if batch is None:
                 continue
 
-            step_loss = torch.tensor(0.0, device=self.device)
+            step_loss_val = 0.0
+            n_tgts = len(batch["targets"])
             for tgt in batch["targets"]:
                 out = self.model(
                     batch["ctx_img"],
@@ -185,11 +209,11 @@ class JAISPTrainerV7:
                     tgt["image"],
                     tgt["rms"],
                 )
-                step_loss = step_loss + out["loss"]
+                (out["loss"] / (n_tgts * self.accum_steps)).backward()
+                step_loss_val += float(out["loss"].detach())
                 band_losses[tgt["band"]].append(float(out["loss"].detach()))
 
-            step_loss = step_loss / len(batch["targets"])
-            (step_loss / self.accum_steps).backward()
+            step_loss_val /= n_tgts
             accum_count += 1
 
             if accum_count >= self.accum_steps:
@@ -201,7 +225,7 @@ class JAISPTrainerV7:
                 n_steps += 1
                 self.global_step += 1
 
-                loss_val = float(step_loss.detach())
+                loss_val = step_loss_val
                 epoch_loss += loss_val
                 if self.use_wandb:
                     wandb.log({
@@ -251,45 +275,159 @@ class JAISPTrainerV7:
             return
 
         self.model.eval()
-        sample = None
-        rng = np.random.RandomState(epoch + 123)
-        for tile_idx in list(self.val_indices)[:10]:
+        raw_sample = None
+        pool = None
+        for tile_idx in list(self.val_indices)[:25]:
             candidate = self.full_dataset[tile_idx]
-            sample = self._prepare_batch(candidate, rng, force_phase_b=candidate.get("has_euclid", False))
-            if sample is not None:
+            candidate_pool = available_band_pool(candidate)
+            if len(candidate_pool) < 2:
+                continue
+            if pool is None or len(candidate_pool) > len(pool):
+                raw_sample = candidate
+                pool = candidate_pool
+            if pool is not None and len(pool) == len(ALL_BANDS):
                 break
-        if sample is None:
+
+        if raw_sample is None or pool is None:
             return
 
-        tgt = sample["targets"][0]
-        out = self.model(
-            sample["ctx_img"],
-            sample["ctx_rms"],
-            tgt["band"],
-            tgt["image"],
-            tgt["rms"],
-        )
+        ordered_bands = [b for b in ALL_BANDS if b in pool]
+        vis_rng = np.random.RandomState(epoch + 123)
+        panel_data = []
+        scatter_truth_all, scatter_pred_all = [], []
+        pearsons, maes, std_ratios = [], [], []
 
-        truth = out["target_norm"][0, 0].cpu().numpy()
-        pred = out["pred"][0, 0].cpu().numpy()
-        resid = pred - truth
+        log_dict = {"epoch": epoch + 1}
+        fused_hw_summary = None
 
-        lo = float(np.percentile(truth, 1))
-        hi = float(np.percentile(truth, 99))
-        lim = max(np.percentile(np.abs(resid), 99), 1e-3)
+        for target_band in ordered_bands:
+            context_bands = [b for b in ordered_bands if b != target_band]
+            if not context_bands:
+                continue
 
-        fig, axes = plt.subplots(1, 3, figsize=(12, 4))
-        axes[0].imshow(truth, origin="lower", cmap="gray", vmin=lo, vmax=hi)
-        axes[0].set_title(f"Truth {tgt['band']}")
-        axes[1].imshow(pred, origin="lower", cmap="gray", vmin=lo, vmax=hi)
-        axes[1].set_title(f"Pred {tgt['band']}")
-        axes[2].imshow(resid, origin="lower", cmap="coolwarm", vmin=-lim, vmax=lim)
-        axes[2].set_title(f"Residual  fused={out['fused_hw']}")
-        for ax in axes:
-            ax.axis("off")
-        plt.tight_layout()
-        wandb.log({"vis/reconstruction": wandb.Image(fig), "epoch": epoch + 1})
-        plt.close(fig)
+            ctx_img = {b: pool[b]["image"].unsqueeze(0).to(self.device) for b in context_bands}
+            ctx_rms = {b: pool[b]["rms"].unsqueeze(0).to(self.device) for b in context_bands}
+            tgt_img = pool[target_band]["image"].unsqueeze(0).to(self.device)
+            tgt_rms = pool[target_band]["rms"].unsqueeze(0).to(self.device)
+
+            out = self.model(ctx_img, ctx_rms, target_band, tgt_img, tgt_rms)
+
+            truth = out["target_norm"][0, 0].cpu().numpy()
+            pred = out["pred"][0, 0].cpu().numpy()
+            resid = pred - truth
+            info = out["info_weights"][0, 0].cpu().numpy()
+            fused_hw_summary = out["fused_hw"]
+
+            bright = info_weighted_mask(info, top_frac=0.10)
+            corr = float("nan")
+            mae = float("nan")
+            std_ratio = float("nan")
+            if bright.sum() > 10:
+                t_bright = truth[bright]
+                p_bright = pred[bright]
+                corr = pearson_r(t_bright, p_bright)
+                mae = float(np.mean(np.abs(p_bright - t_bright)))
+                std_ratio = float(np.std(p_bright) / max(np.std(t_bright), 1e-6))
+                pearsons.append(corr)
+                maes.append(mae)
+                std_ratios.append(std_ratio)
+
+                n = min(2000, len(t_bright))
+                idx = vis_rng.choice(len(t_bright), n, replace=False)
+                scatter_truth_all.append(t_bright[idx])
+                scatter_pred_all.append(p_bright[idx])
+
+            panel_data.append({
+                "band": target_band,
+                "truth": truth,
+                "pred": pred,
+                "resid": resid,
+                "info": info,
+                "corr": corr,
+                "mae": mae,
+                "std_ratio": std_ratio,
+            })
+            log_dict[f"vis/band_{target_band}_pearson_r_bright"] = corr
+            log_dict[f"vis/band_{target_band}_mae_bright"] = mae
+            log_dict[f"vis/band_{target_band}_std_ratio_bright"] = std_ratio
+
+        if panel_data:
+            n_cols = len(panel_data)
+            fig, axes = plt.subplots(4, n_cols, figsize=(3.2 * n_cols, 11), squeeze=False)
+            row_labels = [
+                "Truth (noise units)",
+                "Prediction",
+                "Residual",
+                "Info weights",
+            ]
+            for col, panel in enumerate(panel_data):
+                truth = panel["truth"]
+                pred = panel["pred"]
+                resid = panel["resid"]
+                info = panel["info"]
+
+                lo = float(np.nanpercentile(truth, 1))
+                hi = float(np.nanpercentile(truth, 99))
+                lim = max(float(np.nanpercentile(np.abs(resid), 99)), 1e-3)
+                info_hi = max(float(np.nanpercentile(info, 99.5)), float(info.max()), 1e-6)
+                arrays = [truth, pred, resid, info]
+                cmaps = ["gray", "gray", "RdBu_r", "inferno"]
+                vranges = [(lo, hi), (lo, hi), (-lim, lim), (0.0, info_hi)]
+
+                title = short_band_name(panel["band"])
+                if np.isfinite(panel["corr"]):
+                    title = (
+                        f"{title}\n"
+                        f"r={panel['corr']:.2f}  "
+                        f"mae={panel['mae']:.2f}  "
+                        f"std={panel['std_ratio']:.2f}"
+                    )
+
+                for row, (arr, cmap, vr) in enumerate(zip(arrays, cmaps, vranges)):
+                    ax = axes[row, col]
+                    ax.imshow(arr, origin="lower", cmap=cmap, vmin=vr[0], vmax=vr[1])
+                    ax.axis("off")
+                    if col == 0:
+                        ax.set_ylabel(row_labels[row], fontsize=9)
+                    if row == 0:
+                        ax.set_title(title, fontsize=10, pad=4)
+
+            tile_id = raw_sample.get("tile_id", "unknown")
+            fused_txt = fused_hw_summary if fused_hw_summary is not None else "?"
+            fig.suptitle(
+                f"v7 reconstruction diagnostics | tile={tile_id} | bands={len(panel_data)} | fused={fused_txt}",
+                fontsize=12,
+                y=0.995,
+            )
+            plt.tight_layout(rect=(0, 0, 1, 0.97))
+            log_dict["vis/all_band_grid"] = wandb.Image(fig)
+            plt.close(fig)
+
+        if scatter_truth_all:
+            t_cat = np.concatenate(scatter_truth_all)
+            p_cat = np.concatenate(scatter_pred_all)
+            fig, ax = plt.subplots(figsize=(5, 5))
+            ax.hexbin(t_cat, p_cat, gridsize=60, cmap="viridis", mincnt=1)
+            lim = max(float(np.abs(t_cat).max()), float(np.abs(p_cat).max()))
+            lim = min(lim, 30.0)
+            ax.plot([-lim, lim], [-lim, lim], "r--", lw=1)
+            pooled_r = pearson_r(t_cat, p_cat)
+            ax.set_xlabel("Truth (noise units)")
+            ax.set_ylabel("Prediction (noise units)")
+            ax.set_title(f"Bright-pixel pred vs truth | pooled r = {pooled_r:.3f}")
+            plt.tight_layout()
+            log_dict["vis/scatter_pred_vs_truth"] = wandb.Image(fig)
+            log_dict["vis/pearson_r_all"] = pooled_r
+            plt.close(fig)
+
+        if pearsons:
+            log_dict["vis/pearson_r_mean"] = float(np.nanmean(pearsons))
+        if maes:
+            log_dict["vis/mae_bright_mean"] = float(np.nanmean(maes))
+        if std_ratios:
+            log_dict["vis/std_ratio_bright_mean"] = float(np.nanmean(std_ratios))
+
+        wandb.log(log_dict)
 
     def _save_checkpoint(self, epoch: int, tag: str = "latest") -> None:
         ckpt = {

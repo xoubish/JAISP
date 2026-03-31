@@ -1,9 +1,9 @@
 # JAISP Foundation Models
 
-This directory now contains two foundation-model tracks:
+This directory contains two foundation-model tracks:
 
-- `JAISPFoundationV6`: stable single-grid MAE where Phase B downsamples Euclid to Rubin resolution before fusion.
-- `JAISPFoundationV7`: experimental mixed-resolution MAE with native-resolution Rubin/VIS/NISP branches and late latent fusion.
+- `JAISPFoundationV7`: **current active path** — mixed-resolution MAE with native-resolution Rubin/VIS/NISP branches and late latent fusion. No separate Phase A/B.
+- `JAISPFoundationV6`: archived single-grid MAE where Phase B downsampled Euclid to Rubin resolution before fusion.
 
 Both models learn to reconstruct held-out bands at pixel precision from the remaining context bands.
 
@@ -77,29 +77,28 @@ Phase B encodes cross-instrument spatial correspondence directly into the BandSt
 High-level flow:
 
 ```
-Rubin bands (512x512, 0.2"/px)  -> per-band stems -> Rubin branch  -> latent resize
-VIS band   (~1050x1050, 0.1"/px) -> per-band stem  -> VIS branch    -> latent resize
-NISP bands (~350x350, 0.3"/px)   -> per-band stems -> NISP branch   -> latent resize
+Rubin bands (512x512, 0.2"/px)   -> per-band stems -> Rubin branch (2 stages) -> latent @ ~0.8"/px
+VIS band   (~1050x1050, 0.1"/px) -> per-band stem  -> VIS branch   (3 stages) -> latent @ ~0.8"/px
+NISP bands (~350x350, 0.3"/px)   -> per-band stems -> NISP branch  (1 stage)  -> latent @ ~0.6"/px
 
-Shared latent physical grid
-  -> stream mean fusion + stream embeddings
-  -> transformer bottleneck
-  -> target-stream decoder
+Shared latent physical grid (~130x130 tokens at default 0.8"/px fused scale)
+  -> stream mean fusion + learned stream identity embeddings
+  -> transformer bottleneck (4 layers, 8 heads, sinusoidal 2D pos embeddings)
+  -> target-stream TargetDecoder with pyramid skip connections
   -> native-resolution reconstruction of the held-out band
+     Rubin -> 512x512, VIS -> 1050x1050, NISP -> 350x350
 ```
 
 Design choices:
 
-- Rubin, VIS, and NISP use different pre-fusion branch depths so they reach roughly comparable physical latent scales before fusion.
-- Fusion happens in latent space, not by forcing raw images onto one input pixel grid.
-- The decoder reconstructs to the target band's native size, so VIS can stay VIS-scale and NISP can stay NISP-scale.
-- The loss stays the same InformationMap-weighted L1 objective as v6, so the training signal is comparable.
+- Branch depth differs per instrument so all streams arrive at ~0.8"/px before fusion.
+- Fusion happens in latent space after physical-scale alignment, not by resizing raw inputs.
+- `build_target_skips` selects the pyramid level whose physical scale best matches each decoder stage, fusing across all streams.
+- Learned stream embeddings let the transformer distinguish Rubin / VIS / NISP feature statistics.
+- No separate Phase A / Phase B: training is unified. Tiles with Euclid always use cross-instrument masking; Rubin-only tiles fall back to within-instrument prediction automatically.
+- The loss is the same InformationMap-weighted L1 as v6.
 
-Current status:
-
-- `v7` is experimental.
-- There is a training entrypoint, but there is not yet a dedicated `eval_foundation_v7.py`.
-- The main downstream question is whether retaining native VIS structure improves astrometry and dense detection.
+Why this matters: v6 Phase B force-downsampled VIS to 512×512 before encoding, losing the 2× resolution advantage that makes VIS useful for astrometry and deblending. v7 preserves it end-to-end.
 
 ---
 
@@ -131,7 +130,33 @@ The main representation design choices were made to support detection, astrometr
 ## Quick Start
 
 ```bash
-# v6 Phase A
+# v7 mixed-resolution training (current path)
+python train_jaisp_foundation_v7.py \
+  --rubin_dir  ../data/rubin_tiles_ecdfs \
+  --euclid_dir ../data/euclid_tiles_ecdfs \
+  --output_dir ./checkpoints/jaisp_v7_baseline \
+  --hidden_ch 256 \
+  --transformer_depth 4 \
+  --transformer_heads 8 \
+  --fused_pixel_scale_arcsec 0.8 \
+  --n_targets_per_step 2 \
+  --accum_steps 8 \
+  --epochs 100 \
+  --warmup_epochs 8 \
+  --val_fraction 0.1 \
+  --vis_every_n_epochs 5 \
+  --cross_instrument_prob 1.0 \
+  --wandb_name v7_h256_d4_fused0.8
+
+# v7 resume from checkpoint
+python train_jaisp_foundation_v7.py \
+  --rubin_dir  ../data/rubin_tiles_ecdfs \
+  --euclid_dir ../data/euclid_tiles_ecdfs \
+  --output_dir ./checkpoints/jaisp_v7_baseline \
+  --resume     ./checkpoints/jaisp_v7_baseline/checkpoint_latest.pt \
+  --wandb_name v7_h256_d4_fused0.8
+
+# v6 Phase A (archived)
 python train_jaisp_foundation_v6.py \
   --rubin_dir  ../data/rubin_tiles_ecdfs \
   --euclid_dir ../data/euclid_tiles_ecdfs \
@@ -139,7 +164,7 @@ python train_jaisp_foundation_v6.py \
   --cross_instrument_prob 0.0 \
   --epochs 60
 
-# v6 Phase B (resume from Phase A checkpoint)
+# v6 Phase B (resume from Phase A, archived)
 python train_jaisp_foundation_v6.py \
   --rubin_dir  ../data/rubin_tiles_ecdfs \
   --euclid_dir ../data/euclid_tiles_ecdfs \
@@ -148,19 +173,11 @@ python train_jaisp_foundation_v6.py \
   --cross_instrument_prob 1.0 \
   --epochs 120
 
-# v6 Evaluate
+# v6 Evaluate (archived)
 python eval_foundation_v6.py \
   --checkpoint ./checkpoints/jaisp_v6_phaseB/checkpoint_best.pt \
   --rubin_dir  ../data/rubin_tiles_ecdfs \
   --euclid_dir ../data/euclid_tiles_ecdfs
-
-# v7 Experimental mixed-resolution training
-python train_jaisp_foundation_v7.py \
-  --rubin_dir  ../data/rubin_tiles_ecdfs \
-  --euclid_dir ../data/euclid_tiles_ecdfs \
-  --output_dir ./checkpoints/jaisp_v7 \
-  --cross_instrument_prob 1.0 \
-  --epochs 80
 ```
 
 ---
