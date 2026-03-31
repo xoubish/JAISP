@@ -117,13 +117,19 @@ The main representation design choices were made to support detection, astrometr
 
 | File | Description |
 |------|-------------|
-| `jaisp_foundation_v6.py` | Model definition: all components + `create_optimizer` / `create_scheduler` |
-| `jaisp_dataset_v6.py` | `JAISPDatasetV6`, `sample_context_target` (Phase A), `sample_context_target_phaseB` (Phase B), `make_loader_v6` |
-| `train_jaisp_foundation_v6.py` | `JAISPTrainerV6` training loop with W&B visualization |
-| `eval_foundation_v6.py` | Three evaluation checks: reconstruction table, spatial precision, per-band grid |
-| `jaisp_foundation_v7.py` | Experimental mixed-resolution foundation model with late latent fusion |
-| `jaisp_dataset_v7.py` | Mixed-resolution Phase B sampler that keeps Euclid bands native |
+| `jaisp_foundation_v7.py` | Mixed-resolution foundation model with late latent fusion |
+| `jaisp_dataset_v7.py` | Mixed-resolution sampler that keeps Euclid bands native |
 | `train_jaisp_foundation_v7.py` | Training entrypoint for `JAISPFoundationV7` |
+| `jaisp_foundation_v6.py` | v6 model primitives — **kept as library**, imported by v7 |
+| `jaisp_dataset_v6.py` | v6 dataset — **kept as library**, imported by v7 and downstream heads |
+
+Archived in `older_architectures/`:
+
+| File | Notes |
+|------|-------|
+| `train_jaisp_foundation_v6.py` | v6 training script (Phase A/B, single-grid) |
+| `eval_foundation_v6.py` | v6 eval (reconstruction table, spatial precision, band grid) |
+| `testing_model.ipynb` | v5 JEPA diagnostic notebook |
 
 ---
 
