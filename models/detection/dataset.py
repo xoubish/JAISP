@@ -1,8 +1,8 @@
 """
-TileDetectionDataset: wraps JAISPDatasetV6 and adds pseudo-label source detection.
+TileDetectionDataset: tile loader with pseudo-label source detection.
 
 Each item returns:
-    images    : {band_name: [1, H, W]}  — same format as JAISPEncoderV6 expects
+    images    : {band_name: [1, H, W]}
     rms       : {band_name: [1, H, W]}
     centroids : [M, 2]  float32  (x, y) normalised to [0, 1]
     classes   : [M]     int64    0=star, 1=galaxy
@@ -29,7 +29,7 @@ for _p in (_HERE, _MODELS):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
-from jaisp_foundation_v6 import RUBIN_BANDS, EUCLID_BANDS, ALL_BANDS
+from jaisp_foundation_v7 import RUBIN_BANDS, EUCLID_BANDS, ALL_BANDS
 from jaisp_dataset_v6 import JAISPDatasetV6
 from astrometry2.source_matching import detect_sources, build_detection_image
 
@@ -122,9 +122,9 @@ class TileDetectionDataset(Dataset):
         self.use_all_bands = use_all_bands and (euclid_dir is not None)
         self.bands        = ALL_BANDS if self.use_all_bands else RUBIN_BANDS
 
-        # Reuse JAISPDatasetV6 for consistent tile loading + augmentation.
-        # euclid_dir is required by JAISPDatasetV6; fall back to rubin_dir
-        # (tiles without Euclid will simply have has_euclid=False).
+        # Use JAISPDatasetV6 as the tile loader (kept as library for V7 downstream use).
+        # euclid_dir falls back to rubin_dir when not provided; tiles without
+        # matching Euclid files will have has_euclid=False.
         self._base = JAISPDatasetV6(
             rubin_dir=rubin_dir,
             euclid_dir=euclid_dir or rubin_dir,
@@ -135,9 +135,9 @@ class TileDetectionDataset(Dataset):
         return len(self._base)
 
     def __getitem__(self, idx: int) -> dict:
-        item = self._base[idx]   # uses JAISPDatasetV6 format
+        item = self._base[idx]
 
-        # Build per-band image/rms dicts in JAISPEncoderV6 format
+        # Build per-band image/rms dicts
         images: dict = {}
         rms:    dict = {}
         rubin_img_np = None

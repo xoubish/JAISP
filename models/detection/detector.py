@@ -1,13 +1,14 @@
 """
-JaispDetector: DETR-style source detection on top of the JAISP v6 MAE encoder.
+JaispDetector: DETR-style source detection on top of the JAISP V7 MAE encoder.
 
 Architecture
 ------------
-  JAISPEncoderV6 (frozen)
+  JAISPEncoderWrapper (frozen JAISPFoundationV7)
       input : {band_name: [B, 1, H, W]} images + rms dicts
-      output: bottleneck [B, 512, H/8, W/8]
+      output: bottleneck [B, encoder_dim, h, w]
+               encoder_dim = hidden_ch (default 256), h/w from fused physical scale
   Feature projection + 2D sinusoidal positional encoding
-      → [HW/64, B, d_model]
+      → [h*w, B, d_model]
   Transformer decoder  (N_q learned object queries)
       → [N_q, B, d_model]
   Prediction heads
@@ -18,17 +19,13 @@ Architecture
 
 Training uses Hungarian matching (like DETR) between predicted and GT positions.
 
-Astrometry connection
----------------------
-Because JAISPEncoderV6 sees all Rubin+Euclid bands jointly, predicted centroids
-are already in a common reference frame — the decoder learns cross-band alignment
-implicitly, replacing the classical concordance step for detection.
-
 Usage
 -----
-    from jaisp_foundation_v6 import JAISPFoundationV6
-    foundation = JAISPFoundationV6.from_checkpoint('checkpoints/mae_v6_best.pt')
-    detector = JaispDetector(foundation.encoder, num_queries=300)
+    from jaisp_foundation_v7 import JAISPFoundationV7
+    model = JAISPFoundationV7(...)
+    model.load_state_dict(ckpt['model'])
+    encoder = JAISPEncoderWrapper(model, freeze=True)
+    detector = JaispDetector(encoder, num_queries=300, encoder_dim=256)
 
     # batch from TileDetectionDataset
     out = detector(batch['images'], batch['rms'])
@@ -98,8 +95,8 @@ def _sinusoidal_2d(h: int, w: int, d_model: int, device: torch.device) -> torch.
 
 class _StubEncoder(nn.Module):
     """
-    3-layer CNN that mimics JAISPEncoderV6 output shape [B, 512, H/8, W/8].
-    Replace with the real encoder for production use.
+    3-layer CNN stub that produces a bottleneck tensor [B, 512, H/8, W/8].
+    Used for smoke tests when no V7 checkpoint is available.
     """
     def __init__(self, in_channels: int = 6):
         super().__init__()
@@ -125,12 +122,12 @@ class _StubEncoder(nn.Module):
 
 class JAISPEncoderWrapper(nn.Module):
     """
-    Thin wrapper around JAISPEncoderV6 that returns just the bottleneck tensor.
+    Thin wrapper that calls JAISPFoundationV7.encode() and returns the bottleneck tensor.
 
     Parameters
     ----------
-    encoder       : JAISPEncoderV6 instance
-    freeze        : disable gradients through the encoder
+    encoder : JAISPFoundationV7 instance
+    freeze  : disable gradients through the encoder
     """
 
     def __init__(self, encoder: nn.Module, freeze: bool = True):
@@ -149,8 +146,8 @@ class JAISPEncoderWrapper(nn.Module):
             p.requires_grad for p in self.encoder.parameters()
         ) else torch.enable_grad()
         with grad_ctx:
-            out = self.encoder(images, rms)
-        return out['bottleneck']           # [B, 512, H/8, W/8]
+            out = self.encoder.encode(images, rms)
+        return out['bottleneck']
 
 
 # ---------------------------------------------------------------------------
@@ -167,7 +164,7 @@ N_CLASSES = len(SOURCE_CLASSES)
 
 class JaispDetector(nn.Module):
     """
-    DETR-style source detector built on JAISPEncoderV6 features.
+    DETR-style source detector built on JAISPFoundationV7 features.
 
     Parameters
     ----------

@@ -1,23 +1,23 @@
 """
-Train JaispDetector on top of the frozen JAISPEncoderV6.
+Train JaispDetector on top of a frozen JAISPFoundationV7 encoder.
 
-Phase 1 (default): freeze encoder, train decoder + heads only (~10M params).
+Phase 1 (default): freeze encoder, train decoder + heads only.
 Phase 2 (--finetune_encoder): unfreeze encoder for end-to-end fine-tuning.
 
 Usage
 -----
-    # With MAE v6 checkpoint (recommended)
     python detection/train_detection.py \
         --rubin_dir    ../data/rubin_tiles_ecdfs \
-        --encoder_ckpt ../checkpoints/jaisp_v6_phaseB2/checkpoint_best.pt \
-        --out          ../checkpoints/detector_v1.pt \
+        --euclid_dir   ../data/euclid_tiles_ecdfs \
+        --encoder_ckpt ../checkpoints/jaisp_v7_baseline/checkpoint_best.pt \
+        --out          ../checkpoints/detector_v7.pt \
         --epochs 50 --wandb_project jaisp-detection
 
-    # Without MAE checkpoint (stub CNN encoder, for quick testing)
+    # Without MAE checkpoint (stub CNN, quick sanity check)
     python detection/train_detection.py \
         --rubin_dir ../data/rubin_tiles_ecdfs \
-        --out       ../checkpoints/detector_v1.pt \
-        --epochs 50
+        --out       ../checkpoints/detector_stub.pt \
+        --epochs 10
 """
 
 import argparse
@@ -36,7 +36,7 @@ for _p in (_HERE, _MODELS):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
-from jaisp_foundation_v6 import JAISPFoundationV6, ALL_BANDS, RUBIN_BANDS
+from jaisp_foundation_v7 import JAISPFoundationV7, ALL_BANDS, RUBIN_BANDS
 from detection.detector import JaispDetector, JAISPEncoderWrapper, _StubEncoder
 from detection.matcher  import DetectionLoss
 from detection.dataset  import TileDetectionDataset, collate_fn
@@ -50,28 +50,45 @@ def _load_encoder(
     encoder_ckpt: Optional[str],
     device: torch.device,
     freeze: bool = True,
-) -> torch.nn.Module:
+) -> tuple:
     """
-    Load JAISPEncoderV6 from a JAISPFoundationV6 checkpoint and wrap it.
+    Load JAISPFoundationV7 from a checkpoint and wrap it for detection.
     Falls back to stub CNN if no checkpoint is provided.
+
+    Returns (wrapper, encoder_dim).
     """
     if encoder_ckpt is None:
         print('  [warn] No --encoder_ckpt given — using stub CNN encoder.')
         stub = _StubEncoder(in_channels=len(RUBIN_BANDS)).to(device)
-        return stub
+        return stub, 512
 
-    print(f'  Loading MAE v6 encoder from {encoder_ckpt}')
+    print(f'  Loading v7 encoder from {encoder_ckpt}')
     ckpt = torch.load(encoder_ckpt, map_location='cpu', weights_only=False)
+    cfg  = ckpt.get('config', {})
 
-    # Reconstruct the full foundation model to get the right encoder config,
-    # then extract only the encoder — we don't need the decoder at all.
-    model = JAISPFoundationV6(band_names=ALL_BANDS)
-    model.load_state_dict(ckpt['model'])
+    model = JAISPFoundationV7(
+        band_names               = cfg.get('band_names', ALL_BANDS),
+        stem_ch                  = cfg.get('stem_ch', 64),
+        hidden_ch                = cfg.get('hidden_ch', 256),
+        blocks_per_stage         = cfg.get('blocks_per_stage', 2),
+        transformer_depth        = cfg.get('transformer_depth', 4),
+        transformer_heads        = cfg.get('transformer_heads', 8),
+        fused_pixel_scale_arcsec = cfg.get('fused_pixel_scale_arcsec', 0.8),
+    )
+    missing, unexpected = model.load_state_dict(ckpt['model'], strict=False)
+    encoder_dim = cfg.get('hidden_ch', 256)
+    if missing:
+        # skip_projs and target_decoders are not used for encoding — safe to ignore
+        enc_missing = [k for k in missing if not k.startswith(('encoder.skip_projs', 'target_decoders'))]
+        if enc_missing:
+            print(f'  [warn] Missing encoder keys: {enc_missing}')
+    if unexpected:
+        print(f'  [warn] Unexpected keys (old arch): {len(unexpected)} keys ignored')
 
-    wrapper = JAISPEncoderWrapper(model.encoder, freeze=freeze).to(device)
-    n_enc = sum(p.numel() for p in model.encoder.parameters())
-    print(f'  Encoder loaded ({n_enc/1e6:.1f}M params, frozen={freeze})')
-    return wrapper
+    wrapper = JAISPEncoderWrapper(model, freeze=freeze).to(device)
+    n_enc = sum(p.numel() for p in wrapper.encoder.parameters())
+    print(f'  v7 encoder loaded ({n_enc/1e6:.1f}M params, frozen={freeze}, encoder_dim={encoder_dim})')
+    return wrapper, encoder_dim
 
 
 # ---------------------------------------------------------------------------
@@ -159,9 +176,8 @@ def train(args):
     print(f'Train: {n_tr} tiles   Val: {n_val} tiles')
 
     # Encoder + detector
-    encoder = _load_encoder(args.encoder_ckpt, device,
-                            freeze=not args.finetune_encoder)
-    encoder_dim = 512   # JAISPEncoderV6 bottleneck channels
+    encoder, encoder_dim = _load_encoder(args.encoder_ckpt, device,
+                                         freeze=not args.finetune_encoder)
 
     model = JaispDetector(
         encoder=encoder,
@@ -273,7 +289,7 @@ if __name__ == '__main__':
     p.add_argument('--rubin_dir',        required=True)
     p.add_argument('--euclid_dir',       default=None)
     p.add_argument('--encoder_ckpt',     default=None,
-                   help='JAISPFoundationV6 checkpoint; omit to use stub encoder')
+                   help='JAISPFoundationV7 checkpoint; omit to use stub encoder')
     p.add_argument('--out',              default='../checkpoints/detector_v1.pt')
     p.add_argument('--epochs',           type=int,   default=50)
     p.add_argument('--batch_size',       type=int,   default=4)
