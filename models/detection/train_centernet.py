@@ -274,7 +274,8 @@ if __name__ == '__main__':
     p.add_argument('--encoder_ckpt',     default=None)
     p.add_argument('--out',              default='../checkpoints/centernet_v7.pt')
     p.add_argument('--epochs',           type=int,   default=100)
-    p.add_argument('--batch_size',       type=int,   default=4)
+    p.add_argument('--batch_size',       type=int,   default=2,
+                   help='Batch size (default 2; Euclid tiles are large)')
     p.add_argument('--lr',               type=float, default=1e-4)
     p.add_argument('--nsig',             type=float, default=3.0,
                    help='Detection significance for pseudo-labels')

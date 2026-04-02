@@ -34,12 +34,12 @@ def render_heatmap_targets(
     mask = torch.zeros(B, 1, feat_h, feat_w, device=device)
     n_src = torch.zeros(B, device=device)
 
-    # Pre-compute coordinate grids
+    # Pre-compute full coordinate grids [H, W]
     gy = torch.arange(feat_h, device=device, dtype=torch.float32)
     gx = torch.arange(feat_w, device=device, dtype=torch.float32)
     grid_y, grid_x = torch.meshgrid(gy, gx, indexing='ij')  # [H, W]
 
-    radius = int(3 * sigma + 1)  # Gaussian clamp radius
+    inv_2sig2 = 1.0 / (2.0 * sigma ** 2)
 
     for b in range(B):
         pts = gt_centroids[b]  # [M, 2] normalized (x, y)
@@ -47,41 +47,31 @@ def render_heatmap_targets(
             continue
 
         pts = pts.to(device=device, dtype=torch.float32)
-        n_src[b] = pts.shape[0]
+        M = pts.shape[0]
+        n_src[b] = M
 
         # Convert normalized coords to feature-map pixel coords
         cx = pts[:, 0] * (feat_w - 1)   # [M]
         cy = pts[:, 1] * (feat_h - 1)   # [M]
 
-        # Integer positions and fractional offsets
+        # Vectorized Gaussian rendering: broadcast [M, H, W]
+        # Distance from each source to each grid point
+        dx_grid = grid_x.unsqueeze(0) - cx.view(M, 1, 1)   # [M, H, W]
+        dy_grid = grid_y.unsqueeze(0) - cy.view(M, 1, 1)   # [M, H, W]
+        gauss_all = torch.exp(-(dx_grid ** 2 + dy_grid ** 2) * inv_2sig2)  # [M, H, W]
+
+        # Element-wise max across all sources (CenterNet convention)
+        hm[b, 0] = gauss_all.max(dim=0).values  # [H, W]
+
+        # Offset targets at integer positions
         cx_int = cx.round().long().clamp(0, feat_w - 1)
         cy_int = cy.round().long().clamp(0, feat_h - 1)
-        dx = cx - cx_int.float()
-        dy = cy - cy_int.float()
+        dx_frac = cx - cx_int.float()
+        dy_frac = cy - cy_int.float()
 
-        for i in range(pts.shape[0]):
-            # Clamp Gaussian to a local window for efficiency
-            y_lo = max(0, cy_int[i].item() - radius)
-            y_hi = min(feat_h, cy_int[i].item() + radius + 1)
-            x_lo = max(0, cx_int[i].item() - radius)
-            x_hi = min(feat_w, cx_int[i].item() + radius + 1)
-
-            local_y = grid_y[y_lo:y_hi, x_lo:x_hi]
-            local_x = grid_x[y_lo:y_hi, x_lo:x_hi]
-
-            gauss = torch.exp(
-                -((local_x - cx[i]) ** 2 + (local_y - cy[i]) ** 2)
-                / (2.0 * sigma ** 2)
-            )
-            # Element-wise max (CenterNet convention: overlapping sources)
-            hm[b, 0, y_lo:y_hi, x_lo:x_hi] = torch.max(
-                hm[b, 0, y_lo:y_hi, x_lo:x_hi], gauss
-            )
-
-            # Offset target at the integer position
-            off[b, 0, cy_int[i], cx_int[i]] = dx[i]
-            off[b, 1, cy_int[i], cx_int[i]] = dy[i]
-            mask[b, 0, cy_int[i], cx_int[i]] = 1.0
+        off[b, 0, cy_int, cx_int] = dx_frac
+        off[b, 1, cy_int, cx_int] = dy_frac
+        mask[b, 0, cy_int, cx_int] = 1.0
 
     return hm, off, mask, n_src
 

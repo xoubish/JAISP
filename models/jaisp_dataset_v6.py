@@ -250,6 +250,7 @@ class JAISPDatasetV6(Dataset):
             'rubin':      rubin_data,
             'euclid':     euclid_data,
             'has_euclid': bool(euclid_data),
+            'aug_params': aug_params,
         }
 
     def get_band_names(self) -> List[str]:

@@ -121,9 +121,6 @@ class TileDetectionDataset(Dataset):
         self.use_all_bands = use_all_bands and (euclid_dir is not None)
         self.bands        = ALL_BANDS if self.use_all_bands else RUBIN_BANDS
 
-        # Use JAISPDatasetV6 as the tile loader (kept as library for V7 downstream use).
-        # euclid_dir falls back to rubin_dir when not provided; tiles without
-        # matching Euclid files will have has_euclid=False.
         self._base = JAISPDatasetV6(
             rubin_dir=rubin_dir,
             euclid_dir=euclid_dir or rubin_dir,
@@ -131,28 +128,52 @@ class TileDetectionDataset(Dataset):
             load_euclid=self.use_all_bands,
         )
 
+        # Cache pseudo-labels from raw (unaugmented) tiles — run detection once
+        self._label_cache = {}
+        print(f'  Pre-computing pseudo-labels (nsig={nsig}) ...', end=' ', flush=True)
+        for idx in range(len(self._base)):
+            raw_path = self._base.tiles[idx]['rubin_path']
+            raw_data = np.load(raw_path, allow_pickle=True, mmap_mode='r')
+            raw_img = np.nan_to_num(
+                np.asarray(raw_data['img'], dtype=np.float32), nan=0.0
+            )
+            centroids_np, classes_np, H, W = _pseudo_labels(
+                raw_img, self.nsig, self.max_sources
+            )
+            self._label_cache[idx] = (centroids_np, classes_np, H, W)
+        print(f'done ({len(self._label_cache)} tiles)')
+
+    @staticmethod
+    def _transform_centroids(
+        centroids: np.ndarray, n_rot: int, flip_ud: bool, flip_lr: bool,
+    ) -> np.ndarray:
+        """Apply the same augmentation to normalized (x, y) centroids."""
+        if centroids.shape[0] == 0:
+            return centroids
+        xy = centroids.copy()
+        # rot90: each 90° rotation maps (x, y) -> (y, 1-x)
+        for _ in range(n_rot % 4):
+            xy = np.stack([xy[:, 1], 1.0 - xy[:, 0]], axis=1)
+        if flip_ud:
+            xy[:, 1] = 1.0 - xy[:, 1]
+        if flip_lr:
+            xy[:, 0] = 1.0 - xy[:, 0]
+        return xy
+
     def __len__(self) -> int:
         return len(self._base)
 
     def __getitem__(self, idx: int) -> dict:
         item = self._base[idx]
 
-        # Build per-band image/rms dicts and collect augmented Rubin cube
+        # Build per-band image/rms dicts
         images: dict = {}
         rms:    dict = {}
-        rubin_bands_np: list = []
 
         for band in RUBIN_BANDS:
             if band in item['rubin']:
-                img_t = item['rubin'][band]['image']   # [1, H, W]
-                rms_t = item['rubin'][band]['rms']
-                images[band] = img_t
-                rms[band]    = rms_t
-                rubin_bands_np.append(img_t[0].numpy())  # [H, W] augmented
-            else:
-                # Placeholder zero band to keep indexing consistent
-                h, w = next(iter(item['rubin'].values()))['image'].shape[1:]
-                rubin_bands_np.append(np.zeros((h, w), dtype=np.float32))
+                images[band] = item['rubin'][band]['image']
+                rms[band]    = item['rubin'][band]['rms']
 
         if self.use_all_bands:
             for band in EUCLID_BANDS:
@@ -160,12 +181,10 @@ class TileDetectionDataset(Dataset):
                     images[band] = item['euclid'][band]['image']
                     rms[band]    = item['euclid'][band]['rms']
 
-        # Pseudo-labels from the AUGMENTED Rubin image so GT matches the
-        # rotated/flipped tile the model actually sees.
-        rubin_cube = np.stack(rubin_bands_np, axis=0)   # [6, H, W]
-        centroids_np, classes_np, H, W = _pseudo_labels(
-            rubin_cube, self.nsig, self.max_sources
-        )
+        # Retrieve cached pseudo-labels and transform to match augmentation
+        centroids_np, classes_np, H, W = self._label_cache[idx]
+        aug_params = item.get('aug_params', (0, False, False))
+        centroids_np = self._transform_centroids(centroids_np, *aug_params)
 
         return {
             'images':    images,                              # {band: [1,H,W]}

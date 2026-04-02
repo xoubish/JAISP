@@ -9,7 +9,7 @@ Self-supervised multi-instrument foundation model for precision cosmology with R
 | Component | Directory | Description |
 |-----------|-----------|-------------|
 | Foundation (V7) | `models/jaisp_foundation_v7.py` | Mixed-resolution masked autoencoder |
-| Detection | `models/detection/` | DETR-style source detector |
+| Detection | `models/detection/` | CenterNet heatmap source detector |
 | Astrometry | `models/astrometry2/` | Rubin<->Euclid concordance field |
 | Photometry | `models/photometry/` | PSF modeling + forced photometry |
 
@@ -28,11 +28,11 @@ python models/train_jaisp_foundation_v7.py \
     --rubin_dir data/rubin_tiles_ecdfs --euclid_dir data/euclid_tiles_ecdfs \
     --output_dir checkpoints/jaisp_v7_baseline --epochs 100
 
-# Detection
-python models/detection/train_detection.py \
+# Detection (CenterNet)
+python models/detection/train_centernet.py \
     --rubin_dir data/rubin_tiles_ecdfs --euclid_dir data/euclid_tiles_ecdfs \
     --encoder_ckpt checkpoints/jaisp_v7_baseline/checkpoint_best.pt \
-    --out models/checkpoints/detector_v7.pt --num_queries 500 --epochs 100
+    --out models/checkpoints/centernet_v7.pt --epochs 100
 
 # Astrometry
 python models/astrometry2/train_astro_v7.py \
