@@ -183,4 +183,5 @@ def collate_cached(batch: List[dict]) -> dict:
         'centroids': [s['centroids'] for s in batch],
         'classes':   [s['classes'] for s in batch],
         'tile_id':   [s['tile_id'] for s in batch],
+        'aug_idx':   [s['aug_idx'] for s in batch],
     }
