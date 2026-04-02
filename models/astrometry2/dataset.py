@@ -40,10 +40,10 @@ VIS_PIXEL_SCALE_ARCSEC = 0.1
 
 
 # ============================================================
-# DETR-based source detection (optional, replaces classical)
+# Neural source detection (DETR or CenterNet, replaces classical)
 # ============================================================
 
-def detect_sources_detr(
+def detect_sources_neural(
     tile_images: Dict[str, np.ndarray],
     tile_rms: Dict[str, np.ndarray],
     detector,
@@ -51,13 +51,17 @@ def detect_sources_detr(
     conf_threshold: float = 0.3,
     tile_hw: tuple = None,
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """Run the DETR detector on a tile and return (x, y) pixel coordinates.
+    """Run a neural detector on a tile and return (x, y) pixel coordinates.
+
+    Works with any detector that implements predict(images, rms, conf_threshold, tile_hw)
+    returning a dict with 'positions_px' -- both JaispDetector (DETR) and
+    CenterNetDetector are compatible.
 
     Parameters
     ----------
     tile_images : {band: [H, W]} numpy arrays for available bands
     tile_rms    : {band: [H, W]} RMS noise maps
-    detector    : JaispDetector instance
+    detector    : JaispDetector or CenterNetDetector instance
     device      : torch device
     conf_threshold : minimum confidence for detections
     tile_hw     : (H, W) of the tile (for denormalization)
@@ -85,6 +89,10 @@ def detect_sources_detr(
 
     pos = result['positions_px'].cpu().numpy()  # [N, 2] (x, y)
     return pos[:, 0], pos[:, 1]
+
+
+# Backward-compatible alias
+detect_sources_detr = detect_sources_neural
 
 # Unified band ordering for the multi-instrument model.
 # Rubin bands come first (matching RUBIN_BAND_ORDER), then NISP bands.
