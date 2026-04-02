@@ -87,18 +87,41 @@ class CachedFeatureDataset(Dataset):
         self._label_cache: Dict[str, Tuple[np.ndarray, np.ndarray]] = {}
         self._compute_labels(rubin_dir, euclid_dir)
 
-        # Load extra labels from self-training if provided
+        # Apply label refinement from self-training if provided
         if extra_labels and Path(extra_labels).exists():
             extra = torch.load(extra_labels, map_location='cpu', weights_only=False)
+            promoted = extra.get('promoted', {})
+            demoted_labels = extra.get('demoted', {})
+
+            # First remove demoted labels (artifacts the model rejected)
+            n_removed = 0
+            for tid, remove_xy in demoted_labels.items():
+                if tid in self._label_cache and remove_xy.shape[0] > 0:
+                    old_c, old_cls = self._label_cache[tid]
+                    if old_c.shape[0] == 0:
+                        continue
+                    # Remove labels that are close to any demoted position
+                    keep = np.ones(len(old_c), dtype=bool)
+                    for j in range(len(remove_xy)):
+                        dists = np.sqrt(((old_c - remove_xy[j]) ** 2).sum(axis=1))
+                        keep &= (dists > 0.005)  # ~0.5 bottleneck pixels
+                    n_before = len(old_c)
+                    old_c = old_c[keep]
+                    old_cls = old_cls[keep]
+                    self._label_cache[tid] = (old_c, old_cls)
+                    n_removed += n_before - len(old_c)
+
+            # Then add promoted labels (novel detections)
             n_added = 0
-            for tid, new_centroids in extra.items():
+            for tid, new_centroids in promoted.items():
                 if tid in self._label_cache:
                     old_c, old_cls = self._label_cache[tid]
                     merged_c = np.concatenate([old_c, new_centroids], axis=0)
                     merged_cls = np.zeros(len(merged_c), dtype=np.int64)
                     self._label_cache[tid] = (merged_c, merged_cls)
                     n_added += len(new_centroids)
-            print(f'  Loaded {n_added} extra labels from {extra_labels}')
+
+            print(f'  Label refinement: +{n_added} promoted, -{n_removed} demoted')
 
     def _compute_labels(self, rubin_dir: str, euclid_dir: Optional[str]):
         """Compute pseudo-labels from VIS (preferred) or Rubin (fallback)."""

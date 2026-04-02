@@ -90,75 +90,67 @@ def _run_training_round(
     subprocess.run(cmd, check=True)
 
 
-def _promote_detections(
+def _refine_labels(
     feature_dir: str,
     checkpoint: str,
     rubin_dir: str,
     euclid_dir: str,
     nsig: float,
-    conf_threshold: float = 0.8,
+    promote_conf: float = 0.8,
+    demote_conf: float = 0.3,
     match_radius: float = 0.01,
     device: torch.device = None,
-) -> dict:
-    """Run trained detector on all tiles, find novel high-confidence detections.
+) -> tuple:
+    """Run trained detector on all tiles. Promote novel high-confidence
+    detections and demote existing pseudo-labels the model rejects.
 
-    Returns dict[tile_id] -> np.ndarray[N, 2] of promoted centroid coords
-    (normalized [0,1], in the label coordinate frame).
+    The model trained on 10-band features knows more than the VIS pseudo-labels:
+    - Sources only visible in VIS (like diffraction spikes) will have LOW
+      confidence because the other 9 bands show nothing there.
+    - Sources invisible in VIS but present in other bands will have HIGH
+      confidence as novel detections.
+
+    Returns (promoted, demoted):
+        promoted: dict[tile_id] -> np.ndarray[N, 2] new labels to ADD
+        demoted:  dict[tile_id] -> np.ndarray[N, 2] old labels to REMOVE
     """
-    from detection.cached_dataset import CachedFeatureDataset
     from detection.dataset import _pseudo_labels_vis, _pseudo_labels
 
     if device is None:
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    # Load trained model (head only, no encoder needed)
+    # Load trained model (head only)
     ckpt = torch.load(checkpoint, map_location='cpu', weights_only=True)
     model = CenterNetDetector(encoder=None, encoder_dim=ckpt['encoder_dim'])
     model.load_state_dict(ckpt['state_dict'])
     model = model.to(device).eval()
 
-    # Load features (no augmentation -- use aug0 only for inference)
     feature_dir = Path(feature_dir)
     feat_files = sorted(feature_dir.glob('tile_*_aug0.pt'))
-
-    # Load original VIS pseudo-labels for comparison
     euclid_dir_p = Path(euclid_dir) if euclid_dir else None
     rubin_dir_p = Path(rubin_dir)
 
     promoted = {}
+    demoted = {}
     total_promoted = 0
+    total_demoted = 0
     total_tiles = 0
+
+    import torch.nn.functional as F
 
     for feat_path in feat_files:
         tile_id = feat_path.stem.rsplit('_aug', 1)[0]
         cached = torch.load(feat_path, map_location='cpu', weights_only=True)
-        feats = cached['features'].unsqueeze(0).to(device)  # [1, 256, H, W]
+        feats = cached['features'].unsqueeze(0).to(device)
+        _, fH, fW = cached['features'].shape
 
         # Run detector
         with torch.no_grad():
             neck_out = model.neck(feats)
-            hm = model.hm_head(neck_out).sigmoid()
+            hm = model.hm_head(neck_out).sigmoid()  # [1, 1, H, W]
             off = model.off_head(neck_out)
 
-        # Find peaks
-        import torch.nn.functional as F
-        hm_max = F.max_pool2d(hm, 3, stride=1, padding=1)
-        peaks = (hm == hm_max) & (hm > conf_threshold)
-
-        if not peaks.any():
-            total_tiles += 1
-            continue
-
-        yi, xi = torch.where(peaks[0, 0])
-        scores = hm[0, 0, yi, xi]
-        dx = off[0, 0, yi, xi]
-        dy = off[0, 1, yi, xi]
-        _, H, W = cached['features'].shape
-        pred_x = (xi.float() + dx) / max(W - 1, 1)
-        pred_y = (yi.float() + dy) / max(H - 1, 1)
-        pred_xy = torch.stack([pred_x, pred_y], dim=1).cpu().numpy()
-
-        # Load original VIS labels for this tile
+        # Load original pseudo-labels for this tile
         orig_labels = None
         if euclid_dir_p:
             ep = euclid_dir_p / f'{tile_id}_euclid.npz'
@@ -181,23 +173,56 @@ def _promote_detections(
             except Exception:
                 orig_labels = np.zeros((0, 2), dtype=np.float32)
 
-        # Find novel detections: predictions with no nearby original label
-        novel = []
-        for i in range(len(pred_xy)):
-            if orig_labels.shape[0] == 0:
-                novel.append(pred_xy[i])
-                continue
-            dists = np.sqrt(((orig_labels - pred_xy[i]) ** 2).sum(axis=1))
-            if dists.min() > match_radius:
-                novel.append(pred_xy[i])
+        hm_np = hm[0, 0].cpu().numpy()
 
-        if novel:
-            promoted[tile_id] = np.array(novel, dtype=np.float32)
-            total_promoted += len(novel)
+        # --- DEMOTE: check model confidence at each existing pseudo-label ---
+        tile_demoted = []
+        if orig_labels.shape[0] > 0:
+            for i in range(orig_labels.shape[0]):
+                # Map normalized coords to feature-map pixel
+                fx = int(round(orig_labels[i, 0] * (fW - 1)))
+                fy = int(round(orig_labels[i, 1] * (fH - 1)))
+                fx = max(0, min(fx, fW - 1))
+                fy = max(0, min(fy, fH - 1))
+                conf = float(hm_np[fy, fx])
+                if conf < demote_conf:
+                    tile_demoted.append(orig_labels[i])
+
+        if tile_demoted:
+            demoted[tile_id] = np.array(tile_demoted, dtype=np.float32)
+            total_demoted += len(tile_demoted)
+
+        # --- PROMOTE: find high-confidence predictions with no matching label ---
+        hm_max = F.max_pool2d(hm, 3, stride=1, padding=1)
+        peaks = (hm == hm_max) & (hm > promote_conf)
+
+        tile_promoted = []
+        if peaks.any():
+            yi, xi = torch.where(peaks[0, 0])
+            dx = off[0, 0, yi, xi]
+            dy = off[0, 1, yi, xi]
+            pred_x = (xi.float() + dx) / max(fW - 1, 1)
+            pred_y = (yi.float() + dy) / max(fH - 1, 1)
+            pred_xy = torch.stack([pred_x, pred_y], dim=1).cpu().numpy()
+
+            for j in range(len(pred_xy)):
+                if orig_labels.shape[0] == 0:
+                    tile_promoted.append(pred_xy[j])
+                    continue
+                dists = np.sqrt(((orig_labels - pred_xy[j]) ** 2).sum(axis=1))
+                if dists.min() > match_radius:
+                    tile_promoted.append(pred_xy[j])
+
+        if tile_promoted:
+            promoted[tile_id] = np.array(tile_promoted, dtype=np.float32)
+            total_promoted += len(tile_promoted)
+
         total_tiles += 1
 
-    print(f'\nPromotion: {total_promoted} novel detections across {total_tiles} tiles')
-    return promoted
+    print(f'\nLabel refinement across {total_tiles} tiles:')
+    print(f'  Promoted: {total_promoted} novel high-confidence detections')
+    print(f'  Demoted:  {total_demoted} low-confidence pseudo-labels (likely artifacts)')
+    return promoted, demoted
 
 
 def main():
@@ -214,6 +239,9 @@ def main():
     p.add_argument('--sigma',       type=float, default=2.0)
     p.add_argument('--promote_conf', type=float, default=0.8,
                    help='Confidence threshold for promoting novel detections')
+    p.add_argument('--demote_conf', type=float, default=0.3,
+                   help='Confidence threshold below which existing labels are demoted '
+                        '(model says "this is not a real source in 10-band space")')
     p.add_argument('--match_radius', type=float, default=0.01,
                    help='Normalized distance below which a prediction matches an existing label')
     p.add_argument('--wandb_project', default=None)
@@ -248,22 +276,25 @@ def main():
             wandb_name=f'round{round_num}',
         )
 
-        # Promote novel detections for next round
+        # Refine labels for next round: promote novel + demote artifacts
         if round_num < args.rounds:
-            print(f'\n--- Promoting novel detections (conf > {args.promote_conf}) ---')
-            promoted = _promote_detections(
+            print(f'\n--- Refining labels (promote > {args.promote_conf}, '
+                  f'demote < {args.demote_conf}) ---')
+            promoted, demoted_labels = _refine_labels(
                 feature_dir=args.feature_dir,
                 checkpoint=ckpt_path,
                 rubin_dir=args.rubin_dir,
                 euclid_dir=args.euclid_dir,
                 nsig=args.nsig,
-                conf_threshold=args.promote_conf,
+                promote_conf=args.promote_conf,
+                demote_conf=args.demote_conf,
                 match_radius=args.match_radius,
                 device=device,
             )
-            extra_labels_path = str(out_dir / f'promoted_round{round_num}.pt')
-            torch.save(promoted, extra_labels_path)
-            print(f'Saved promoted labels to {extra_labels_path}')
+            extra_labels_path = str(out_dir / f'refined_labels_round{round_num}.pt')
+            torch.save({'promoted': promoted, 'demoted': demoted_labels},
+                       extra_labels_path)
+            print(f'Saved refined labels to {extra_labels_path}')
 
     # Copy final checkpoint
     final = out_dir / 'centernet_best.pt'
