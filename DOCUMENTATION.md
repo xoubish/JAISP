@@ -250,47 +250,73 @@ All downstream heads reuse the frozen V7 foundation encoder. Only lightweight ta
 
 **Directory**: `models/detection/`
 
-The detection head finds astronomical sources (galaxies and stars) in tiles using a DETR-style set prediction approach. Unlike classical detection pipelines that operate on a single coadded image, this detector sees all available bands through the V7 encoder's learned features, giving it access to sources that may only be visible in specific wavelength ranges.
+The detection head finds astronomical sources (galaxies and stars) in tiles. Unlike classical detection pipelines that operate on a single coadded image, this detector sees all available bands (6 Rubin + 4 Euclid = 10) through the V7 encoder's learned features, giving it access to sources that may only be visible in specific wavelength ranges or at Euclid's finer resolution.
 
-#### How It Works
+#### Detection Approach: Why CenterNet, Not DETR
 
-The frozen V7 encoder processes the multi-band input tile and produces a bottleneck feature map at approximately 130x130 spatial resolution. A 1x1 convolution projects these features to the detection head's working dimension, and 2D sinusoidal positional encodings are added so the transformer decoder knows where each feature is on the sky. The transformer decoder then takes 500 learned object queries -- think of these as 500 "slots" that each learn to claim one source -- and cross-attends to the spatial features. Each query outputs a predicted centroid position (normalized to [0,1]), a confidence score (is this slot pointing at a real source or empty sky?), and a log-flux estimate.
+The detection head went through two iterations. Understanding why the first was abandoned helps explain the current design.
+
+**DETR (Detection Transformer) -- tried first, abandoned.** DETR is a set-prediction architecture from natural image detection. It uses a transformer decoder with learned "object queries" -- fixed-size slots that each learn to claim one object through cross-attention to spatial features. Training requires Hungarian matching to find the optimal assignment between predicted slots and ground-truth objects, and a composite loss that teaches matched slots to predict positions while pushing unmatched slots toward zero confidence.
+
+DETR was a poor fit for astronomical source detection for several reasons:
+
+- **Designed for the wrong problem.** DETR's innovations (set prediction, no NMS, no anchor boxes) solve problems that don't exist in astronomical imaging. Sources at the 0.8"/px bottleneck resolution are effectively point-like -- there are no overlapping bounding boxes to deduplicate. The set-prediction framework adds complexity without corresponding benefit.
+- **Data-hungry.** The original DETR paper trained for 500 epochs on 118,000 images. We have 130 training tiles. With so little data, the model struggled to converge -- the 500 object queries exhibited "query collapse" where all predictions clustered at a single location for many epochs before slowly spreading out.
+- **Expensive.** 500 queries cross-attending to ~17,000 memory tokens through 6 transformer decoder layers is computationally heavy for what is fundamentally "find bright spots in a feature map."
+- **Slow convergence.** After fixing a critical bug where pseudo-labels were computed on unaugmented images while the model saw augmented images, DETR still took 25+ epochs to reach val loss 1.02, and the confidence head struggled to differentiate real sources from empty queries.
+
+The DETR code is preserved in `detector.py`, `matcher.py`, and `train_detection.py` for reference.
+
+**CenterNet (heatmap regression) -- current approach.** CenterNet treats detection as a per-pixel prediction problem. The V7 encoder bottleneck is already a dense spatial feature map at ~130x130 resolution. Instead of asking a transformer decoder to "discover" objects, CenterNet directly predicts at every pixel: "how likely is it that a source is centered here?" This is the learned version of what classical peak-finding already does -- but operating on rich 10-band learned features instead of a simple 3-band coadd.
+
+This approach is a natural fit for astronomical source detection because:
+
+- **Every pixel gets direct supervision.** No Hungarian matching, no set prediction instability. Each pixel's heatmap target is simply a Gaussian centered at the nearest ground-truth source. The focal loss (from CornerNet/CenterNet) handles the extreme class imbalance between source pixels and empty sky.
+- **Fast convergence.** With direct per-pixel supervision and only 3.5M trainable parameters, CenterNet converges much faster than DETR on our 130-tile dataset. Val loss drops steadily from epoch 1 without the query-collapse plateau that plagued DETR.
+- **Naturally extensible.** Additional per-pixel heads can be added cheaply by appending more output channels. The current architecture already supports an optional profile head for source shape parameters (ellipticity, half-light radius, Sersic index) that can be activated when training labels become available -- this is important for future integration with tools like Tractor that need shape priors for deblending and forced photometry.
+
+#### How CenterNet Works
+
+The frozen V7 encoder processes the multi-band input tile and produces a bottleneck feature map at approximately 130x130 spatial resolution. A small refinement "neck" (3 layers of Conv + BatchNorm + ReLU) refines these features, then four parallel prediction heads each produce a dense per-pixel output:
 
 ```
 Frozen V7 encoder
   -> bottleneck [B, 256, ~130, ~130]
-  -> 1x1 Conv projection + GroupNorm
-  -> 2D sinusoidal positional encoding
-  -> Transformer decoder (6 layers, 8 heads)
-     with 500 learned object queries
-  -> Prediction heads:
-       centroid (x,y) in [0,1]  (3-layer MLP + sigmoid)
-       confidence (objectness)   (Linear)
-       log_flux proxy            (2-layer MLP)
+  -> Refinement neck (3x Conv-BN-ReLU)
+  -> Dense prediction heads:
+       Heatmap  [B, 1, H, W]  -- source probability at each pixel (sigmoid)
+       Offset   [B, 2, H, W]  -- sub-pixel (dx, dy) refinement from grid center
+       Log flux [B, 1, H, W]  -- brightness proxy
+       Profile  [B, 4, H, W]  -- (e1, e2, r_half, sersic_n) [optional, future]
 ```
+
+At inference, source detection is simple: find local maxima in the heatmap (via max-pooling NMS), threshold on confidence, and read off the offset, flux, and profile values at each peak location. The sub-pixel offset head is important -- it allows the detector to achieve centroid precision finer than the ~0.8"/px grid spacing of the bottleneck feature map.
 
 #### Training
 
-Since there is no curated source catalog for this field, the detector is trained on **pseudo-labels** generated by classical peak-finding on a Rubin g+r+i coadd image. This classical detector (median subtraction, Gaussian smoothing, local maxima above 3-sigma) serves as the "teacher". The DETR is the "student" that sees all 10 bands through the V7 encoder and can eventually surpass the teacher by detecting sources invisible in just g+r+i.
+Since there is no curated source catalog for this field, the detector is trained on **pseudo-labels** generated by classical peak-finding on a Rubin g+r+i coadd image (3-sigma detection threshold, Gaussian smoothing, subpixel centroiding via flux-weighted center of mass). This classical detector serves as the "teacher" -- good enough to bootstrap the neural detector, which then has the advantage of seeing all 10 bands through the V7 encoder and can eventually surpass the classical method by detecting sources invisible in just g+r+i.
 
-Training uses Hungarian matching to assign each of the 500 predicted queries to the best-matching ground-truth source (or to "no object" if the query doesn't match anything). The loss combines position accuracy for matched queries with confidence suppression for unmatched ones:
+Each ground-truth source position is rendered as a small 2D Gaussian (sigma=2 pixels in bottleneck coordinates, roughly matching the Rubin PSF width) on the heatmap target. The loss combines three terms:
 
-| Loss Term | Weight | Purpose |
-|-----------|--------|---------|
-| `loss_pos` | 5.0 | L1 on matched centroid positions -- teaches where sources are |
-| `loss_conf_obj` | 2.0 | BCE pushing matched queries toward confidence=1 |
-| `loss_conf_noobj` | 0.5 | BCE pushing unmatched queries toward confidence=0 |
+| Loss Term | Type | Where Applied | Weight | Purpose |
+|-----------|------|---------------|--------|---------|
+| `loss_hm` | Focal loss | All pixels | 1.0 | Teaches source vs background at every pixel; focal weighting handles the ~99% empty-sky imbalance |
+| `loss_off` | L1 | Only at GT source positions | 1.0 | Teaches sub-pixel offset refinement |
+| `loss_flux` | L1 | Only at GT source positions | 0.1 | Teaches flux estimation (lower weight: pseudo-labels are noisy) |
 
-The training data consists of 130 training tiles and 14 validation tiles with random 90-degree rotations and flips for augmentation.
+The training data consists of 130 training tiles and 14 validation tiles with random 90-degree rotations and flips for augmentation. All 10 bands (6 Rubin + 4 Euclid) are fed through the frozen V7 encoder.
 
 #### Files
 
 | File | Description |
 |------|-------------|
-| `detector.py` | `JaispDetector` model, encoder wrapper, inference |
-| `matcher.py` | Hungarian matcher + detection loss |
-| `dataset.py` | Pseudo-label dataset with DETR-compatible collation |
-| `train_detection.py` | Training loop with W&B logging |
+| `centernet_detector.py` | `CenterNetDetector` model with heatmap/offset/flux/profile heads |
+| `centernet_loss.py` | Focal loss, Gaussian heatmap rendering, masked offset/flux L1 |
+| `train_centernet.py` | CenterNet training loop with heatmap visualization |
+| `detector.py` | `JaispDetector` (DETR, archived -- kept for reference) |
+| `matcher.py` | Hungarian matcher + DETR loss (archived) |
+| `train_detection.py` | DETR training loop (archived) |
+| `dataset.py` | Pseudo-label dataset, shared by both architectures |
 
 ### 2. Astrometry Concordance
 
@@ -304,7 +330,7 @@ The approach works at the individual source level: detect sources in both instru
 
 For each tile, the pipeline proceeds through six stages:
 
-1. **Source detection**: Find sources in the Rubin tile (using either classical peak-finding or the trained DETR detector) and in the Euclid VIS image (classical peak-finding). The DETR option is valuable because it can find fainter sources, giving more anchor points for the field fit.
+1. **Source detection**: Find sources in the Rubin tile (using either classical peak-finding or the trained CenterNet detector) and in the Euclid VIS image (classical peak-finding). The neural detector option is valuable because it sees all 10 bands through the V7 encoder and can find fainter sources than classical 3-band detection, giving more anchor points for the field fit.
 
 2. **Cross-instrument matching**: Match Rubin and VIS source lists using WCS sky coordinates. Mutual nearest-neighbor matching with separation limits and sigma-clipping removes spurious matches. Typically yields 50-200 matched pairs per tile.
 
@@ -347,7 +373,7 @@ Both versions support multiband mode (per-band learned embeddings for wavelength
 The first stage of the pipeline -- detecting sources in Rubin -- can use either:
 
 - **Classical** (default): `detect_sources()` performs median background subtraction, Gaussian smoothing, and local maximum detection above an N-sigma threshold. Simple, fast, and well-understood.
-- **DETR** (optional): Pass `--detr-checkpoint` to replace classical Rubin detection with the trained DETR detector. The DETR sees all 10 bands through the V7 encoder and can detect fainter sources that are invisible in a 3-band coadd, providing more anchor points for the concordance fit. VIS detection still uses the classical method.
+- **Neural** (optional): Pass `--detr-checkpoint` to replace classical Rubin detection with a trained neural detector (CenterNet or DETR -- both implement the same `predict()` API). The neural detector sees all 10 bands through the V7 encoder and can detect fainter sources that are invisible in a 3-band coadd, providing more anchor points for the concordance fit. VIS detection still uses the classical method.
 
 #### Field Solvers
 
@@ -411,11 +437,14 @@ JAISP/
 |   +-- train_jaisp_foundation_v7.py   V7 training entrypoint
 |   +-- eval_foundation_v7.py          V7 evaluation/diagnostics
 |   |
-|   +-- detection/                     DETR source detection head
-|   |   +-- detector.py
-|   |   +-- matcher.py
-|   |   +-- dataset.py
-|   |   +-- train_detection.py
+|   +-- detection/                     Source detection head
+|   |   +-- centernet_detector.py      CenterNet model (current)
+|   |   +-- centernet_loss.py          Focal loss + heatmap targets
+|   |   +-- train_centernet.py         CenterNet training script
+|   |   +-- detector.py               DETR model (archived)
+|   |   +-- matcher.py                Hungarian matcher (archived)
+|   |   +-- train_detection.py        DETR training script (archived)
+|   |   +-- dataset.py                Pseudo-label dataset (shared)
 |   |
 |   +-- astrometry2/                   Rubin<->Euclid concordance
 |   |   +-- matcher_v7.py              V7 patch matcher
@@ -466,15 +495,17 @@ python models/train_jaisp_foundation_v7.py \
 ### 2. Detection Head
 
 ```bash
-# Train DETR detector on frozen V7 encoder
-python models/detection/train_detection.py \
+# Train CenterNet detector on frozen V7 encoder (recommended)
+python models/detection/train_centernet.py \
     --rubin_dir    data/rubin_tiles_ecdfs \
     --euclid_dir   data/euclid_tiles_ecdfs \
     --encoder_ckpt checkpoints/jaisp_v7_baseline/checkpoint_best.pt \
-    --out          models/checkpoints/detector_v7.pt \
-    --num_queries 500 \
+    --out          models/checkpoints/centernet_v7.pt \
     --epochs 100 \
     --wandb_project jaisp-detection
+
+# With profile prediction head for future shape/deblending:
+    --predict_profile
 ```
 
 ### 3. Astrometry Matcher
@@ -483,7 +514,7 @@ python models/detection/train_detection.py \
 # V7 backbone with DETR source detection
 python models/astrometry2/train_astro_v7.py \
     --v7-checkpoint  checkpoints/jaisp_v7_baseline/checkpoint_best.pt \
-    --detr-checkpoint models/checkpoints/detector_v7.pt \
+    --detr-checkpoint models/checkpoints/centernet_v7.pt \
     --rubin-dir      data/rubin_tiles_ecdfs \
     --euclid-dir     data/euclid_tiles_ecdfs \
     --multiband \
@@ -506,7 +537,7 @@ python models/astrometry2/train_astro_v7.py \
 python models/astrometry2/infer_concordance.py \
     --checkpoint    models/checkpoints/astro_v7/checkpoint_best.pt \
     --v7-checkpoint checkpoints/jaisp_v7_baseline/checkpoint_best.pt \
-    --detr-checkpoint models/checkpoints/detector_v7.pt \
+    --detr-checkpoint models/checkpoints/centernet_v7.pt \
     --rubin-dir     data/rubin_tiles_ecdfs \
     --euclid-dir    data/euclid_tiles_ecdfs \
     --output        concordance_v7.fits \
@@ -530,7 +561,7 @@ python models/photometry/train_psf_net.py \
 | Checkpoint | Location | Description |
 |------------|----------|-------------|
 | V7 foundation (best) | `checkpoints/jaisp_v7_baseline/checkpoint_best.pt` | hidden_ch=256, depth=4, epoch 86, val_loss=1.4689 |
-| V7 detector | `models/checkpoints/detector_v7.pt` | DETR on V7 encoder, 500 queries |
+| V7 detector (CenterNet) | `models/checkpoints/centernet_v7.pt` | CenterNet on V7 encoder, heatmap + offset + flux |
 | V6 astrometry | `models/checkpoints/astrometry_v6_phaseB2/checkpoint_best.pt` | Best astrometry result: 31.9 mas |
 
 ---
@@ -538,7 +569,7 @@ python models/photometry/train_psf_net.py \
 ## Current Status
 
 - **V7 foundation** is trained and stable. Best checkpoint: `jaisp_v7_baseline` (epoch 86, val_loss 1.4689).
-- **Detection** is being retrained on V7 with improved pseudo-labels (3-sigma threshold, 500 queries, Euclid bands enabled). Early training shows steady val loss improvement.
+- **Detection** has been migrated from DETR to CenterNet (heatmap regression), which converges faster and is more natural for point-source detection. Training with 3-sigma pseudo-labels and all 10 bands (Euclid enabled). An optional profile head (e1, e2, r_half, sersic_n) is available for future shape/deblending integration. Early training shows steady val loss improvement.
 - **Astrometry V7** matcher is implemented (`matcher_v7.py`, `train_astro_v7.py`) and ready for training once the detector converges. The V6 matcher achieved 31.9 mas; V7 should improve on this by preserving VIS native resolution.
 - **Photometry** is functional but not yet integrated with V7.
 - This is an active research codebase. Architecture and training defaults evolve with experiments.

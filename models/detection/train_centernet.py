@@ -96,8 +96,8 @@ def _log_tile(batch, out, wandb, step, conf_thr=0.3, nms_kernel=3):
                    s=60, marker='o', edgecolors='lime', facecolors='none',
                    lw=1.2, label=f'GT ({len(gt_xy)})')
 
-    # Detect peaks from heatmap
-    hm_t = out['heatmap'][0:1].detach()
+    # Detect peaks from heatmap (all on CPU for viz)
+    hm_t = out['heatmap'][0:1].detach().cpu()
     pad = nms_kernel // 2
     hm_max = F.max_pool2d(hm_t, nms_kernel, stride=1, padding=pad)
     peaks = (hm_t == hm_max) & (hm_t > conf_thr)
@@ -105,7 +105,7 @@ def _log_tile(batch, out, wandb, step, conf_thr=0.3, nms_kernel=3):
 
     if n_pred > 0:
         off = out['offset'][0].detach().cpu()
-        yi, xi = torch.where(peaks[0, 0].cpu())
+        yi, xi = torch.where(peaks[0, 0])
         hm_h, hm_w = hm.shape
         px = (xi.float() + off[0, yi, xi]) / max(hm_w - 1, 1) * (W - 1)
         py = (yi.float() + off[1, yi, xi]) / max(hm_h - 1, 1) * (H - 1)
@@ -242,13 +242,16 @@ def train(args):
                 'train/lr': lr_now,
                 'epoch': epoch + 1,
             }
-            if (epoch + 1) % 5 == 0:
-                sample = next(iter(val_loader))
-                with torch.no_grad():
-                    sim = {b: v.to(device) for b, v in sample['images'].items()}
-                    srm = {b: v.to(device) for b, v in sample['rms'].items()}
-                    sout = model(sim, srm)
-                log['viz/tile'] = _log_tile(sample, sout, wandb, step)
+            if (epoch + 1) % 5 == 0 or epoch == 0:
+                try:
+                    sample = next(iter(val_loader))
+                    with torch.no_grad():
+                        sim = {b: v.to(device) for b, v in sample['images'].items()}
+                        srm = {b: v.to(device) for b, v in sample['rms'].items()}
+                        sout = model(sim, srm)
+                    log['viz/tile'] = _log_tile(sample, sout, wandb, step)
+                except Exception as exc:
+                    print(f'  [warn] viz failed: {exc}')
             wandb.log(log)
 
         if mean_val < best_val:
