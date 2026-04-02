@@ -34,43 +34,13 @@ from jaisp_dataset_v6 import JAISPDatasetV6
 from astrometry2.source_matching import detect_sources, build_detection_image
 
 
-_INNER_R = 2.0
-_OUTER_R = 5.0
-_STAR_CONC_THRESHOLD = 0.5
-
-
-def _concentration_index(
-    img_band: np.ndarray,
-    xs: np.ndarray,
-    ys: np.ndarray,
-) -> np.ndarray:
-    """C = flux(r<2px) / flux(r<5px) per source. Stars: C > 0.5."""
-    S = 11
-    half = S // 2
-    H, W = img_band.shape
-    yy, xx = np.mgrid[:S, :S] - half
-    r = np.sqrt(xx ** 2 + yy ** 2)
-    inner = r < _INNER_R
-    outer = r < _OUTER_R
-    C = np.zeros(len(xs))
-    for i, (xi, yi) in enumerate(zip(xs, ys)):
-        x0, y0 = int(xi) - half, int(yi) - half
-        if x0 < 0 or y0 < 0 or x0 + S > W or y0 + S > H:
-            continue
-        stamp = img_band[y0:y0+S, x0:x0+S].clip(0)
-        f_outer = stamp[outer].sum()
-        C[i] = stamp[inner].sum() / max(f_outer, 1e-6)
-    return C
-
 
 def _pseudo_labels(
     rubin_img: np.ndarray,   # [6, H, W]
     nsig: float,
     max_sources: int,
 ) -> Tuple[np.ndarray, np.ndarray, int, int]:
-    """
-    Detect sources via classical peak-finding and classify star/galaxy by
-    concentration index.
+    """Detect sources from Rubin g+r+i coadd.
 
     Returns (centroids_norm [M,2], classes [M], H, W).
     """
@@ -87,6 +57,38 @@ def _pseudo_labels(
 
     classes = np.zeros(len(xs), dtype=np.int64)  # all class 0 = source
 
+    centroids = np.stack([
+        xs / max(W - 1, 1),
+        ys / max(H - 1, 1),
+    ], axis=1).astype(np.float32)
+
+    return centroids, classes, H, W
+
+
+def _pseudo_labels_vis(
+    vis_img: np.ndarray,       # [H_vis, W_vis]
+    nsig: float = 3.0,
+    max_sources: int = 1000,
+) -> Tuple[np.ndarray, np.ndarray, int, int]:
+    """Detect sources from Euclid VIS at native 0.1"/px resolution.
+
+    Returns centroids normalized to VIS frame [0,1], preserving the full
+    VIS spatial precision without projecting through a coarser grid.
+
+    Returns (centroids_norm [M,2], classes [M], H_vis, W_vis).
+    """
+    H, W = vis_img.shape
+    xs, ys = detect_sources(vis_img, nsig=nsig, max_sources=max_sources,
+                            smooth_sigma=1.2, min_dist=9)
+
+    if xs.size == 0:
+        return (
+            np.zeros((0, 2), dtype=np.float32),
+            np.zeros((0,), dtype=np.int64),
+            H, W,
+        )
+
+    classes = np.zeros(len(xs), dtype=np.int64)
     centroids = np.stack([
         xs / max(W - 1, 1),
         ys / max(H - 1, 1),
@@ -128,20 +130,45 @@ class TileDetectionDataset(Dataset):
             load_euclid=self.use_all_bands,
         )
 
-        # Cache pseudo-labels from raw (unaugmented) tiles — run detection once
+        # Cache pseudo-labels from raw (unaugmented) tiles — run detection once.
+        # Use VIS when Euclid data is available (0.1"/px, sharper centroids);
+        # fall back to Rubin g+r+i coadd when not.
         self._label_cache = {}
+        n_vis, n_rubin = 0, 0
         print(f'  Pre-computing pseudo-labels (nsig={nsig}) ...', end=' ', flush=True)
         for idx in range(len(self._base)):
-            raw_path = self._base.tiles[idx]['rubin_path']
-            raw_data = np.load(raw_path, allow_pickle=True, mmap_mode='r')
-            raw_img = np.nan_to_num(
-                np.asarray(raw_data['img'], dtype=np.float32), nan=0.0
-            )
-            centroids_np, classes_np, H, W = _pseudo_labels(
-                raw_img, self.nsig, self.max_sources
-            )
+            tile = self._base.tiles[idx]
+
+            # Try VIS first
+            euclid_path = tile.get('euclid_path')
+            used_vis = False
+            if euclid_path and Path(euclid_path).exists():
+                try:
+                    edata = np.load(euclid_path, allow_pickle=True, mmap_mode='r')
+                    vis_img = np.nan_to_num(
+                        np.asarray(edata['img_VIS'], dtype=np.float32), nan=0.0
+                    )
+                    centroids_np, classes_np, H, W = _pseudo_labels_vis(
+                        vis_img, self.nsig, self.max_sources
+                    )
+                    used_vis = True
+                    n_vis += 1
+                except Exception:
+                    pass
+
+            if not used_vis:
+                raw_path = tile['rubin_path']
+                raw_data = np.load(raw_path, allow_pickle=True, mmap_mode='r')
+                raw_img = np.nan_to_num(
+                    np.asarray(raw_data['img'], dtype=np.float32), nan=0.0
+                )
+                centroids_np, classes_np, H, W = _pseudo_labels(
+                    raw_img, self.nsig, self.max_sources
+                )
+                n_rubin += 1
+
             self._label_cache[idx] = (centroids_np, classes_np, H, W)
-        print(f'done ({len(self._label_cache)} tiles)')
+        print(f'done ({len(self._label_cache)} tiles: {n_vis} VIS, {n_rubin} Rubin)')
 
     @staticmethod
     def _transform_centroids(

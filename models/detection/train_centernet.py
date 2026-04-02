@@ -77,12 +77,19 @@ def _log_tile(batch, out, wandb, step, conf_thr=0.3, nms_kernel=3):
     import matplotlib.pyplot as plt
     import torch.nn.functional as F
 
-    r_band = batch['images']['rubin_r'][0, 0].cpu().numpy()
-    lo, hi = np.percentile(r_band, [1, 99])
-    rgb = np.clip((r_band - lo) / max(hi - lo, 1e-6), 0, 1)
-    H, W = rgb.shape
-
     hm = out['heatmap'][0, 0].detach().cpu().numpy()
+    hm_h, hm_w = hm.shape
+
+    # Background image: r-band if available (live mode), heatmap if cached
+    if 'images' in batch and 'rubin_r' in batch['images']:
+        r_band = batch['images']['rubin_r'][0, 0].cpu().numpy()
+        lo, hi = np.percentile(r_band, [1, 99])
+        rgb = np.clip((r_band - lo) / max(hi - lo, 1e-6), 0, 1)
+        H, W = rgb.shape
+    else:
+        # Cached mode: use heatmap dimensions for coordinate space
+        rgb = np.zeros((hm_h, hm_w))
+        H, W = hm_h, hm_w
 
     fig, axes = plt.subplots(1, 2, figsize=(12, 6))
 
@@ -134,42 +141,76 @@ def _log_tile(batch, out, wandb, step, conf_thr=0.3, nms_kernel=3):
 
 def train(args):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f'Training CenterNet detector on {device}')
+    use_cached = args.feature_dir is not None
+    mode_str = 'cached features' if use_cached else 'live encoder'
+    print(f'Training CenterNet detector on {device} ({mode_str})')
 
     use_wandb = args.wandb_project is not None
     if use_wandb:
         import wandb
         wandb.init(project=args.wandb_project, name=args.wandb_run, config=vars(args))
 
-    # Dataset
-    full_ds = TileDetectionDataset(
-        rubin_dir=args.rubin_dir,
-        euclid_dir=args.euclid_dir,
-        nsig=args.nsig,
-        max_sources=1000,  # no fixed query budget -- detect as many as classical finds
-        use_all_bands=args.euclid_dir is not None,
-        augment=True,
-    )
-    n_val = max(1, int(0.1 * len(full_ds)))
-    n_tr = len(full_ds) - n_val
-    tr_ds, val_ds = random_split(
-        full_ds, [n_tr, n_val],
-        generator=torch.Generator().manual_seed(42),
-    )
-    tr_loader = DataLoader(tr_ds, batch_size=args.batch_size, shuffle=True,
-                           collate_fn=collate_fn, num_workers=4, pin_memory=True)
-    val_loader = DataLoader(val_ds, batch_size=1, shuffle=False,
-                            collate_fn=collate_fn, num_workers=2)
-    print(f'Train: {n_tr} tiles   Val: {n_val} tiles')
+    if use_cached:
+        from detection.cached_dataset import CachedFeatureDataset, collate_cached
 
-    # Encoder + detector
-    encoder, encoder_dim = _load_encoder(args.encoder_ckpt, device)
+        full_ds = CachedFeatureDataset(
+            feature_dir=args.feature_dir,
+            rubin_dir=args.rubin_dir,
+            euclid_dir=args.euclid_dir,
+            nsig=args.nsig,
+            max_sources=1000,
+            extra_labels=args.extra_labels,
+        )
+        n_val = max(1, int(0.1 * len(full_ds)))
+        n_tr = len(full_ds) - n_val
+        tr_ds, val_ds = random_split(
+            full_ds, [n_tr, n_val],
+            generator=torch.Generator().manual_seed(42),
+        )
+        tr_loader = DataLoader(tr_ds, batch_size=args.batch_size, shuffle=True,
+                               collate_fn=collate_cached, num_workers=4, pin_memory=True)
+        val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False,
+                                collate_fn=collate_cached, num_workers=2)
+        encoder_dim = 256  # V7 default
+    else:
+        full_ds = TileDetectionDataset(
+            rubin_dir=args.rubin_dir,
+            euclid_dir=args.euclid_dir,
+            nsig=args.nsig,
+            max_sources=1000,
+            use_all_bands=args.use_euclid_bands,
+            augment=True,
+        )
+        n_val = max(1, int(0.1 * len(full_ds)))
+        n_tr = len(full_ds) - n_val
+        tr_ds, val_ds = random_split(
+            full_ds, [n_tr, n_val],
+            generator=torch.Generator().manual_seed(42),
+        )
+        tr_loader = DataLoader(tr_ds, batch_size=args.batch_size, shuffle=True,
+                               collate_fn=collate_fn, num_workers=4, pin_memory=True)
+        val_loader = DataLoader(val_ds, batch_size=1, shuffle=False,
+                                collate_fn=collate_fn, num_workers=2)
+        encoder_dim = None  # determined by _load_encoder
 
-    model = CenterNetDetector(
-        encoder=encoder,
-        encoder_dim=encoder_dim,
-        predict_profile=args.predict_profile,
-    ).to(device)
+    print(f'Train: {n_tr} samples   Val: {n_val} samples')
+
+    # Model
+    if use_cached:
+        # Head-only model (no encoder needed)
+        from detection.centernet_detector import CenterNetDetector
+        model = CenterNetDetector(
+            encoder=None,
+            encoder_dim=encoder_dim,
+            predict_profile=args.predict_profile,
+        ).to(device)
+    else:
+        encoder, encoder_dim = _load_encoder(args.encoder_ckpt, device)
+        model = CenterNetDetector(
+            encoder=encoder,
+            encoder_dim=encoder_dim,
+            predict_profile=args.predict_profile,
+        ).to(device)
 
     n_train = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f'Trainable parameters: {n_train / 1e6:.2f}M')
@@ -189,9 +230,20 @@ def train(args):
         model.train()
         tr_losses = []
         for batch in tr_loader:
-            images = {b: v.to(device) for b, v in batch['images'].items()}
-            rms = {b: v.to(device) for b, v in batch['rms'].items()}
-            out = model(images, rms)
+            if use_cached:
+                feats = batch['features'].to(device)
+                neck_out = model.neck(feats)
+                out = {
+                    'heatmap':  model.hm_head(neck_out).sigmoid(),
+                    'offset':   model.off_head(neck_out),
+                    'log_flux': model.flux_head(neck_out).squeeze(1),
+                }
+                if model.profile_head is not None:
+                    out['profile'] = model.profile_head(neck_out)
+            else:
+                images = {b: v.to(device) for b, v in batch['images'].items()}
+                rms = {b: v.to(device) for b, v in batch['rms'].items()}
+                out = model(images, rms)
 
             losses = criterion(
                 out,
@@ -221,9 +273,18 @@ def train(args):
         val_losses = []
         with torch.no_grad():
             for batch in val_loader:
-                images = {b: v.to(device) for b, v in batch['images'].items()}
-                rms = {b: v.to(device) for b, v in batch['rms'].items()}
-                out = model(images, rms)
+                if use_cached:
+                    feats = batch['features'].to(device)
+                    neck_out = model.neck(feats)
+                    out = {
+                        'heatmap':  model.hm_head(neck_out).sigmoid(),
+                        'offset':   model.off_head(neck_out),
+                        'log_flux': model.flux_head(neck_out).squeeze(1),
+                    }
+                else:
+                    images = {b: v.to(device) for b, v in batch['images'].items()}
+                    rms = {b: v.to(device) for b, v in batch['rms'].items()}
+                    out = model(images, rms)
                 losses = criterion(
                     out,
                     [c.to(device) for c in batch['centroids']],
@@ -246,9 +307,18 @@ def train(args):
                 try:
                     sample = next(iter(val_loader))
                     with torch.no_grad():
-                        sim = {b: v.to(device) for b, v in sample['images'].items()}
-                        srm = {b: v.to(device) for b, v in sample['rms'].items()}
-                        sout = model(sim, srm)
+                        if use_cached:
+                            feats = sample['features'].to(device)
+                            neck_out = model.neck(feats)
+                            sout = {
+                                'heatmap':  model.hm_head(neck_out).sigmoid(),
+                                'offset':   model.off_head(neck_out),
+                                'log_flux': model.flux_head(neck_out).squeeze(1),
+                            }
+                        else:
+                            sim = {b: v.to(device) for b, v in sample['images'].items()}
+                            srm = {b: v.to(device) for b, v in sample['rms'].items()}
+                            sout = model(sim, srm)
                     log['viz/tile'] = _log_tile(sample, sout, wandb, step)
                 except Exception as exc:
                     print(f'  [warn] viz failed: {exc}')
@@ -271,11 +341,19 @@ if __name__ == '__main__':
     p = argparse.ArgumentParser()
     p.add_argument('--rubin_dir',        required=True)
     p.add_argument('--euclid_dir',       default=None)
+    p.add_argument('--use_euclid_bands', action='store_true',
+                   help='Load Euclid bands into encoder (slow: VIS is 1050x1050). '
+                        'Default: Rubin-only for speed.')
     p.add_argument('--encoder_ckpt',     default=None)
+    p.add_argument('--feature_dir',     default=None,
+                   help='Precomputed feature directory (from precompute_features.py). '
+                        'If provided, skips encoder and trains on cached features (fast).')
+    p.add_argument('--extra_labels',    default=None,
+                   help='Extra pseudo-labels .pt from self-training round')
     p.add_argument('--out',              default='../checkpoints/centernet_v7.pt')
     p.add_argument('--epochs',           type=int,   default=100)
-    p.add_argument('--batch_size',       type=int,   default=2,
-                   help='Batch size (default 2; Euclid tiles are large)')
+    p.add_argument('--batch_size',       type=int,   default=8,
+                   help='Batch size (default 8 for cached features, reduce for live encoder)')
     p.add_argument('--lr',               type=float, default=1e-4)
     p.add_argument('--nsig',             type=float, default=3.0,
                    help='Detection significance for pseudo-labels')

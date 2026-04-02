@@ -76,10 +76,54 @@ the heatmap target. The loss combines:
 - All 10 bands loaded when `--euclid_dir` is provided
 - Default batch size: 2 (Euclid VIS at 1050x1050 is memory-heavy)
 
-## Quick Start
+## Training Pipeline
+
+Training uses a self-training loop with precomputed encoder features for speed.
+
+### Step 1: Precompute encoder features (one-time)
+
+Run the frozen V7 encoder on all tiles with all 10 bands and save the
+bottleneck tensors to disk. This is the slow step (~20 min on GPU) but only
+needs to run once. Multiple augmentation variants are cached per tile.
 
 ```bash
-# From repo root
+python models/detection/precompute_features.py \
+    --rubin_dir    data/rubin_tiles_ecdfs \
+    --euclid_dir   data/euclid_tiles_ecdfs \
+    --encoder_ckpt checkpoints/jaisp_v7_baseline/checkpoint_best.pt \
+    --out_dir      data/cached_features_v7
+```
+
+### Step 2: Self-training
+
+The self-training script runs two rounds automatically:
+
+- **Round 1**: Train CenterNet on VIS pseudo-labels (classical detection at
+  0.1"/px, the sharpest available). The model learns what sources look like
+  in 10-band feature space. Training is fast because it only runs the
+  lightweight neck + heads on cached `[256, ~130, ~130]` tensors.
+- **Promote**: Run the round 1 detector on all tiles. High-confidence (>0.8)
+  predictions that don't match any VIS pseudo-label are novel detections --
+  sources the 10-band encoder can see but VIS alone cannot (e.g. very red
+  high-z galaxies visible only in NISP Y/J/H). These are added to the label set.
+- **Round 2**: Retrain on VIS labels + promoted labels.
+
+```bash
+python models/detection/self_train.py \
+    --feature_dir  data/cached_features_v7 \
+    --rubin_dir    data/rubin_tiles_ecdfs \
+    --euclid_dir   data/euclid_tiles_ecdfs \
+    --out_dir      models/checkpoints/centernet_v7_selftrain \
+    --rounds 2 \
+    --epochs 100 \
+    --wandb_project jaisp-detection
+```
+
+### Alternative: Direct training (slower, no precompute)
+
+If you prefer to skip precomputation and run the encoder live each step:
+
+```bash
 python models/detection/train_centernet.py \
     --rubin_dir    data/rubin_tiles_ecdfs \
     --euclid_dir   data/euclid_tiles_ecdfs \
@@ -87,12 +131,14 @@ python models/detection/train_centernet.py \
     --out          models/checkpoints/centernet_v7.pt \
     --epochs 100 \
     --wandb_project jaisp-detection
-
-# With profile prediction head (needs shape labels to train):
-    --predict_profile
 ```
 
 ## Inference
+
+At inference time, no pseudo-labels or classical detection are needed. Just
+feed in a multi-band tile and get source positions out. The detector works
+on any subset of bands the encoder was trained on (Rubin-only, Rubin+Euclid,
+or any combination).
 
 ```python
 import torch
@@ -101,7 +147,8 @@ from detection.centernet_detector import CenterNetDetector
 from detection.detector import JAISPEncoderWrapper
 
 # Load foundation model
-ckpt = torch.load('checkpoints/jaisp_v7_baseline/checkpoint_best.pt', map_location='cpu')
+ckpt = torch.load('checkpoints/jaisp_v7_baseline/checkpoint_best.pt',
+                   map_location='cpu')
 cfg = ckpt.get('config', {})
 foundation = JAISPFoundationV7(
     band_names=cfg.get('band_names'),
@@ -115,13 +162,14 @@ detector = CenterNetDetector.load('models/checkpoints/centernet_v7.pt',
                                    encoder=encoder, device='cuda')
 detector.eval()
 
-# Run prediction
-# images, rms: dict[str, Tensor[1, 1, H, W]]
+# Feed any multi-band tile — images/rms are dict[str, Tensor[1, 1, H, W]]
 pred = detector.predict(images, rms, conf_threshold=0.3, tile_hw=(512, 512))
-# pred['centroids']    [N, 2]    normalized (x, y)
-# pred['scores']       [N]       heatmap confidence
-# pred['positions_px'] [N, 2]    pixel coordinates
-# pred['log_flux']     [N]       flux proxy
+
+# Results:
+# pred['positions_px']  [N, 2]  pixel coordinates (x, y)
+# pred['scores']        [N]     detection confidence
+# pred['log_flux']      [N]     brightness proxy
+# pred['centroids']     [N, 2]  normalized (x, y) in [0, 1]
 ```
 
 The `predict()` API is identical to the DETR detector, so CenterNet drops into
@@ -133,8 +181,11 @@ the astrometry pipeline without code changes.
 |------|-------------|
 | `centernet_detector.py` | `CenterNetDetector` model, heatmap/offset/flux/profile heads |
 | `centernet_loss.py` | Focal loss, Gaussian heatmap rendering, masked L1 |
-| `train_centernet.py` | CenterNet training loop with W&B heatmap visualization |
-| `detector.py` | `JaispDetector` DETR model (archived, kept for reference) |
+| `train_centernet.py` | Training loop (supports live encoder or cached features) |
+| `precompute_features.py` | One-time V7 encoder feature caching for fast training |
+| `cached_dataset.py` | Dataset loading precomputed features + pseudo-labels |
+| `self_train.py` | Self-training loop: VIS labels -> train -> promote novel detections -> retrain |
+| `dataset.py` | Pseudo-label generation (VIS or Rubin), tile dataset, collation |
+| `detector.py` | `JaispDetector` DETR model (archived) |
 | `matcher.py` | Hungarian matcher + DETR loss (archived) |
 | `train_detection.py` | DETR training loop (archived) |
-| `dataset.py` | Pseudo-label dataset with caching, shared by both architectures |

@@ -66,6 +66,9 @@ def render_heatmap_targets(
         # Offset targets at integer positions
         cx_int = cx.round().long().clamp(0, feat_w - 1)
         cy_int = cy.round().long().clamp(0, feat_h - 1)
+
+        # Force exact 1.0 at integer centers so focal loss has positive pixels
+        hm[b, 0, cy_int, cx_int] = 1.0
         dx_frac = cx - cx_int.float()
         dy_frac = cy - cy_int.float()
 
