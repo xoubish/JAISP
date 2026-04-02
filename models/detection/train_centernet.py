@@ -87,13 +87,25 @@ def _log_tile(batch, out, wandb, step, conf_thr=0.3, nms_kernel=3, euclid_dir=No
         lo, hi = np.percentile(r_band, [1, 99])
         rgb = np.clip((r_band - lo) / max(hi - lo, 1e-6), 0, 1)
     elif euclid_dir and 'tile_id' in batch:
-        # Cached mode: load VIS image for background
+        # Cached mode: load VIS image and apply same augmentation as features
         tile_id = batch['tile_id'][0] if isinstance(batch['tile_id'], list) else batch['tile_id']
         vis_path = Path(euclid_dir) / f'{tile_id}_euclid.npz'
         if vis_path.exists():
             try:
                 edata = np.load(str(vis_path), allow_pickle=True, mmap_mode='r')
                 vis = np.nan_to_num(np.asarray(edata['img_VIS'], dtype=np.float32), nan=0.0)
+                # Apply the same augmentation that was applied to the cached features
+                aug_idx = batch.get('aug_idx', [0])
+                aug_idx = aug_idx[0] if isinstance(aug_idx, list) else aug_idx
+                all_augs = [(r, fu, fl) for r in range(4)
+                            for fu in (False, True) for fl in (False, True)]
+                if aug_idx < len(all_augs):
+                    n_rot, flip_ud, flip_lr = all_augs[aug_idx]
+                    vis = np.rot90(vis, n_rot).copy()
+                    if flip_ud:
+                        vis = np.flipud(vis).copy()
+                    if flip_lr:
+                        vis = np.fliplr(vis).copy()
                 lo, hi = np.percentile(vis, [1, 99])
                 rgb = np.clip((vis - lo) / max(hi - lo, 1e-6), 0, 1)
             except Exception:
