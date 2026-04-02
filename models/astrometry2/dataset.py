@@ -38,6 +38,54 @@ from source_matching import (
 
 VIS_PIXEL_SCALE_ARCSEC = 0.1
 
+
+# ============================================================
+# DETR-based source detection (optional, replaces classical)
+# ============================================================
+
+def detect_sources_detr(
+    tile_images: Dict[str, np.ndarray],
+    tile_rms: Dict[str, np.ndarray],
+    detector,
+    device,
+    conf_threshold: float = 0.3,
+    tile_hw: tuple = None,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Run the DETR detector on a tile and return (x, y) pixel coordinates.
+
+    Parameters
+    ----------
+    tile_images : {band: [H, W]} numpy arrays for available bands
+    tile_rms    : {band: [H, W]} RMS noise maps
+    detector    : JaispDetector instance
+    device      : torch device
+    conf_threshold : minimum confidence for detections
+    tile_hw     : (H, W) of the tile (for denormalization)
+
+    Returns
+    -------
+    xs, ys : 1D arrays of pixel coordinates
+    """
+    import torch as _torch
+
+    # Build batch dicts: {band: [1, 1, H, W]}
+    imgs_d = {}
+    rms_d = {}
+    for band, img in tile_images.items():
+        imgs_d[band] = _torch.from_numpy(img[None, None]).float().to(device)
+        rms_d[band] = _torch.from_numpy(tile_rms[band][None, None]).float().to(device)
+
+    with _torch.no_grad():
+        result = detector.predict(imgs_d, rms_d,
+                                  conf_threshold=conf_threshold,
+                                  tile_hw=tile_hw)
+
+    if result['positions_px'].shape[0] == 0:
+        return np.zeros(0), np.zeros(0)
+
+    pos = result['positions_px'].cpu().numpy()  # [N, 2] (x, y)
+    return pos[:, 0], pos[:, 1]
+
 # Unified band ordering for the multi-instrument model.
 # Rubin bands come first (matching RUBIN_BAND_ORDER), then NISP bands.
 NISP_BAND_ORDER = ['Y', 'J', 'H']
@@ -280,6 +328,9 @@ def build_patch_samples(
     refine_flux_floor_sigma: float = 1.5,
     seed: int = 42,
     split_name: str = 'train',
+    detr_detector=None,
+    detr_device=None,
+    detr_conf_threshold: float = 0.3,
 ) -> List[Dict]:
     if patch_size % 2 == 0:
         raise ValueError('patch_size must be odd.')
@@ -289,6 +340,7 @@ def build_patch_samples(
     detect_bands = normalize_rubin_bands(detect_bands) or [f'rubin_{b}' for b in ('g', 'r', 'i', 'z')]
     target_idx = RUBIN_BAND_ORDER.index(target_band.split('_', 1)[1])
     rng = np.random.RandomState(int(seed))
+    use_detr = detr_detector is not None
 
     samples: List[Dict] = []
     kept_tiles = 0
@@ -306,21 +358,51 @@ def build_patch_samples(
             print(f'[{split_name}] skip {tile_id}: load/wcs failed ({exc})')
             continue
 
-        rubin_det = build_detection_image(rubin_cube, detect_bands, clip_sigma=detect_clip_sigma)
-        rx, ry = detect_sources(
-            rubin_det,
-            nsig=rubin_nsig,
-            smooth_sigma=rubin_smooth,
-            min_dist=rubin_min_dist,
-            max_sources=max_sources_rubin,
-        )
-        vx, vy = detect_sources(
-            vis_img,
-            nsig=vis_nsig,
-            smooth_sigma=vis_smooth,
-            min_dist=vis_min_dist,
-            max_sources=max_sources_vis,
-        )
+        # --- Source detection (DETR or classical) --------------------------
+        if use_detr:
+            # Build band dicts for the DETR detector
+            rubin_bands_list = [f'rubin_{b}' for b in RUBIN_BAND_ORDER]
+            tile_images = {}
+            tile_rms_d = {}
+            for i, band in enumerate(rubin_bands_list):
+                if i < rubin_cube.shape[0]:
+                    img_np = np.nan_to_num(_to_float32(rubin_cube[i]), nan=0.0)
+                    tile_images[band] = img_np
+                    # Use robust sigma as RMS estimate
+                    med = float(np.median(img_np))
+                    sig = float(1.4826 * np.median(np.abs(img_np - med)))
+                    tile_rms_d[band] = np.full_like(img_np, max(sig, 1e-10))
+
+            H_r, W_r = rubin_cube.shape[1], rubin_cube.shape[2]
+            rx, ry = detect_sources_detr(
+                tile_images, tile_rms_d, detr_detector, detr_device,
+                conf_threshold=detr_conf_threshold,
+                tile_hw=(H_r, W_r),
+            )
+            # VIS: still use classical detection (DETR is Rubin-only for now)
+            vx, vy = detect_sources(
+                vis_img,
+                nsig=vis_nsig,
+                smooth_sigma=vis_smooth,
+                min_dist=vis_min_dist,
+                max_sources=max_sources_vis,
+            )
+        else:
+            rubin_det = build_detection_image(rubin_cube, detect_bands, clip_sigma=detect_clip_sigma)
+            rx, ry = detect_sources(
+                rubin_det,
+                nsig=rubin_nsig,
+                smooth_sigma=rubin_smooth,
+                min_dist=rubin_min_dist,
+                max_sources=max_sources_rubin,
+            )
+            vx, vy = detect_sources(
+                vis_img,
+                nsig=vis_nsig,
+                smooth_sigma=vis_smooth,
+                min_dist=vis_min_dist,
+                max_sources=max_sources_vis,
+            )
         matched = match_sources_wcs(
             rx,
             ry,
@@ -429,6 +511,9 @@ def build_patch_samples_multiband(
     refine_flux_floor_sigma: float = 1.5,
     seed: int = 42,
     split_name: str = 'train',
+    detr_detector=None,
+    detr_device=None,
+    detr_conf_threshold: float = 0.3,
 ) -> List[Dict]:
     """Build training samples with multi-instrument input and per-band targets.
 
@@ -450,6 +535,9 @@ def build_patch_samples_multiband(
     detect_bands : bands used for Rubin source detection.
     include_nisp : if True, include reprojected NISP Y/J/H as encoder input channels.
         This is independent of whether NISP bands appear in target_bands.
+    detr_detector : optional JaispDetector for DETR-based Rubin source detection.
+    detr_device : torch device for DETR inference.
+    detr_conf_threshold : confidence threshold for DETR detections.
     """
     if patch_size % 2 == 0:
         raise ValueError('patch_size must be odd.')
@@ -514,12 +602,29 @@ def build_patch_samples_multiband(
                 if img is not None:
                     nisp_data[nb] = (img, nwcs)
 
-        # Source detection (band-agnostic, from Rubin detection image).
-        rubin_det = build_detection_image(rubin_cube, detect_bands_norm, clip_sigma=detect_clip_sigma)
-        rx, ry = detect_sources(
-            rubin_det, nsig=rubin_nsig, smooth_sigma=rubin_smooth,
-            min_dist=rubin_min_dist, max_sources=max_sources_rubin,
-        )
+        # Source detection (DETR or classical).
+        if detr_detector is not None:
+            rubin_bands_list = [f'rubin_{b}' for b in RUBIN_BAND_ORDER]
+            tile_images = {}
+            tile_rms_d = {}
+            for i, band in enumerate(rubin_bands_list):
+                if i < rubin_cube.shape[0]:
+                    img_np = np.nan_to_num(_to_float32(rubin_cube[i]), nan=0.0)
+                    tile_images[band] = img_np
+                    med = float(np.median(img_np))
+                    sig = float(1.4826 * np.median(np.abs(img_np - med)))
+                    tile_rms_d[band] = np.full_like(img_np, max(sig, 1e-10))
+            H_r, W_r = rubin_cube.shape[1], rubin_cube.shape[2]
+            rx, ry = detect_sources_detr(
+                tile_images, tile_rms_d, detr_detector, detr_device,
+                conf_threshold=detr_conf_threshold, tile_hw=(H_r, W_r),
+            )
+        else:
+            rubin_det = build_detection_image(rubin_cube, detect_bands_norm, clip_sigma=detect_clip_sigma)
+            rx, ry = detect_sources(
+                rubin_det, nsig=rubin_nsig, smooth_sigma=rubin_smooth,
+                min_dist=rubin_min_dist, max_sources=max_sources_rubin,
+            )
         vx, vy = detect_sources(
             vis_img, nsig=vis_nsig, smooth_sigma=vis_smooth,
             min_dist=vis_min_dist, max_sources=max_sources_vis,

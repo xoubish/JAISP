@@ -110,19 +110,12 @@ def _log_tile(batch: dict, out: dict, wandb, step: int, conf_thr: float = 0.5):
     fig, ax = plt.subplots(figsize=(6, 6))
     ax.imshow(rgb, origin='lower', cmap='gray')
 
-    # GT
-    gt_xy  = batch['centroids'][0].cpu().numpy()
-    gt_cls = batch['classes'][0].cpu().numpy()
+    # GT — show all sources as visible green circles
+    gt_xy = batch['centroids'][0].cpu().numpy()
     if len(gt_xy):
-        stars = gt_xy[gt_cls == 0]
-        gals  = gt_xy[gt_cls == 1]
-        if len(stars):
-            ax.scatter(stars[:, 0] * (W-1), stars[:, 1] * (H-1),
-                       s=20, marker='+', c='cyan',  lw=0.8, label='GT star')
-        if len(gals):
-            ax.scatter(gals[:, 0]  * (W-1), gals[:, 1]  * (H-1),
-                       s=20, marker='o', c='yellow', lw=0.8,
-                       facecolors='none', label='GT galaxy')
+        ax.scatter(gt_xy[:, 0] * (W-1), gt_xy[:, 1] * (H-1),
+                   s=60, marker='o', edgecolors='lime', facecolors='none',
+                   lw=1.2, label=f'GT ({len(gt_xy)})')
 
     # Predictions
     scores = out['conf'][0].sigmoid().detach().cpu().numpy()
@@ -158,7 +151,7 @@ def train(args):
     full_ds = TileDetectionDataset(
         rubin_dir=args.rubin_dir,
         euclid_dir=args.euclid_dir,
-        nsig=5.0,
+        nsig=3.0,
         max_sources=args.num_queries,
         use_all_bands=args.euclid_dir is not None,
         augment=True,
@@ -215,7 +208,7 @@ def train(args):
             )
             optimizer.zero_grad()
             losses['loss_total'].backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 0.1)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
 
             tr_losses.append(float(losses['loss_total']))
@@ -224,8 +217,8 @@ def train(args):
                 wandb.log({
                     'train/loss':          float(losses['loss_total']),
                     'train/loss_pos':      float(losses['loss_pos']),
-                    'train/loss_cls':      float(losses['loss_cls']),
                     'train/loss_conf_obj': float(losses['loss_conf_obj']),
+                    'train/loss_conf_noobj': float(losses['loss_conf_noobj']),
                     'train/n_matched':     float(losses['n_matched']),
                     'step': step,
                 })

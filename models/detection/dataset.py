@@ -85,8 +85,7 @@ def _pseudo_labels(
             H, W,
         )
 
-    conc    = _concentration_index(rubin_img[2], xs, ys)   # r-band
-    classes = (conc < _STAR_CONC_THRESHOLD).astype(np.int64)  # 0=star, 1=galaxy
+    classes = np.zeros(len(xs), dtype=np.int64)  # all class 0 = source
 
     centroids = np.stack([
         xs / max(W - 1, 1),
@@ -129,6 +128,7 @@ class TileDetectionDataset(Dataset):
             rubin_dir=rubin_dir,
             euclid_dir=euclid_dir or rubin_dir,
             augment=augment,
+            load_euclid=self.use_all_bands,
         )
 
     def __len__(self) -> int:
@@ -137,10 +137,10 @@ class TileDetectionDataset(Dataset):
     def __getitem__(self, idx: int) -> dict:
         item = self._base[idx]
 
-        # Build per-band image/rms dicts
+        # Build per-band image/rms dicts and collect augmented Rubin cube
         images: dict = {}
         rms:    dict = {}
-        rubin_img_np = None
+        rubin_bands_np: list = []
 
         for band in RUBIN_BANDS:
             if band in item['rubin']:
@@ -148,9 +148,11 @@ class TileDetectionDataset(Dataset):
                 rms_t = item['rubin'][band]['rms']
                 images[band] = img_t
                 rms[band]    = rms_t
-                if rubin_img_np is None:
-                    # Collect Rubin bands for detection (numpy, no-aug copy)
-                    pass
+                rubin_bands_np.append(img_t[0].numpy())  # [H, W] augmented
+            else:
+                # Placeholder zero band to keep indexing consistent
+                h, w = next(iter(item['rubin'].values()))['image'].shape[1:]
+                rubin_bands_np.append(np.zeros((h, w), dtype=np.float32))
 
         if self.use_all_bands:
             for band in EUCLID_BANDS:
@@ -158,15 +160,11 @@ class TileDetectionDataset(Dataset):
                     images[band] = item['euclid'][band]['image']
                     rms[band]    = item['euclid'][band]['rms']
 
-        # Pseudo-label detection on raw (pre-aug) Rubin tile for consistency
-        # Re-load the raw tile for detection (augmented tile has rotated coords)
-        raw_path = self._base.tiles[idx]['rubin_path']
-        raw_data = np.load(raw_path, allow_pickle=True, mmap_mode='r')
-        raw_img  = np.nan_to_num(
-            np.asarray(raw_data['img'], dtype=np.float32), nan=0.0
-        )
+        # Pseudo-labels from the AUGMENTED Rubin image so GT matches the
+        # rotated/flipped tile the model actually sees.
+        rubin_cube = np.stack(rubin_bands_np, axis=0)   # [6, H, W]
         centroids_np, classes_np, H, W = _pseudo_labels(
-            raw_img, self.nsig, self.max_sources
+            rubin_cube, self.nsig, self.max_sources
         )
 
         return {

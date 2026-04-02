@@ -1,119 +1,121 @@
 # JAISP Detection Head
 
-`JaispDetector` is a DETR-style source detector built on frozen `JAISPFoundationV7` encoder features.
+DETR-style source detector built on the frozen V7 foundation encoder.
 
 ## Architecture
 
-`models/detection/detector.py`
+```
+Input: multi-band tile dicts {band: [B, 1, H, W]} images + rms
+    |
+Frozen JAISPFoundationV7.encode()
+    -> bottleneck [B, 256, ~130, ~130]
+    |
+1x1 Conv + GroupNorm -> [B, 256, ~130, ~130]
+    |
+Flatten + 2D sinusoidal positional encoding
+    -> memory tokens [~17000, B, 256]
+    |
+Transformer decoder (6 layers, 8 heads, FFN=1024)
+    with 500 learned object queries
+    |
+    +-- Centroid head:    3-layer MLP -> sigmoid -> (x, y) in [0, 1]
+    +-- Confidence head:  Linear -> objectness logit
+    +-- Log-flux head:    2-layer MLP -> log10(flux) proxy
+    +-- Class head:       Linear -> 1 class ('source')
+```
 
-Pipeline:
+The encoder is frozen by default. Trainable parameters: ~6.7M.
 
-1. `JAISPFoundationV7.encode()` bottleneck: `[B, encoder_dim, h, w]`  
-   `encoder_dim = hidden_ch` (default 256), spatial size from fused physical scale (~0.8"/px)
-2. `1×1` projection + GroupNorm to `d_model` (default 256)
-3. 2D sinusoidal positional encoding on flattened memory tokens
-4. Transformer decoder with learned object queries (`num_queries`, default 300)
-5. Query heads:
-   - centroid: normalised `(x, y)` in `[0, 1]`
-   - class logits: `['star', 'galaxy', 'artifact']`
-   - confidence: objectness logit
-   - flux: `log_flux` proxy
+## Training
 
-The encoder is frozen by default (`JAISPEncoderWrapper(freeze=True)`), with optional end-to-end fine-tuning via `--finetune_encoder`.
+### Hungarian Matching
 
-## Matching And Loss
+Each training step matches 500 predicted queries to ground-truth pseudo-labels
+via Hungarian assignment. The cost matrix uses:
 
-`models/detection/matcher.py`
+- L1 position distance (weight 5.0)
+- Negative sigmoid confidence (weight 1.0)
 
-Training uses Hungarian assignment from predictions to ground-truth source sets.
+### Loss
 
-Matching cost:
+| Term | Weight | Description |
+|------|--------|-------------|
+| `loss_pos` | 5.0 | L1 on matched centroid positions |
+| `loss_conf_obj` | 2.0 | BCE(matched confidence, 1) |
+| `loss_conf_noobj` | 0.5 | BCE(unmatched confidence, 0) |
 
-`cost = cost_pos * L1(xy) + cost_cls * CE(class) + cost_conf * (-sigmoid(conf))`
+Classification loss is not used -- with a single 'source' class, the
+confidence head handles object-vs-background.
 
-Default matching weights:
+### Pseudo-Labels
 
-- `cost_pos = 5.0`
-- `cost_cls = 1.0`
-- `cost_conf = 1.0`
+Ground-truth labels are generated from classical peak-finding (not a curated catalog):
 
-Final loss combines:
+1. Build detection image from Rubin g+r+i coadd
+2. Detect peaks above 3-sigma with Gaussian smoothing
+3. Subpixel centroiding via flux-weighted center of mass
+4. Cap at `num_queries` sources per tile (default 500)
 
-- matched centroid L1 (`lambda_pos = 5.0`)
-- matched class CE (`lambda_cls = 1.0`)
-- matched confidence BCE to 1 (`lambda_conf = 2.0`)
-- unmatched confidence BCE to 0 (`lambda_noobj = 0.1`)
+The pseudo-labels are computed on the **augmented** image (after random 90-degree
+rotations and flips) so GT coordinates match the image the encoder sees.
 
-## Training Data Path
+### Data
 
-`models/detection/dataset.py`
-
-`TileDetectionDataset` loads Rubin + Euclid tiles and generates pseudo-labels from Rubin imagery.
-
-Pseudo-label flow:
-
-1. Build Rubin detection image from `(g, r, i)`
-2. Detect peaks (`detect_sources`, default 5σ threshold)
-3. Compute concentration index in Rubin r-band
-4. Assign class:
-   - `0` = star (`concentration >= 0.5`)
-   - `1` = galaxy (`concentration < 0.5`)
-
-Notes:
-
-- Labels are pseudo-labels from classical peak-finding, not a survey catalog.
-- `artifact` is predicted by the model but not separately pseudo-labeled.
-- Euclid bands enrich the encoder features but pseudo-label generation is Rubin-driven.
+- 130 training tiles, 14 validation tiles (90/10 split, seed=42)
+- Augmentation: random 90-degree rotations + horizontal/vertical flips
+- Euclid bands are loaded when `--euclid_dir` is provided, enriching encoder features
+- Batch size: 4, AdamW optimizer, cosine LR schedule
 
 ## Quick Start
 
-From repo root:
-
 ```bash
+# From repo root
 python models/detection/train_detection.py \
-  --rubin_dir  data/rubin_tiles_ecdfs \
-  --euclid_dir data/euclid_tiles_ecdfs \
-  --encoder_ckpt models/checkpoints/jaisp_v7_baseline/checkpoint_best.pt \
-  --out models/checkpoints/detector_v7.pt \
-  --epochs 50 \
-  --wandb_project jaisp-detection
-
-# Smoke test — no encoder checkpoint (stub CNN)
-python models/detection/train_detection.py \
-  --rubin_dir data/rubin_tiles_ecdfs \
-  --out models/checkpoints/detector_stub.pt \
-  --epochs 5
+    --rubin_dir    data/rubin_tiles_ecdfs \
+    --euclid_dir   data/euclid_tiles_ecdfs \
+    --encoder_ckpt checkpoints/jaisp_v7_baseline/checkpoint_best.pt \
+    --out          models/checkpoints/detector_v7.pt \
+    --num_queries 500 \
+    --epochs 100 \
+    --wandb_project jaisp-detection
 ```
 
-## Inference Example
+## Inference
 
 ```python
 import torch
 from jaisp_foundation_v7 import JAISPFoundationV7
 from detection.detector import JaispDetector, JAISPEncoderWrapper
 
+# Load foundation model
 ckpt = torch.load('checkpoints/jaisp_v7_baseline/checkpoint_best.pt', map_location='cpu')
-cfg  = ckpt.get('config', {})
+cfg = ckpt.get('config', {})
 foundation = JAISPFoundationV7(
     band_names=cfg.get('band_names'),
     hidden_ch=cfg.get('hidden_ch', 256),
 )
 foundation.load_state_dict(ckpt['model'], strict=False)
 
-encoder  = JAISPEncoderWrapper(foundation, freeze=True)
-detector = JaispDetector.load('checkpoints/detector_v7.pt', encoder=encoder)
+# Load detector
+encoder = JAISPEncoderWrapper(foundation, freeze=True)
+detector = JaispDetector.load('models/checkpoints/detector_v7.pt',
+                               encoder=encoder, device='cuda')
+detector.eval()
 
-# images/rms are dict[str, Tensor[B,1,H,W]]
-pred = detector.predict(images, rms, conf_threshold=0.5, tile_hw=(H, W))
-# pred['centroids']    [N, 2]
-# pred['classes']      [N]
-# pred['scores']       [N]
-# pred['positions_px'] [N, 2]  (if tile_hw given)
+# Run prediction
+# images, rms: dict[str, Tensor[1, 1, H, W]]
+pred = detector.predict(images, rms, conf_threshold=0.5, tile_hw=(512, 512))
+# pred['centroids']    [N, 2]    normalized (x, y)
+# pred['scores']       [N]       confidence
+# pred['positions_px'] [N, 2]    pixel coordinates
+# pred['log_flux']     [N]       flux proxy
 ```
 
-## File Map
+## Files
 
-- `detector.py`: model, encoder wrapper, inference helpers, save/load
-- `matcher.py`: Hungarian matcher + DETR-style loss
-- `dataset.py`: pseudo-label dataset + collate
-- `train_detection.py`: train/val loop, W&B logging
+| File | Description |
+|------|-------------|
+| `detector.py` | `JaispDetector` model, encoder wrapper, save/load, inference |
+| `matcher.py` | Hungarian matcher + position/confidence loss |
+| `dataset.py` | Pseudo-label generation, tile dataset, DETR-compatible collation |
+| `train_detection.py` | Training loop with W&B logging and visualization |

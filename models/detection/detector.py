@@ -154,7 +154,7 @@ class JAISPEncoderWrapper(nn.Module):
 # Source classes
 # ---------------------------------------------------------------------------
 
-SOURCE_CLASSES = ['star', 'galaxy', 'artifact']
+SOURCE_CLASSES = ['source']
 N_CLASSES = len(SOURCE_CLASSES)
 
 

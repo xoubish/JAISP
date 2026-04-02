@@ -57,6 +57,11 @@ try:
     _V6_AVAILABLE = True
 except ImportError:
     _V6_AVAILABLE = False
+try:
+    from matcher_v7 import load_v7_matcher
+    _V7_AVAILABLE = True
+except ImportError:
+    _V7_AVAILABLE = False
 from viz import save_tile_diagnostic
 from jaisp_dataset_v4 import RUBIN_BAND_ORDER, _to_float32
 from source_matching import (
@@ -68,16 +73,35 @@ from source_matching import (
 )
 
 
-def load_model(checkpoint_path: str, device: torch.device, v6_checkpoint: str = ''):
+def load_model(checkpoint_path: str, device: torch.device,
+               v6_checkpoint: str = '', v7_checkpoint: str = ''):
     """Load a matcher checkpoint.
 
-    If v6_checkpoint is provided, loads a V6AstrometryMatcher using the Phase B
-    foundation weights and the astrometry adapter weights from checkpoint_path.
+    If v7_checkpoint is provided, loads a V7AstrometryMatcher.
+    Elif v6_checkpoint is provided, loads a V6AstrometryMatcher.
     Otherwise loads a baseline LocalAstrometryMatcher.
     """
     ckpt = torch.load(checkpoint_path, map_location=device)
 
-    if v6_checkpoint:
+    if v7_checkpoint:
+        if not _V7_AVAILABLE:
+            raise ImportError('matcher_v7.py not found — cannot load v7 model.')
+        cfg = ckpt.get('args', {})
+        n_rubin = int(ckpt.get('rubin_channels', len(ckpt.get('input_bands', ['rubin_r']))))
+        model = load_v7_matcher(
+            v7_checkpoint   = v7_checkpoint,
+            device          = device,
+            n_rubin_bands   = n_rubin,
+            hidden_channels = cfg.get('hidden_channels', 64),
+            n_adapter_blocks= cfg.get('adapter_blocks', 2),
+            freeze_stems    = True,
+            search_radius   = cfg.get('search_radius', 3),
+            n_target_bands  = int(ckpt.get('n_target_bands', 1)),
+            band_embed_dim  = int(cfg.get('band_embed_dim', 16)),
+            mlp_hidden      = cfg.get('mlp_hidden', 128),
+        )
+        model.load_state_dict(ckpt['model'], strict=True)
+    elif v6_checkpoint:
         if not _V6_AVAILABLE:
             raise ImportError('matcher_v6.py not found — cannot load v6 model.')
         cfg = ckpt.get('args', {})
@@ -245,8 +269,29 @@ def predict_tile(
     need_nisp = target_band.startswith('nisp_') or any(b.startswith('nisp_') for b in input_bands_norm)
     nisp_data = _load_nisp_data(edata) if need_nisp else {}
 
-    rubin_det = build_detection_image(rubin_cube, detect_bands, clip_sigma=args.detect_clip_sigma)
-    rx, ry = detect_sources(rubin_det, nsig=args.rubin_nsig, smooth_sigma=args.rubin_smooth, min_dist=args.rubin_min_dist, max_sources=args.max_sources_rubin)
+    # Source detection (DETR or classical)
+    _detr = getattr(args, '_detr_detector', None)
+    if _detr is not None:
+        from dataset import detect_sources_detr
+        rubin_bands_list = [f'rubin_{b}' for b in RUBIN_BAND_ORDER]
+        tile_images = {}
+        tile_rms_d = {}
+        for i, band in enumerate(rubin_bands_list):
+            if i < rubin_cube.shape[0]:
+                img_np = np.nan_to_num(_to_float32(rubin_cube[i]), nan=0.0)
+                tile_images[band] = img_np
+                med = float(np.median(img_np))
+                sig = float(1.4826 * np.median(np.abs(img_np - med)))
+                tile_rms_d[band] = np.full_like(img_np, max(sig, 1e-10))
+        H_r, W_r = rubin_cube.shape[1], rubin_cube.shape[2]
+        rx, ry = detect_sources_detr(
+            tile_images, tile_rms_d, _detr, device,
+            conf_threshold=getattr(args, 'detr_conf_threshold', 0.3),
+            tile_hw=(H_r, W_r),
+        )
+    else:
+        rubin_det = build_detection_image(rubin_cube, detect_bands, clip_sigma=args.detect_clip_sigma)
+        rx, ry = detect_sources(rubin_det, nsig=args.rubin_nsig, smooth_sigma=args.rubin_smooth, min_dist=args.rubin_min_dist, max_sources=args.max_sources_rubin)
     vx, vy = detect_sources(vis_img, nsig=args.vis_nsig, smooth_sigma=args.vis_smooth, min_dist=args.vis_min_dist, max_sources=args.max_sources_vis)
     matched = match_sources_wcs(
         rx, ry, vx, vy, rwcs, vwcs,
@@ -431,6 +476,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--v6-checkpoint', type=str, default='',
                    help='Path to jaisp_foundation_v6 Phase B checkpoint. '
                         'Required when the matcher checkpoint is a V6AstrometryMatcher.')
+    p.add_argument('--v7-checkpoint', type=str, default='',
+                   help='Path to jaisp_v7_baseline checkpoint. '
+                        'Required when the matcher checkpoint is a V7AstrometryMatcher.')
+    p.add_argument('--detr-checkpoint', type=str, default='',
+                   help='Path to detector_v7.pt for DETR source detection '
+                        '(omit for classical peak-finding).')
+    p.add_argument('--detr-conf-threshold', type=float, default=0.3,
+                   help='DETR confidence threshold (default: 0.3).')
     p.add_argument('--all-bands', action='store_true', default=False,
                    help='Export concordance for every target band in a multiband checkpoint '
                         'in one FITS file (one DRA/DDE/COV triplet per band per tile).')
@@ -478,7 +531,17 @@ def main():
     args = build_parser().parse_args()
     device = torch.device(args.device if args.device else ('cuda' if torch.cuda.is_available() else 'cpu'))
     v6_ckpt = getattr(args, 'v6_checkpoint', '') or ''
-    model, ckpt = load_model(args.checkpoint, device, v6_checkpoint=v6_ckpt)
+    v7_ckpt = getattr(args, 'v7_checkpoint', '') or ''
+    model, ckpt = load_model(args.checkpoint, device,
+                             v6_checkpoint=v6_ckpt, v7_checkpoint=v7_ckpt)
+
+    # Optional DETR detector for Rubin source detection
+    detr_ckpt = getattr(args, 'detr_checkpoint', '') or ''
+    if detr_ckpt and v7_ckpt:
+        from train_astro_v7 import _load_detr_detector
+        args._detr_detector = _load_detr_detector(detr_ckpt, v7_ckpt, device)
+    else:
+        args._detr_detector = None
 
     # Determine which target bands to export
     target_band_raw = ckpt.get('target_band', ckpt.get('args', {}).get('rubin_band', 'r'))
