@@ -27,7 +27,7 @@ A self-supervised multi-instrument foundation model for precision cosmology with
 
 Rubin Observatory's LSST and ESA's Euclid will together produce the deepest, widest multi-wavelength imaging survey ever conducted. They observe the same sky, but through very different eyes: Rubin captures six optical bands (u through y) at 0.2 arcsec/pixel over a 512x512 tile grid, while Euclid provides a single ultra-sharp visible channel (VIS) at 0.1 arcsec/pixel on a 1050x1050 grid, plus three near-infrared bands (Y, J, H) at 0.3 arcsec/pixel. Jointly analyzing these instruments enables science that neither can achieve alone -- sharper source detection by combining Euclid's resolution with Rubin's depth, sub-pixel astrometric alignment across surveys, and more precise photometric measurements that leverage all 10 wavelength channels simultaneously.
 
-The challenge is that these instruments have different pixel scales, point-spread functions, noise properties, and coordinate systems. JAISP addresses this by learning a single spatially precise shared representation from both instruments through self-supervised pretraining, then attaching lightweight task-specific heads for detection, astrometry, and photometry. The central insight -- arrived at after five failed iterations -- is that **pixel-space reconstruction** (masked autoencoding) forces the encoder to preserve the exact spatial layout needed by precision cosmology tasks. Latent-space objectives like JEPA and contrastive learning optimize for "feature similarity" but allow the network to discard sub-pixel spatial information, which is precisely what astrometry and photometry demand.
+The challenge is that these instruments have different pixel scales, point-spread functions, noise properties, and coordinate systems. JAISP addresses this by learning a single spatially precise shared representation from both instruments through self-supervised pretraining, then attaching lightweight task-specific heads for detection, astrometry, and photometry. The central insight -- arrived at after five failed iterations -- is that **pixel-space reconstruction** via a Masked Autoencoder (MAE), where the model hides one band and learns to reconstruct it from the remaining bands, forces the encoder to preserve the exact spatial layout needed by precision cosmology tasks. Latent-space objectives like JEPA and contrastive learning optimize for "feature similarity" but allow the network to discard sub-pixel spatial information, which is precisely what astrometry and photometry demand.
 
 ### The Pipeline
 
@@ -54,6 +54,29 @@ This two-layer design means the expensive foundation pretraining only happens on
 ## Data
 
 All data covers the Extended Chandra Deep Field South (ECDFS), a well-studied region of sky with deep multi-wavelength coverage. The field is tiled into approximately 1700 overlapping tiles. Each tile is stored as a compressed NumPy archive (.npz) containing the image data, variance maps, and WCS astrometric headers.
+
+### Tiling and Overlap
+
+Tiles are laid out on a regular grid with 256-pixel stride in both x and y, but each Rubin tile is 512x512 pixels. This means adjacent tiles overlap by **256 pixels (50%)** in each direction. A given point on the sky appears in up to 4 overlapping tiles.
+
+This overlap has several benefits:
+
+- **Foundation pretraining**: The same source appears in multiple tiles at different positions relative to tile edges. This acts as free data augmentation -- the model sees a galaxy near the center of one tile and near the edge of a neighbor, learning position-invariant features. This is particularly valuable given the current dataset size.
+- **Detection**: Sources near tile edges (where detection is hardest) appear near the center of overlapping tiles, so the detector learns to find sources regardless of their position within a tile.
+- **Astrometry**: Shared sources in overlap regions tie neighboring tiles' concordance solutions together in the global field fit (`infer_global_concordance.py`), enforcing continuity across the full survey footprint.
+
+The downside is that the 144 tiles are not independent samples. With 50% overlap, there are roughly ~36 truly independent sky areas. This limits the diversity of source populations and noise realizations the model trains on, making the dataset expansion (currently in progress) important for generalization.
+
+### Tile Size Rationale
+
+The current 512x512 Rubin tile size (102" x 102" on sky) is a deliberate choice balancing several factors:
+
+- **Transformer cost**: The V7 fused-scale bottleneck produces ~130x130 tokens (~17,000 per tile). Full self-attention is quadratic in token count, so doubling tile dimensions would increase attention cost ~9x. The current size is near the practical limit for dense self-attention without requiring sparse or windowed attention mechanisms.
+- **Source density**: At 3-sigma detection in ECDFS, a 512x512 tile contains ~500 sources -- a good density for both detection training (enough targets per tile) and astrometry (enough anchors for the per-tile concordance fit).
+- **Spatial context**: 102" spans ~50 PSF widths, which is more than enough context for learning source morphology, spectral relationships, and cross-instrument correspondence. Astronomical sources don't require arcminute-scale spatial context.
+- **Astrometry field fitting**: While larger tiles would provide more baseline for per-tile concordance fits, this is not a constraint in practice because the global concordance solver already combines measurements from all tiles across the full survey footprint. The per-tile fit is just a local step; spatial coverage comes from having many tiles, not from making individual tiles larger.
+
+As the dataset grows, the plan is to add more tiles at the same size rather than increase tile dimensions. More tiles provides more diverse training samples (different source populations, noise realizations, PSF conditions) without increasing per-sample computational cost. This is a more efficient use of additional data than larger tiles would be.
 
 ### Rubin NPZ files (`data/rubin_tiles_ecdfs/tile_x*_y*.npz`)
 
