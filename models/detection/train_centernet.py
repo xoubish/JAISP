@@ -70,7 +70,7 @@ def _load_encoder(encoder_ckpt, device, freeze=True):
 # Visualization
 # ---------------------------------------------------------------------------
 
-def _log_tile(batch, out, wandb, step, conf_thr=0.3, nms_kernel=3):
+def _log_tile(batch, out, wandb, step, conf_thr=0.3, nms_kernel=3, euclid_dir=None):
     """Overlay GT centroids and CenterNet heatmap + detected peaks."""
     import matplotlib
     matplotlib.use('Agg')
@@ -80,16 +80,29 @@ def _log_tile(batch, out, wandb, step, conf_thr=0.3, nms_kernel=3):
     hm = out['heatmap'][0, 0].detach().cpu().numpy()
     hm_h, hm_w = hm.shape
 
-    # Background image: r-band if available (live mode), heatmap if cached
+    # Background image: r-band (live mode), VIS (cached mode), or black fallback
+    rgb = None
     if 'images' in batch and 'rubin_r' in batch['images']:
         r_band = batch['images']['rubin_r'][0, 0].cpu().numpy()
         lo, hi = np.percentile(r_band, [1, 99])
         rgb = np.clip((r_band - lo) / max(hi - lo, 1e-6), 0, 1)
-        H, W = rgb.shape
-    else:
-        # Cached mode: use heatmap dimensions for coordinate space
+    elif euclid_dir and 'tile_id' in batch:
+        # Cached mode: load VIS image for background
+        tile_id = batch['tile_id'][0] if isinstance(batch['tile_id'], list) else batch['tile_id']
+        vis_path = Path(euclid_dir) / f'{tile_id}_euclid.npz'
+        if vis_path.exists():
+            try:
+                edata = np.load(str(vis_path), allow_pickle=True, mmap_mode='r')
+                vis = np.nan_to_num(np.asarray(edata['img_VIS'], dtype=np.float32), nan=0.0)
+                lo, hi = np.percentile(vis, [1, 99])
+                rgb = np.clip((vis - lo) / max(hi - lo, 1e-6), 0, 1)
+            except Exception:
+                pass
+
+    if rgb is None:
         rgb = np.zeros((hm_h, hm_w))
-        H, W = hm_h, hm_w
+
+    H, W = rgb.shape
 
     fig, axes = plt.subplots(1, 2, figsize=(12, 6))
 
@@ -319,7 +332,8 @@ def train(args):
                             sim = {b: v.to(device) for b, v in sample['images'].items()}
                             srm = {b: v.to(device) for b, v in sample['rms'].items()}
                             sout = model(sim, srm)
-                    log['viz/tile'] = _log_tile(sample, sout, wandb, step)
+                    log['viz/tile'] = _log_tile(sample, sout, wandb, step,
+                                                euclid_dir=args.euclid_dir)
                 except Exception as exc:
                     print(f'  [warn] viz failed: {exc}')
             wandb.log(log)
