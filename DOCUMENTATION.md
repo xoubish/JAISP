@@ -1,5 +1,7 @@
 # JAISP (Joint AI Survey Processing)
 
+## Full Documentation
+
 A self-supervised multi-instrument foundation model for precision cosmology with Rubin Observatory and Euclid, trained on overlapping imaging in the Extended Chandra Deep Field South (ECDFS).
 
 ---
@@ -9,8 +11,8 @@ A self-supervised multi-instrument foundation model for precision cosmology with
 1. [Motivation](#motivation)
 2. [Data](#data)
 3. [Foundation Model](#foundation-model)
-   - [Architecture History (v5 -> v6 -> v7)](#architecture-history)
-   - [v7 Mixed-Resolution MAE (Current)](#v7-mixed-resolution-mae)
+   - [Architecture History (v1 through v7)](#architecture-history-v1-through-v7)
+   - [v7 Mixed-Resolution MAE (Current)](#v7-mixed-resolution-mae-current)
 4. [Downstream Heads](#downstream-heads)
    - [Detection (DETR)](#1-detection)
    - [Astrometry Concordance](#2-astrometry-concordance)
@@ -23,11 +25,13 @@ A self-supervised multi-instrument foundation model for precision cosmology with
 
 ## Motivation
 
-Rubin Observatory's LSST and ESA's Euclid survey the same sky at different resolutions, wavelengths, and pixel scales. Jointly analyzing their imaging enables science neither can achieve alone -- sub-pixel astrometric alignment, deeper source detection, and more precise photometry.
+Rubin Observatory's LSST and ESA's Euclid will together produce the deepest, widest multi-wavelength imaging survey ever conducted. They observe the same sky, but through very different eyes: Rubin captures six optical bands (u through y) at 0.2 arcsec/pixel over a 512x512 tile grid, while Euclid provides a single ultra-sharp visible channel (VIS) at 0.1 arcsec/pixel on a 1050x1050 grid, plus three near-infrared bands (Y, J, H) at 0.3 arcsec/pixel. Jointly analyzing these instruments enables science that neither can achieve alone -- sharper source detection by combining Euclid's resolution with Rubin's depth, sub-pixel astrometric alignment across surveys, and more precise photometric measurements that leverage all 10 wavelength channels simultaneously.
 
-JAISP learns a single spatially precise shared representation from both instruments, then attaches lightweight task-specific heads for detection, astrometry, and photometry. The central insight is that **pixel-space reconstruction** (masked autoencoding) forces the encoder to preserve the exact spatial layout needed by precision cosmology tasks, unlike latent-space objectives (JEPA) that discard sub-pixel information.
+The challenge is that these instruments have different pixel scales, point-spread functions, noise properties, and coordinate systems. JAISP addresses this by learning a single spatially precise shared representation from both instruments through self-supervised pretraining, then attaching lightweight task-specific heads for detection, astrometry, and photometry. The central insight -- arrived at after five failed iterations -- is that **pixel-space reconstruction** (masked autoencoding) forces the encoder to preserve the exact spatial layout needed by precision cosmology tasks. Latent-space objectives like JEPA and contrastive learning optimize for "feature similarity" but allow the network to discard sub-pixel spatial information, which is precisely what astrometry and photometry demand.
 
 ### The Pipeline
+
+The system works in two layers. First, a foundation model is trained once through self-supervised masked band prediction: given 9 of 10 bands, reconstruct the held-out band at pixel precision. This pretraining forces the encoder to learn cross-instrument spatial correspondence, noise properties, and spectral relationships without any labels. Second, the frozen encoder features are reused by three downstream heads, each of which trains only a small task-specific network on top.
 
 ```
  Rubin tiles (6 bands, 512x512, 0.2"/px)
@@ -43,111 +47,118 @@ JAISP learns a single spatially precise shared representation from both instrume
  (DETR)     (patch matching)   (PSF + matched filter)
 ```
 
+This two-layer design means the expensive foundation pretraining only happens once. Each downstream task gets the benefit of 10-band multi-instrument features without paying the cost of encoding from scratch.
+
 ---
 
 ## Data
 
-All data covers the ECDFS field, ~1700 overlapping tiles.
+All data covers the Extended Chandra Deep Field South (ECDFS), a well-studied region of sky with deep multi-wavelength coverage. The field is tiled into approximately 1700 overlapping tiles. Each tile is stored as a compressed NumPy archive (.npz) containing the image data, variance maps, and WCS astrometric headers.
 
 ### Rubin NPZ files (`data/rubin_tiles_ecdfs/tile_x*_y*.npz`)
 
-| Key      | Shape        | Description                        |
-|----------|--------------|------------------------------------|
-| `img`    | `[6, 512, 512]` | Flux in 6 bands (u, g, r, i, z, y) |
-| `var`    | `[6, 512, 512]` | Variance (converted to RMS internally) |
-| `wcs_hdr`| string       | FITS WCS header for astrometry     |
+| Key      | Shape            | Description                        |
+|----------|------------------|------------------------------------|
+| `img`    | `[6, 512, 512]`  | Flux in 6 bands (u, g, r, i, z, y) |
+| `var`    | `[6, 512, 512]`  | Variance per pixel (converted to RMS internally) |
+| `wcs_hdr`| string           | FITS WCS header for astrometric calibration |
 
-Pixel scale: 0.2 arcsec/pixel.
+Pixel scale: 0.2 arcsec/pixel. Each tile covers roughly 102 x 102 arcsec on the sky.
 
 ### Euclid NPZ files (`data/euclid_tiles_ecdfs/tile_x*_y*_euclid.npz`)
 
-| Key       | Shape             | Pixel Scale   |
-|-----------|-------------------|---------------|
-| `img_VIS` | `[~1050, ~1050]`  | 0.1 arcsec/px |
-| `img_Y/J/H` | `[~350, ~350]` | 0.3 arcsec/px |
-| `var_VIS/Y/J/H` | same       | Variance      |
-| `wcs_VIS/Y/J/H` | string     | FITS WCS      |
+| Key              | Shape             | Pixel Scale    |
+|------------------|-------------------|----------------|
+| `img_VIS`        | `[~1050, ~1050]`  | 0.1 arcsec/px  |
+| `img_Y`, `img_J`, `img_H` | `[~350, ~350]` | 0.3 arcsec/px |
+| `var_VIS/Y/J/H`  | same              | Variance       |
+| `wcs_VIS/Y/J/H`  | string            | FITS WCS       |
+
+Euclid VIS has twice the angular resolution of Rubin, which is why preserving it at native resolution (rather than downsampling to match Rubin) is so important for the foundation model design.
 
 ### Supported Bands
 
-| Instrument | Bands                           | Count |
-|------------|---------------------------------|-------|
-| Rubin      | `rubin_u`, `rubin_g`, `rubin_r`, `rubin_i`, `rubin_z`, `rubin_y` | 6 |
-| Euclid     | `euclid_VIS`, `euclid_Y`, `euclid_J`, `euclid_H` | 4 |
-| **Total**  |                                 | **10** |
+| Instrument | Bands                           | Wavelength Range | Count |
+|------------|---------------------------------|------------------|-------|
+| Rubin      | `rubin_u`, `rubin_g`, `rubin_r`, `rubin_i`, `rubin_z`, `rubin_y` | 320-1060 nm | 6 |
+| Euclid     | `euclid_VIS`, `euclid_Y`, `euclid_J`, `euclid_H` | 550-2020 nm | 4 |
+| **Total**  |                                 |                  | **10** |
 
-Each band has its own `BandStem` with independent learned weights.
+Each band has its own `BandStem` -- a small per-band CNN that handles noise normalization and initial feature extraction. This per-band design allows the model to learn band-specific noise properties and PSF characteristics while producing a common feature representation for downstream fusion.
 
 ---
 
 ## Foundation Model
 
-### Architecture History
+### Architecture History (v1 through v7)
 
-The foundation model went through seven major iterations. The overall arc is a progression from **latent-space alignment** (v1-v5) to **pixel-space reconstruction** (v6-v7) -- driven by the realization that precision cosmology tasks (astrometry, photometry) demand sub-pixel spatial fidelity that contrastive/JEPA objectives cannot enforce.
+The foundation model went through seven major iterations over the course of this project. Understanding this history is important because each version's failure revealed a specific insight about what self-supervised astronomical representations need. The overall arc is a progression from **latent-space alignment** (v1-v5) to **pixel-space reconstruction** (v6-v7), driven by the realization that precision cosmology demands sub-pixel spatial fidelity that contrastive and JEPA objectives fundamentally cannot enforce.
 
 #### v1: Patch-Level Contrastive Learning
 
-**Approach**: ViT encoders for Rubin and Euclid. Extract large patches (192x192 Rubin, 384x384 Euclid), encode each to a single embedding vector, train with contrastive loss (NT-Xent) to match co-located Rubin-Euclid pairs.
+The first approach was conceptually straightforward: take large patches from Rubin and Euclid images at the same sky location, encode each through a Vision Transformer (ViT), and train with a contrastive loss (NT-Xent) to pull co-located patch pairs together while pushing non-overlapping pairs apart. Rubin patches were 192x192 pixels, Euclid patches 384x384 (accounting for the 2x pixel scale difference), and each was compressed to a single embedding vector.
 
-**Why it failed**: ~95% of pixels are empty sky background. The model learned "flat background = flat background" and embeddings collapsed (separation metric ~0.002). Actual sources averaged away in the global patch embedding.
+This failed comprehensively. The core problem is that astronomical imaging is dominated by empty sky -- roughly 95% of pixels in any given patch are featureless background noise. When you compress an entire 192x192 patch to a single vector, the handful of galaxies and stars (occupying maybe 5% of the area) get averaged into the background. The model quickly learned that "flat Rubin background" matches "flat Euclid background" and collapsed, with separation metrics dropping to ~0.002. The embeddings carried no useful information about actual astronomical sources.
 
 #### v2: Signal-Based Patch Sampling
 
-**Approach**: Same ViT architecture as v1, but improved data sampling -- evaluate multiple random patch candidates and select those with highest signal (inverse-variance weighted). Prioritize regions containing actual astronomical sources.
+Rather than abandon the patch-contrastive framework entirely, v2 attempted to fix the data problem. Instead of extracting random patches, it evaluated multiple candidate patches and selected those with the highest astronomical signal, weighted by inverse variance. The idea was to force the model to see patches containing actual galaxies and stars rather than empty sky.
 
-**Why we moved on**: Signal sampling helped but was a band-aid. The fundamental flaw was patch-level encoding -- compressing a 192x192 image to a single vector destroys the spatial information needed for astrometry. Led to rethinking the representation granularity.
+This helped somewhat -- the model did learn slightly more meaningful embeddings -- but was ultimately a band-aid on a fundamental architectural flaw. The problem isn't just which patches you train on; it's that compressing any 192x192 astronomical image to a single vector inherently destroys the spatial information needed for astrometry. A galaxy's precise sub-pixel position cannot survive global average pooling. This realization led to rethinking the representation granularity entirely.
 
-#### v3: DETR-JEPA (Object-Centric)
+#### v3: DETR-JEPA (Object-Centric Learning)
 
-**Approach**: ViT backbone producing spatial feature tokens, then a DETR-style decoder with 100 learnable object queries. Each query "discovers" one source via cross-attention. Hungarian matching finds optimal 1-1 correspondence between Rubin and Euclid object slots. Contrastive loss in object space.
+The third approach asked: "What if we don't compress the whole patch, but instead let the model discover individual objects?" Inspired by DETR (Detection Transformer), v3 used a ViT backbone to produce spatial feature tokens, then fed them to a DETR-style decoder with 100 learnable object queries. Each query attended to the spatial features and was trained to "discover" one astronomical source. Hungarian matching found the optimal 1-to-1 correspondence between Rubin and Euclid object slots, and a contrastive loss pulled matched objects together.
 
-**Motivation**: "Can we do object detection with DETR and then do JEPA on that manifold?" Move from patch-level to object-level representation where each embedding corresponds to one astronomical source.
-
-**Why we moved on**: Methodologically interesting but practically complex. Hungarian matching added instability. The object queries didn't reliably converge to distinct sources in crowded fields. More importantly, object-level embeddings still don't give you pixel-level spatial precision.
+This was a creative idea -- moving from patch-level to object-level learning, where each embedding corresponds to a single astronomical source. But in practice it was fragile. The Hungarian matching added instability during training, and the object queries didn't reliably converge to distinct sources in crowded deep-field images where hundreds of faint galaxies overlap. More fundamentally, even perfect per-object embeddings don't give you pixel-level spatial precision -- they tell you "these two objects are the same source" but not exactly where that source is to sub-pixel accuracy.
 
 #### v4: Native-Resolution JEPA with InformationMap
 
-**Approach**: Moved to full-tile native resolution (512x512) instead of patches. Per-band CNN stems with noise normalization. BYOL/JEPA student-teacher architecture with EMA. InformationMap weighting (SNR-based thresholding + Sobel gradient signals) to focus learning on source pixels. Shift-tolerant alignment loss allowing +/-5px matching tolerance.
+v4 made a critical architectural shift: instead of extracting patches, process the full 512x512 tile at native resolution. This eliminated the information loss from patching entirely. The architecture used per-band CNN stems with noise normalization, a shared ViT-like trunk with positional encodings, and a BYOL/JEPA-style student-teacher framework with exponential moving average (EMA).
 
-**Motivation**: Process the full tile at native resolution so no spatial information is lost to patching. Use signal-based weights to solve the background-dominance problem without patch sampling.
+Two important innovations appeared in v4. First, **InformationMap weighting**: instead of treating all pixels equally, the loss was weighted by a signal-to-noise map combined with Sobel gradient magnitudes. This naturally focused learning on source pixels (high SNR, strong gradients) rather than empty background, solving the background-dominance problem without resorting to patch sampling. InformationMap weighting proved valuable enough to survive into v6 and v7.
 
-**Why we moved on**: The +/-5px shift tolerance was a crutch -- it allowed the model to be spatially imprecise, which is the opposite of what astrometry needs. The EMA teacher added complexity without clear benefit. InformationMap weighting was a good idea that survived into v6/v7.
+Second, v4 introduced a **shift-tolerant alignment loss** that allowed tokens to match within a +/-5 pixel tolerance window. The reasoning was that Rubin and Euclid have genuine sub-pixel astrometric misalignments, so forcing exact positional matching would create conflicting gradients.
+
+The shift tolerance turned out to be a mistake. By allowing 5 pixels of slack, the model had no incentive to learn precise spatial correspondence -- it could satisfy the loss with spatially imprecise features. This is the opposite of what astrometry needs. The EMA teacher also added complexity without clear benefit over simpler training schemes.
 
 #### v5: Strict-Position JEPA
 
-**Approach**: Identical to v4 but with shift tolerance removed (`shift_px=0`). Forces exact token-to-token matching at corresponding spatial positions. Same InformationMap, band stems, ViT backbone, VICReg regularization.
+v5 was a targeted fix for v4's spatial imprecision: remove the shift tolerance entirely (`shift_px=0`) and force exact token-to-token matching at corresponding spatial positions. Everything else remained the same -- InformationMap weighting, per-band stems, ViT backbone, VICReg regularization to prevent collapse.
 
-**Motivation**: Fix v4's spatial imprecision by enforcing strict positional correspondence.
+This version exposed the fundamental limits of the JEPA approach for precision cosmology. Three problems compounded:
 
-**Why it failed**: Three compounding problems:
-1. **16x16 patch tokens = 3.2" resolution** -- astrometry needs <0.2".
-2. **Latent-space cosine loss** doesn't force the network to care about exact pixel layout -- only that embeddings are "similar".
-3. **Strict matching broke on real data** -- genuine 0.25-0.5px instrument misalignments between Rubin and Euclid mean corresponding tokens don't perfectly align.
+1. **Resolution ceiling**: The ViT used 16x16 patch tokens, meaning each token covered 3.2 arcseconds on the sky. Astrometry needs precision below 0.2 arcseconds -- the tokenization itself is too coarse by an order of magnitude.
+2. **Latent-space loss is the wrong objective**: Cosine similarity between token embeddings rewards "similar features" but doesn't require the network to preserve exact spatial layout. Two tokens can be highly similar in embedding space while differing in the precise sub-pixel positions of the sources they encode.
+3. **Strict matching vs real misalignments**: Real Rubin-Euclid data has genuine 0.25-0.5 pixel instrument misalignments. Forcing exact token-to-token matching on misaligned data creates conflicting supervision signals that prevent convergence.
 
-A simple CNN baseline (astrometry2) achieved 38 mas vs JEPA's 47 mas, proving the representation wasn't learning useful spatial information.
+The decisive evidence came from a simple baseline comparison: a straightforward CNN with a cost volume (the astrometry2 module) achieved 38 milliarcsecond (mas) accuracy on the astrometry task, while v5's JEPA features only managed 47 mas. The expensive self-supervised representation was *worse* than a simple supervised CNN. This proved that the JEPA approach, regardless of how it was tuned, was not learning the spatial information that precision cosmology requires.
 
-**Key lesson from v1-v5**: Latent-space alignment objectives (contrastive, JEPA, BYOL) optimize for *feature similarity*, not *spatial precision*. For precision cosmology, you need the model to know exactly where things are at the sub-pixel level. No amount of contrastive loss engineering achieves this -- you need to reconstruct pixels.
+**The key lesson from v1-v5**: Latent-space alignment objectives -- whether contrastive (v1-v2), object-centric (v3), or JEPA-style (v4-v5) -- optimize for feature similarity, not spatial precision. They allow the network to learn "this region looks like that region" without knowing exactly where things are at the sub-pixel level. For precision cosmology, you need the encoder to preserve exact pixel positions. The only way to guarantee this is to require the network to actually reconstruct pixels.
 
 #### v6: Masked Band Prediction (Dense Reconstruction)
 
-**Approach**: Fundamental shift from JEPA to masked autoencoding. Per-band CNN stems (BandStem with GroupNorm), ConvNeXt encoder with 3 stride-2 stages, transformer bottleneck at H/8 resolution, U-Net decoder with FiLM band conditioning. Pixel-space L1 reconstruction loss weighted by InformationMap. 20.8M params.
+v6 represents the fundamental paradigm shift from latent-space alignment to pixel-space reconstruction. Instead of making embeddings match across instruments, the model is trained to predict a held-out band's pixel values from the remaining bands. This is a masked autoencoder (MAE), but operating on wavelength bands rather than spatial patches.
 
-Training in two phases:
-- **Phase A** (`cross_instrument_prob=0.0`): mask 1 Rubin band, reconstruct from the other 5.
-- **Phase B** (`cross_instrument_prob=1.0`): mask any band, reconstruct from the other 9 (joint Rubin + Euclid).
+The architecture replaced the ViT with a dense convolutional pipeline: per-band CNN stems (BandStem with GroupNorm for batch-size-1 compatibility), a ConvNeXt encoder with three stride-2 downsampling stages producing dense feature maps at H/8 resolution, a transformer bottleneck operating on these dense tokens, and a U-Net decoder with skip connections that reconstructs back to full resolution. FiLM (Feature-wise Linear Modulation) conditioning tells the decoder which band to predict. The loss is InformationMap-weighted L1 in noise-normalized units -- the same signal-aware weighting that proved valuable in v4, now applied to a reconstruction objective. Total: 20.8M parameters.
 
-**Why it works**: To reconstruct a held-out band at the pixel level, the encoder *must* preserve sub-pixel spatial information. There is no shortcut -- you can't get a high reconstruction fidelity without knowing exactly where every source is. This is precisely the spatial precision astrometry and photometry need.
+Training used a two-phase curriculum:
+- **Phase A** (`cross_instrument_prob=0.0`): Rubin-only. Mask one Rubin band, reconstruct it from the other five. This teaches the model spectral relationships and spatial structure within one instrument.
+- **Phase B** (`cross_instrument_prob=1.0`): Joint Rubin + Euclid. Mask any one of the 10 bands, reconstruct it from the other 9. This teaches cross-instrument spatial correspondence, since reconstructing a Euclid band from Rubin features (or vice versa) requires the encoder to learn precise alignment.
 
-**Limitation**: Phase B downsampled Euclid VIS (1050x1050 at 0.1"/px) to Rubin's 512x512 grid before encoding. This discarded the 2x resolution advantage that makes VIS the most valuable instrument for astrometry and deblending.
+The reason this works is simple and powerful: to reconstruct a held-out band at the pixel level, the encoder *must* preserve sub-pixel spatial information. If a galaxy is at position (245.3, 167.8) in the input bands, the decoder needs to place reconstructed flux at exactly that position in the output. There is no shortcut -- you can't get high pixel-level fidelity without encoding precise positions. This is exactly the spatial precision that astrometry, detection, and photometry need downstream.
+
+**Limitation**: Phase B downsampled Euclid VIS (1050x1050 at 0.1"/px) to Rubin's 512x512 grid before encoding. This was a pragmatic choice to avoid dealing with mixed resolutions, but it discarded the 2x resolution advantage that makes VIS the most valuable single channel for astrometry and deblending.
 
 #### v7: Mixed-Resolution MAE (current)
 
-**Approach**: Fixes v6's downsampling assumption. Each instrument processes at native resolution through independent encoder branches with different depths, then fuses on a shared physical-scale latent grid. The decoder reconstructs back to the target band's native resolution.
+v7 fixes v6's resolution bottleneck. Instead of forcing all instruments onto one pixel grid, each instrument processes at its native resolution through independent encoder branches with different depths. The branches are designed so that after their respective downsampling stages, all streams arrive at approximately the same physical angular scale (~0.8 arcsec/pixel). At this common physical scale they fuse into a shared latent representation, pass through a transformer bottleneck, and then decode back to the target band's native resolution.
 
-**Why**: VIS at 0.1"/px is the sharpest imaging in the survey. Downsampling it to match Rubin before encoding throws away exactly the information that makes joint analysis valuable.
+This means VIS features are never downsampled to Rubin's coarser grid. When the model reconstructs a VIS band, it decodes to the full 1050x1050 resolution. When it reconstructs a Rubin band, it decodes to 512x512. The encoder learns to preserve each instrument's native spatial information throughout.
 
-### Summary
+See the next section for the full v7 architecture.
+
+### Version Summary
 
 | Version | Approach | Key Idea | Outcome |
 |---------|----------|----------|---------|
@@ -159,38 +170,40 @@ Training in two phases:
 | v6 | Dense MAE | Pixel-space reconstruction | Works: 31.9 mas astrometry |
 | v7 | Mixed-res MAE | Native resolution per instrument | **Current**: preserves VIS advantage |
 
-### v7 Mixed-Resolution MAE
+### v7 Mixed-Resolution MAE (Current)
 
 **File**: `models/jaisp_foundation_v7.py`
+
+The v7 architecture has three main stages: per-instrument encoding at native resolution, cross-instrument fusion at a shared physical scale, and target-specific decoding back to native resolution.
+
+**Encoding**: Each instrument has its own encoder branch. Rubin's six bands each pass through a BandStem (a small CNN that noise-normalizes and extracts local features), then the stem outputs are averaged and fed through a StreamEncoder with 2 ConvNeXt downsampling stages. VIS uses 3 stages (because it starts at finer resolution and needs more downsampling to reach the common scale). NISP uses 1 stage. The branch depths are chosen so that all streams converge to approximately 0.8 arcsec/pixel -- this is a physics-grounded design where the fusion happens at matched angular resolution, not matched pixel count.
+
+**Fusion**: The encoded streams are interpolated to a common spatial grid, summed with learned stream identity embeddings (so the transformer can distinguish Rubin features from VIS features from NISP features), and passed through a transformer bottleneck with 4 layers and 8 attention heads operating on approximately 130x130 tokens with 2D sinusoidal positional encodings.
+
+**Decoding**: A TargetDecoder upsamples back to the target band's native resolution using transposed convolutions and skip connections. The skip connections are routed from whichever encoder pyramid level has the closest matching physical scale, fusing information across all instrument streams at each decoder stage. FiLM conditioning tells the decoder which specific band to reconstruct.
 
 ```
 Rubin bands (512x512, 0.2"/px)   -> BandStems -> Rubin branch (2 stages) --\
 VIS band   (1050x1050, 0.1"/px)  -> BandStem  -> VIS branch   (3 stages) --> latent @ 0.8"/px
-NISP bands (350x350, 0.3"/px)    -> BandStems -> NISP branch  (1 stage)  --/     (~130x130 tokens)
+NISP bands (350x350, 0.3"/px)    -> BandStems -> NISP branch  (1 stage)  --/    (~130x130 tokens)
                                                                                        |
-                                                                           Transformer bottleneck
-                                                                           (depth=4, heads=8)
+                                                                        Stream mean fusion +
+                                                                        learned stream embeddings
                                                                                        |
-                                                                           TargetDecoder with
-                                                                           skip connections
+                                                                        Transformer bottleneck
+                                                                        (depth=4, heads=8)
                                                                                        |
-                                                                           Native-resolution output
-                                                                           (VIS->1050, NISP->350,
-                                                                            Rubin->512)
+                                                                        TargetDecoder with
+                                                                        pyramid skip connections
+                                                                                       |
+                                                                        Native-resolution output
+                                                                        (VIS->1050, NISP->350,
+                                                                         Rubin->512)
 ```
 
-**Key design choices:**
+**Training**: Unlike v6's two-phase curriculum, v7 training is unified from epoch 1. Tiles with Euclid coverage always use cross-instrument masking; Rubin-only tiles (those without a matching Euclid file) automatically fall back to within-instrument prediction. The loss is the same InformationMap-weighted L1 as v6.
 
-- **Per-stream branch depths** differ so all streams arrive at ~0.8 arcsec/px before fusion. Rubin needs 2 stride-2 stages (0.2 -> 0.8), VIS needs 3 (0.1 -> 0.8), NISP needs 1 (0.3 -> 0.6).
-- **Physics-grounded fusion**: `_estimate_fused_hw` converts to angular arcsec scale so tokens fuse at matched physical resolution, not matched pixel count.
-- **Skip connections**: `build_target_skips` routes encoder pyramid features to the decoder at the closest matching physical scale, fusing across all streams.
-- **Learned stream identity embeddings** let the transformer distinguish Rubin/VIS/NISP feature statistics.
-- **Unified training**: no Phase A/B split. Tiles with Euclid always use cross-instrument masking; Rubin-only tiles fall back to within-instrument prediction automatically.
-- **Loss**: InformationMap-weighted L1 in noise-normalized units (same as v6).
-
-**Why pixel-space reconstruction matters**: to reconstruct a held-out band at the pixel level, the encoder *must* preserve sub-pixel spatial information. There is no shortcut -- this is exactly the spatial precision needed for astrometry, detection, and photometry downstream.
-
-**Config** (best checkpoint: `jaisp_v7_baseline`):
+**Best checkpoint** (`jaisp_v7_baseline`):
 
 | Parameter | Value |
 |-----------|-------|
@@ -200,21 +213,25 @@ NISP bands (350x350, 0.3"/px)    -> BandStems -> NISP branch  (1 stage)  --/    
 | `transformer_heads` | 8 |
 | `fused_pixel_scale_arcsec` | 0.8 |
 | `cross_instrument_prob` | 1.0 |
+| Epoch | 86 |
+| Val loss | 1.4689 |
 | Total params | 16.0M |
 
 ---
 
 ## Downstream Heads
 
-All downstream heads reuse the frozen V7 foundation encoder. Only lightweight task-specific layers are trained.
+All downstream heads reuse the frozen V7 foundation encoder. Only lightweight task-specific layers are trained on top. This means each head gets the benefit of the full 10-band multi-instrument representation without the cost of encoding from scratch, and training each head is fast (hours, not days).
 
 ### 1. Detection
 
 **Directory**: `models/detection/`
 
-DETR-style source detector that predicts source positions, confidence, and flux from the V7 encoder bottleneck features.
+The detection head finds astronomical sources (galaxies and stars) in tiles using a DETR-style set prediction approach. Unlike classical detection pipelines that operate on a single coadded image, this detector sees all available bands through the V7 encoder's learned features, giving it access to sources that may only be visible in specific wavelength ranges.
 
-#### Architecture
+#### How It Works
+
+The frozen V7 encoder processes the multi-band input tile and produces a bottleneck feature map at approximately 130x130 spatial resolution. A 1x1 convolution projects these features to the detection head's working dimension, and 2D sinusoidal positional encodings are added so the transformer decoder knows where each feature is on the sky. The transformer decoder then takes 500 learned object queries -- think of these as 500 "slots" that each learn to claim one source -- and cross-attends to the spatial features. Each query outputs a predicted centroid position (normalized to [0,1]), a confidence score (is this slot pointing at a real source or empty sky?), and a log-flux estimate.
 
 ```
 Frozen V7 encoder
@@ -231,11 +248,17 @@ Frozen V7 encoder
 
 #### Training
 
-Uses Hungarian matching between 500 predicted queries and ground-truth pseudo-labels per tile:
+Since there is no curated source catalog for this field, the detector is trained on **pseudo-labels** generated by classical peak-finding on a Rubin g+r+i coadd image. This classical detector (median subtraction, Gaussian smoothing, local maxima above 3-sigma) serves as the "teacher". The DETR is the "student" that sees all 10 bands through the V7 encoder and can eventually surpass the teacher by detecting sources invisible in just g+r+i.
 
-- **Pseudo-labels** come from classical peak-finding on a Rubin g+r+i coadd image (3-sigma threshold). These are the "teacher" -- good enough to bootstrap the detector, but the DETR sees all 10 bands through the V7 encoder and can eventually surpass classical detection.
-- **Loss**: position L1 (`lambda_pos=5.0`) + objectness BCE for matched queries (`lambda_conf=2.0`) + objectness suppression for unmatched queries (`lambda_noobj=0.5`).
-- **Data**: 130 train / 14 val tiles with random 90-degree rotations and flips.
+Training uses Hungarian matching to assign each of the 500 predicted queries to the best-matching ground-truth source (or to "no object" if the query doesn't match anything). The loss combines position accuracy for matched queries with confidence suppression for unmatched ones:
+
+| Loss Term | Weight | Purpose |
+|-----------|--------|---------|
+| `loss_pos` | 5.0 | L1 on matched centroid positions -- teaches where sources are |
+| `loss_conf_obj` | 2.0 | BCE pushing matched queries toward confidence=1 |
+| `loss_conf_noobj` | 0.5 | BCE pushing unmatched queries toward confidence=0 |
+
+The training data consists of 130 training tiles and 14 validation tiles with random 90-degree rotations and flips for augmentation.
 
 #### Files
 
@@ -250,9 +273,25 @@ Uses Hungarian matching between 500 predicted queries and ground-truth pseudo-la
 
 **Directory**: `models/astrometry2/`
 
-Measures and corrects the smooth astrometric distortion field between Rubin and Euclid VIS. Works by matching small image patches around detected sources, predicting per-source pixel offsets with uncertainty, then fitting a smooth spatial field.
+Astrometry concordance measures and corrects the smooth spatial distortion between Rubin and Euclid coordinate systems. Even after standard WCS calibration, there are residual sub-arcsecond offsets that vary smoothly across a tile. These must be corrected for joint analysis -- stacking images, measuring galaxy shapes for weak lensing, or combining photometry across instruments.
+
+The approach works at the individual source level: detect sources in both instruments, match them across surveys, extract small image patches around each matched pair, predict the precise pixel offset between the Rubin and VIS positions of each source, and then fit a smooth spatial field from all these per-source measurements.
 
 #### Pipeline
+
+For each tile, the pipeline proceeds through six stages:
+
+1. **Source detection**: Find sources in the Rubin tile (using either classical peak-finding or the trained DETR detector) and in the Euclid VIS image (classical peak-finding). The DETR option is valuable because it can find fainter sources, giving more anchor points for the field fit.
+
+2. **Cross-instrument matching**: Match Rubin and VIS source lists using WCS sky coordinates. Mutual nearest-neighbor matching with separation limits and sigma-clipping removes spurious matches. Typically yields 50-200 matched pairs per tile.
+
+3. **Patch extraction**: For each matched source, extract a 33x33 pixel patch centered on the VIS position, and reproject the corresponding Rubin bands onto the VIS pixel grid. Each patch pair shows the same source as seen by both instruments.
+
+4. **Per-patch offset prediction**: The core of the matcher. Frozen V7 BandStems extract features from the Rubin and VIS patches independently, then trainable ConvNeXt adapter blocks refine these features toward astrometry-relevant signals. A spatially-weighted cross-correlation (cost volume) between the two feature maps produces a coarse offset via differentiable soft-argmax. An MLP refines this with a residual correction and outputs `(dx, dy, log_sigma)` in pixels, which a Jacobian matrix transforms to `(dRA*, dDec)` in arcseconds. The uncertainty `sigma` is used to weight the field fit.
+
+5. **Smooth field fitting**: The per-source offsets are noisy -- each individual measurement has ~30-50 mas scatter. But the true distortion varies smoothly across the tile. A control-grid least-squares solver (bilinear basis functions with smoothness regularization and adaptive per-node anchor weights) fits a smooth 2D field from the noisy per-source measurements. An alternative MLP-based solver is also available.
+
+6. **Export**: The fitted concordance field is evaluated on a regular mesh and written to a FITS file as `dRA`, `dDec`, and coverage maps.
 
 ```
 For each tile:
@@ -271,36 +310,35 @@ For each tile:
   6. Export concordance FITS (dRA, dDec, coverage maps)
 ```
 
-#### Matcher Architecture
+#### Matcher Versions
 
-Two versions available:
+Two matcher versions are available, differing only in which foundation model's BandStems they reuse:
 
-- **V6** (`matcher_v6.py`): uses frozen V6 Phase B BandStems. Best result: 31.9 mas.
-- **V7** (`matcher_v7.py`): uses frozen V7 BandStems. Same architecture, different stem weights. API-compatible drop-in replacement.
+- **V6** (`matcher_v6.py`): Uses frozen V6 Phase B BandStems. These were trained with cross-instrument masking where VIS was downsampled to Rubin resolution. Best result: 31.9 mas median astrometric precision.
+- **V7** (`matcher_v7.py`): Uses frozen V7 BandStems, where VIS was processed at native resolution. API-compatible drop-in replacement for V6.
 
-Both support:
-- Per-band embedding for wavelength-specific correction (multiband mode)
-- Learnable softmax temperature for cost volume
-- Separate learning rates: full LR for adapters/heads, 0.1x for stems if unfrozen
+Both versions support multiband mode (per-band learned embeddings for wavelength-specific chromatic correction) and separate learning rates (full LR for adapters and heads, 0.1x for stems if unfrozen for fine-tuning).
 
 #### Source Detection Options
 
-- **Classical** (default): `detect_sources()` -- median subtraction, Gaussian smoothing, local maxima above N-sigma threshold.
-- **DETR** (optional): pass `--detr-checkpoint` to use the trained DETR detector for Rubin source finding. Produces more sources with potentially better positions than classical detection.
+The first stage of the pipeline -- detecting sources in Rubin -- can use either:
 
-#### Field Solver
+- **Classical** (default): `detect_sources()` performs median background subtraction, Gaussian smoothing, and local maximum detection above an N-sigma threshold. Simple, fast, and well-understood.
+- **DETR** (optional): Pass `--detr-checkpoint` to replace classical Rubin detection with the trained DETR detector. The DETR sees all 10 bands through the V7 encoder and can detect fainter sources that are invisible in a 3-band coadd, providing more anchor points for the concordance fit. VIS detection still uses the classical method.
 
-Two solvers for fitting the smooth concordance field:
+#### Field Solvers
 
-- **Control grid** (`field_solver.py`): bilinear basis functions on a regular grid, least-squares with smoothness regularization and adaptive per-node anchor weights.
-- **Neural network** (`nn_field_solver.py`): 4-layer MLP that maps (x,y) -> (dRA, dDec). No grid resolution hyperparameter; infinitely differentiable.
+Two solvers are available for fitting the smooth concordance field from per-source offset measurements:
+
+- **Control grid** (`field_solver.py`): Fits bilinear basis functions on a regular grid using weighted least squares. Includes finite-difference smoothness regularization and adaptive per-node anchor weights that prevent edge drift in regions with sparse source coverage. The grid resolution is automatically reduced for tiles with few matches to avoid underdetermined systems.
+- **Neural network** (`nn_field_solver.py`): A 4-layer MLP that maps normalized (x, y) tile coordinates to (dRA, dDec) offsets, trained via Adam for 2000 steps. Has no grid resolution hyperparameter, is infinitely differentiable, and scales naturally to any source density.
 
 #### Files
 
 | File | Description |
 |------|-------------|
-| `matcher_v6.py` | V6-based patch matcher (frozen V6 stems + adapters) |
-| `matcher_v7.py` | V7-based patch matcher (frozen V7 stems + adapters) |
+| `matcher_v6.py` | V6-based patch matcher (frozen V6 stems + trainable adapters) |
+| `matcher_v7.py` | V7-based patch matcher (frozen V7 stems + trainable adapters) |
 | `dataset.py` | Patch extraction, WCS matching, DETR integration |
 | `source_matching.py` | Classical peak-finding, WCS-based source matching |
 | `field_solver.py` | Control-grid least-squares field solver |
@@ -316,13 +354,13 @@ Two solvers for fitting the smooth concordance field:
 
 **Directory**: `models/photometry/`
 
-Spatially-varying PSF model and Cramer-Rao optimal flux estimator.
+Accurate photometry requires knowing the point-spread function (PSF) -- the shape of a point source as recorded by the detector. The PSF varies across the field of view due to optical distortions and detector effects. This module models the spatially-varying PSF and uses it for optimal flux extraction.
 
-- **PSFNet**: base Gaussian + learned residual in log-PSF space, conditioned on spatial position.
-- **Matched filter**: `flux = (PSF^T W d) / (PSF^T W PSF)` where W is the inverse-variance weight matrix.
-- **Pipeline**: precompute PSF grid per tile -> interpolate at source positions -> extract stamps -> subtract local background -> matched-filter flux.
+- **PSFNet**: A neural network that parameterizes the PSF as a base Gaussian plus a learned residual in log-PSF space, conditioned on position within the tile. This allows the model to capture complex PSF wings and asymmetries that vary smoothly across the field.
+- **Matched filter**: Given the PSF model at a source's position, the optimal linear flux estimator is `flux = (PSF^T W d) / (PSF^T W PSF)` where W is the inverse-variance weight matrix and d is the observed pixel data. This is the Cramer-Rao optimal estimator -- no other linear method can achieve lower variance.
+- **Pipeline**: For each tile, precompute a PSF grid at regular positions, interpolate to each detected source's location, extract small image stamps, subtract local background, and apply the matched-filter flux estimator.
 
-See `models/photometry/README.md` for details.
+See `models/photometry/README.md` for full details.
 
 ---
 
@@ -331,7 +369,8 @@ See `models/photometry/README.md` for details.
 ```
 JAISP/
 |
-+-- README.md                          This file
++-- README.md                          Short project overview
++-- DOCUMENTATION.md                   This file (full documentation)
 +-- requirements.txt                   Python dependencies
 |
 +-- data/
@@ -373,7 +412,7 @@ JAISP/
 |   |   +-- forced_photometry.py
 |   |   +-- pipeline.py
 |   |
-|   +-- older_architectures/           Archived experiments (v4, v5, etc.)
+|   +-- older_architectures/           Archived experiments (v1-v5)
 |   +-- checkpoints/                   Saved model weights
 |
 +-- io/                                Data I/O notebooks and scripts
@@ -475,8 +514,8 @@ python models/photometry/train_psf_net.py \
 
 ## Current Status
 
-- **V7 foundation** is trained and stable. Best checkpoint: `jaisp_v7_baseline`.
-- **Detection** is being retrained on V7 with improved pseudo-labels (3-sigma threshold, 500 queries, Euclid bands enabled).
-- **Astrometry V7** matcher is implemented and ready for training once the detector converges.
+- **V7 foundation** is trained and stable. Best checkpoint: `jaisp_v7_baseline` (epoch 86, val_loss 1.4689).
+- **Detection** is being retrained on V7 with improved pseudo-labels (3-sigma threshold, 500 queries, Euclid bands enabled). Early training shows steady val loss improvement.
+- **Astrometry V7** matcher is implemented (`matcher_v7.py`, `train_astro_v7.py`) and ready for training once the detector converges. The V6 matcher achieved 31.9 mas; V7 should improve on this by preserving VIS native resolution.
 - **Photometry** is functional but not yet integrated with V7.
 - This is an active research codebase. Architecture and training defaults evolve with experiments.
