@@ -85,19 +85,23 @@ class CenterNetDetector(nn.Module):
         self.head_ch = head_ch
         self.predict_profile = predict_profile
 
-        # Decoder neck: one flat conv at bottleneck scale, then 3x 2x upsample
-        # Channels: encoder_dim → head_ch → head_ch//2 → head_ch//4
-        # Spatial:  130        → 130     → 260         → 520       → 1040
-        vis_ch = head_ch // 4   # channel width at VIS resolution (64 when head_ch=256)
+        # Decoder neck: reduce channels immediately, then 3x 2x upsample.
+        # Without skip connections, the upsampled stages just route bottleneck
+        # info to VIS resolution — 64 channels is plenty.
+        # Channels: encoder_dim → 128 → 64 → 64 → 64
+        # Spatial:  130        → 130  → 260 → 520 → 1040
+        # Peak memory (batch=4): ~1.1 GB activations at final stage.
+        vis_ch = head_ch // 4   # 64 when head_ch=256
+        mid_ch = head_ch // 2   # 128 when head_ch=256
         self.neck = nn.Sequential(
-            # Flat refinement at bottleneck scale
-            nn.Conv2d(encoder_dim, head_ch, 3, padding=1, bias=False),
-            nn.BatchNorm2d(head_ch),
+            # Reduce channels at bottleneck scale (256 → 128)
+            nn.Conv2d(encoder_dim, mid_ch, 3, padding=1, bias=False),
+            nn.BatchNorm2d(mid_ch),
             nn.ReLU(inplace=True),
             # 3 × 2x upsampling → 8x total = VIS resolution
-            _UpBlock(head_ch,       head_ch),        # 130 → 260
-            _UpBlock(head_ch,       head_ch // 2),   # 260 → 520
-            _UpBlock(head_ch // 2,  vis_ch),         # 520 → 1040
+            _UpBlock(mid_ch, vis_ch),   # 128→64,  130 → 260
+            _UpBlock(vis_ch, vis_ch),   # 64→64,   260 → 520
+            _UpBlock(vis_ch, vis_ch),   # 64→64,   520 → 1040
         )
 
         # Prediction heads operate at VIS resolution
