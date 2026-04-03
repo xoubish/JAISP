@@ -69,17 +69,51 @@ def _pseudo_labels_vis(
     vis_img: np.ndarray,       # [H_vis, W_vis]
     nsig: float = 3.0,
     max_sources: int = 1000,
+    spike_radius: int = 100,
 ) -> Tuple[np.ndarray, np.ndarray, int, int]:
     """Detect sources from Euclid VIS at native 0.1"/px resolution.
 
     Returns centroids normalized to VIS frame [0,1], preserving the full
     VIS spatial precision without projecting through a coarser grid.
 
+    Saturated pixels (top 0.5%) are dilated by spike_radius VIS pixels
+    (~10" at 0.1"/px) to mask diffraction spike arms before returning labels.
+    The star cores themselves will be recovered by the self-training promote
+    step (the 10-band model sees them clearly in multiple bands).
+
     Returns (centroids_norm [M,2], classes [M], H_vis, W_vis).
     """
+    from scipy.ndimage import binary_dilation
     H, W = vis_img.shape
+
+    # Build spike mask: dilate saturated pixels to cover spike arms
+    nonzero_vals = vis_img[vis_img > 0]
+    if len(nonzero_vals) > 100:
+        sat_thresh = np.percentile(nonzero_vals, 99.5)
+        sat_mask = vis_img > sat_thresh
+        # Disk-shaped structuring element of radius spike_radius
+        r = spike_radius
+        yg, xg = np.ogrid[-r:r + 1, -r:r + 1]
+        disk = (xg ** 2 + yg ** 2) <= r ** 2
+        spike_mask = binary_dilation(sat_mask, structure=disk)
+    else:
+        spike_mask = np.zeros((H, W), dtype=bool)
+
     xs, ys = detect_sources(vis_img, nsig=nsig, max_sources=max_sources,
                             smooth_sigma=1.2, min_dist=9)
+
+    if xs.size == 0:
+        return (
+            np.zeros((0, 2), dtype=np.float32),
+            np.zeros((0,), dtype=np.int64),
+            H, W,
+        )
+
+    # Filter detections inside spike-masked regions
+    xi = np.clip(xs.round().astype(int), 0, W - 1)
+    yi = np.clip(ys.round().astype(int), 0, H - 1)
+    keep = ~spike_mask[yi, xi]
+    xs, ys = xs[keep], ys[keep]
 
     if xs.size == 0:
         return (

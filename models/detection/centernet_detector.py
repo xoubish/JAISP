@@ -30,7 +30,7 @@ for _p in (_HERE, _MODELS):
 from detection.detector import JAISPEncoderWrapper, _StubEncoder  # reuse encoder wrapper
 
 
-def _head(in_ch: int, out_ch: int, hidden_ch: int = 256) -> nn.Sequential:
+def _head(in_ch: int, out_ch: int, hidden_ch: int = 64) -> nn.Sequential:
     """Small 2-layer conv head: 3x3 hidden + 1x1 output."""
     return nn.Sequential(
         nn.Conv2d(in_ch, hidden_ch, 3, padding=1),
@@ -39,15 +39,34 @@ def _head(in_ch: int, out_ch: int, hidden_ch: int = 256) -> nn.Sequential:
     )
 
 
+class _UpBlock(nn.Module):
+    """2x bilinear upsample + Conv-BN-ReLU."""
+    def __init__(self, in_ch: int, out_ch: int):
+        super().__init__()
+        self.block = nn.Sequential(
+            nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False),
+            nn.Conv2d(in_ch, out_ch, 3, padding=1, bias=False),
+            nn.BatchNorm2d(out_ch),
+            nn.ReLU(inplace=True),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.block(x)
+
+
 class CenterNetDetector(nn.Module):
     """Dense source detector: heatmap + offset + flux on V7 encoder features.
+
+    The neck progressively upsamples the bottleneck (130x130 at 0.8"/px) by
+    8x to reach ~1040x1040 at 0.1"/px (Euclid VIS resolution).  Each
+    heatmap pixel then corresponds to one VIS pixel, so source positions read
+    directly off the offset head have VIS-native precision.
 
     Parameters
     ----------
     encoder      : JAISPEncoderWrapper or _StubEncoder
     encoder_dim  : channel dim of encoder bottleneck (default 256)
-    neck_layers  : number of 3x3 Conv+BN+ReLU refinement layers (default 3)
-    head_ch      : hidden channels in prediction heads (default 256)
+    head_ch      : base channel width; decoder halves channels at each 2x stage
     predict_profile : if True, add a profile head for (e1, e2, r_half, sersic_n)
     """
 
@@ -55,35 +74,39 @@ class CenterNetDetector(nn.Module):
         self,
         encoder: nn.Module,
         encoder_dim: int = 256,
-        neck_layers: int = 3,
         head_ch: int = 256,
         predict_profile: bool = False,
+        # Legacy parameter — ignored, kept for call-site compatibility
+        neck_layers: int = 3,
     ):
         super().__init__()
         self.encoder = encoder
         self.encoder_dim = encoder_dim
+        self.head_ch = head_ch
         self.predict_profile = predict_profile
 
-        # Refinement neck
-        neck = []
-        ch = encoder_dim
-        for _ in range(neck_layers):
-            neck.extend([
-                nn.Conv2d(ch, head_ch, 3, padding=1),
-                nn.BatchNorm2d(head_ch),
-                nn.ReLU(inplace=True),
-            ])
-            ch = head_ch
-        self.neck = nn.Sequential(*neck)
+        # Decoder neck: one flat conv at bottleneck scale, then 3x 2x upsample
+        # Channels: encoder_dim → head_ch → head_ch//2 → head_ch//4
+        # Spatial:  130        → 130     → 260         → 520       → 1040
+        vis_ch = head_ch // 4   # channel width at VIS resolution (64 when head_ch=256)
+        self.neck = nn.Sequential(
+            # Flat refinement at bottleneck scale
+            nn.Conv2d(encoder_dim, head_ch, 3, padding=1, bias=False),
+            nn.BatchNorm2d(head_ch),
+            nn.ReLU(inplace=True),
+            # 3 × 2x upsampling → 8x total = VIS resolution
+            _UpBlock(head_ch,       head_ch),        # 130 → 260
+            _UpBlock(head_ch,       head_ch // 2),   # 260 → 520
+            _UpBlock(head_ch // 2,  vis_ch),         # 520 → 1040
+        )
 
-        # Prediction heads
-        self.hm_head = _head(head_ch, 1, head_ch)
-        self.off_head = _head(head_ch, 2, head_ch)
-        self.flux_head = _head(head_ch, 1, head_ch)
+        # Prediction heads operate at VIS resolution
+        self.hm_head   = _head(vis_ch, 1, vis_ch)
+        self.off_head  = _head(vis_ch, 2, vis_ch)
+        self.flux_head = _head(vis_ch, 1, vis_ch)
 
         if predict_profile:
-            # (e1, e2, log_r_half, sersic_n) per pixel
-            self.profile_head = _head(head_ch, 4, head_ch)
+            self.profile_head = _head(vis_ch, 4, vis_ch)
         else:
             self.profile_head = None
 
@@ -120,7 +143,7 @@ class CenterNetDetector(nn.Module):
         rms: Dict[str, torch.Tensor],
         conf_threshold: float = 0.3,
         tile_hw: Optional[Tuple[int, int]] = None,
-        nms_kernel: int = 3,
+        nms_kernel: int = 7,
     ) -> Dict[str, torch.Tensor]:
         """Run inference and return detected sources.
 
@@ -193,6 +216,7 @@ class CenterNetDetector(nn.Module):
         torch.save({
             'state_dict':      self.state_dict(),
             'encoder_dim':     self.encoder_dim,
+            'head_ch':         self.head_ch,
             'predict_profile': self.predict_profile,
             'model_type':      'centernet',
         }, path)
@@ -208,9 +232,16 @@ class CenterNetDetector(nn.Module):
         model = cls(
             encoder=encoder,
             encoder_dim=ckpt['encoder_dim'],
+            head_ch=ckpt.get('head_ch', 256),
             predict_profile=ckpt.get('predict_profile', False),
         )
-        model.load_state_dict(ckpt['state_dict'])
+        # strict=False: checkpoints saved in head-only mode (encoder=None) won't
+        # have encoder keys, so missing keys are expected when loading with a
+        # real encoder for inference.
+        missing, unexpected = model.load_state_dict(ckpt['state_dict'], strict=False)
+        neck_missing = [k for k in missing if not k.startswith('encoder.')]
+        if neck_missing:
+            print(f'  [warn] Missing non-encoder keys: {neck_missing}')
         if device is not None:
             model = model.to(device)
         return model

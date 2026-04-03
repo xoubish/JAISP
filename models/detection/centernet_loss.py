@@ -34,12 +34,13 @@ def render_heatmap_targets(
     mask = torch.zeros(B, 1, feat_h, feat_w, device=device)
     n_src = torch.zeros(B, device=device)
 
-    # Pre-compute full coordinate grids [H, W]
+    # Pre-compute 1-D coordinate vectors (reused for bounding-box sub-grids)
     gy = torch.arange(feat_h, device=device, dtype=torch.float32)
     gx = torch.arange(feat_w, device=device, dtype=torch.float32)
-    grid_y, grid_x = torch.meshgrid(gy, gx, indexing='ij')  # [H, W]
 
     inv_2sig2 = 1.0 / (2.0 * sigma ** 2)
+    # Cutoff at 3σ: outside this radius the Gaussian is < 0.01 anyway
+    radius = int(3.0 * sigma) + 1
 
     for b in range(B):
         pts = gt_centroids[b]  # [M, 2] normalized (x, y)
@@ -53,27 +54,32 @@ def render_heatmap_targets(
         # Convert normalized coords to feature-map pixel coords
         cx = pts[:, 0] * (feat_w - 1)   # [M]
         cy = pts[:, 1] * (feat_h - 1)   # [M]
-
-        # Vectorized Gaussian rendering: broadcast [M, H, W]
-        # Distance from each source to each grid point
-        dx_grid = grid_x.unsqueeze(0) - cx.view(M, 1, 1)   # [M, H, W]
-        dy_grid = grid_y.unsqueeze(0) - cy.view(M, 1, 1)   # [M, H, W]
-        gauss_all = torch.exp(-(dx_grid ** 2 + dy_grid ** 2) * inv_2sig2)  # [M, H, W]
-
-        # Element-wise max across all sources (CenterNet convention)
-        hm[b, 0] = gauss_all.max(dim=0).values  # [H, W]
-
-        # Offset targets at integer positions
         cx_int = cx.round().long().clamp(0, feat_w - 1)
         cy_int = cy.round().long().clamp(0, feat_h - 1)
 
+        # Bounded Gaussian rendering: only evaluate within a (2r+1)² bounding
+        # box around each source.  At VIS resolution (1040×1040) the full
+        # vectorised [M, H, W] approach would allocate ~2 GB per sample;
+        # bounded rendering keeps each sub-grid to (2r+1)² ≈ 196 elements.
+        for i in range(M):
+            x0 = max(0,       cx_int[i].item() - radius)
+            x1 = min(feat_w,  cx_int[i].item() + radius + 1)
+            y0 = max(0,       cy_int[i].item() - radius)
+            y1 = min(feat_h,  cy_int[i].item() + radius + 1)
+
+            sub_x = gx[x0:x1]          # [w]
+            sub_y = gy[y0:y1]           # [h]
+            sub_gy, sub_gx = torch.meshgrid(sub_y, sub_x, indexing='ij')  # [h, w]
+            gauss = torch.exp(
+                -((sub_gx - cx[i]) ** 2 + (sub_gy - cy[i]) ** 2) * inv_2sig2
+            )
+            hm[b, 0, y0:y1, x0:x1] = torch.max(hm[b, 0, y0:y1, x0:x1], gauss)
+
         # Force exact 1.0 at integer centers so focal loss has positive pixels
         hm[b, 0, cy_int, cx_int] = 1.0
-        dx_frac = cx - cx_int.float()
-        dy_frac = cy - cy_int.float()
 
-        off[b, 0, cy_int, cx_int] = dx_frac
-        off[b, 1, cy_int, cx_int] = dy_frac
+        off[b, 0, cy_int, cx_int] = cx - cx_int.float()
+        off[b, 1, cy_int, cx_int] = cy - cy_int.float()
         mask[b, 0, cy_int, cx_int] = 1.0
 
     return hm, off, mask, n_src

@@ -7,8 +7,8 @@ Extra CLI args vs train_local_matcher.py:
   --v7-checkpoint     path to the V7 foundation checkpoint_best.pt  [REQUIRED]
   --adapter-blocks    trainable ConvNeXt adapter blocks (default: 2)
   --unfreeze-stems    fine-tune V7 stems (default: frozen)
-  --detr-checkpoint   path to detector_v7.pt for DETR-based source detection
-                      (omit to fall back to classical peak-finding)
+  --detector-checkpoint  path to centernet_best.pt for neural source detection
+                         (omit to fall back to classical peak-finding)
 
 Usage:
     python train_astro_v7.py \
@@ -19,14 +19,14 @@ Usage:
         --output-dir    ../checkpoints/astro_v7 \
         --wandb-project JAISP-Astrometry-v7
 
-    # With DETR source detection:
+    # With CenterNet source detection:
     python train_astro_v7.py \
-        --v7-checkpoint  ../../checkpoints/jaisp_v7_baseline/checkpoint_best.pt \
-        --detr-checkpoint ../checkpoints/detector_v7.pt \
+        --v7-checkpoint       ../../checkpoints/jaisp_v7_baseline/checkpoint_best.pt \
+        --detector-checkpoint ../checkpoints/centernet_v7_selftrain_vis/centernet_best.pt \
         --rubin-dir      ../../data/rubin_tiles_ecdfs \
         --euclid-dir     ../../data/euclid_tiles_ecdfs \
         --multiband \
-        --output-dir     ../checkpoints/astro_v7_detr \
+        --output-dir     ../checkpoints/astro_v7_centernet \
         --wandb-project  JAISP-Astrometry-v7
 """
 
@@ -74,9 +74,10 @@ except ImportError:
 # DETR source detection loader
 # ============================================================
 
-def _load_detr_detector(detr_checkpoint: str, v7_checkpoint: str, device: torch.device):
-    """Load the DETR detector for source finding (optional)."""
-    from detection.detector import JaispDetector, JAISPEncoderWrapper
+def _load_detector(detector_checkpoint: str, v7_checkpoint: str, device: torch.device):
+    """Load the CenterNet detector for source finding (optional)."""
+    from detection.centernet_detector import CenterNetDetector
+    from detection.detector import JAISPEncoderWrapper
     from jaisp_foundation_v7 import JAISPFoundationV7, ALL_BANDS
 
     ckpt = torch.load(v7_checkpoint, map_location='cpu', weights_only=False)
@@ -92,9 +93,9 @@ def _load_detr_detector(detr_checkpoint: str, v7_checkpoint: str, device: torch.
     )
     v7.load_state_dict(ckpt['model'], strict=False)
     encoder = JAISPEncoderWrapper(v7, freeze=True)
-    detector = JaispDetector.load(detr_checkpoint, encoder, device=device)
+    detector = CenterNetDetector.load(detector_checkpoint, encoder, device=device)
     detector.eval()
-    print(f'  DETR detector loaded from {detr_checkpoint}')
+    print(f'  CenterNet detector loaded from {detector_checkpoint}')
     return detector
 
 
@@ -113,11 +114,11 @@ def build_v7_parser() -> argparse.ArgumentParser:
                    help='Trainable ConvNeXt adapter blocks (default: 2)')
     g.add_argument('--unfreeze-stems', action='store_true',
                    help='Unfreeze V7 BandStem weights')
-    g.add_argument('--detr-checkpoint', type=str, default=None,
-                   help='Path to detector_v7.pt for DETR source detection '
+    g.add_argument('--detector-checkpoint', type=str, default=None,
+                   help='Path to centernet_best.pt for neural source detection '
                         '(omit for classical peak-finding)')
-    g.add_argument('--detr-conf-threshold', type=float, default=0.3,
-                   help='DETR confidence threshold for source detection (default: 0.3)')
+    g.add_argument('--detector-conf-threshold', type=float, default=0.3,
+                   help='CenterNet confidence threshold for source detection (default: 0.3)')
 
     p.set_defaults(
         hidden_channels=64,
@@ -140,9 +141,9 @@ def train(args):
 
     # ---- Optional DETR detector ------------------------------------------
     detr_detector = None
-    if args.detr_checkpoint:
-        detr_detector = _load_detr_detector(
-            args.detr_checkpoint, args.v7_checkpoint, device)
+    if args.detector_checkpoint:
+        detr_detector = _load_detector(
+            args.detector_checkpoint, args.v7_checkpoint, device)
 
     # ---- Dataset ---------------------------------------------------------
     detect_bands = normalize_rubin_bands(args.detect_bands) or [
@@ -177,7 +178,7 @@ def train(args):
     if detr_detector is not None:
         detection_kwargs['detr_detector'] = detr_detector
         detection_kwargs['detr_device'] = device
-        detection_kwargs['detr_conf_threshold'] = args.detr_conf_threshold
+        detection_kwargs['detr_conf_threshold'] = args.detector_conf_threshold
 
     if getattr(args, 'multiband', False):
         multiband_kwargs = dict(

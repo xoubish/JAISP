@@ -142,13 +142,15 @@ def _refine_labels(
         tile_id = feat_path.stem.rsplit('_aug', 1)[0]
         cached = torch.load(feat_path, map_location='cpu', weights_only=True)
         feats = cached['features'].unsqueeze(0).to(device)
-        _, fH, fW = cached['features'].shape
 
         # Run detector
         with torch.no_grad():
             neck_out = model.neck(feats)
             hm = model.hm_head(neck_out).sigmoid()  # [1, 1, H, W]
             off = model.off_head(neck_out)
+
+        # hm dimensions (may be upsampled vs bottleneck, e.g. 1040x1040 for VIS)
+        _, _, fH, fW = hm.shape
 
         # Load original pseudo-labels for this tile
         orig_labels = None

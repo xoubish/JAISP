@@ -286,7 +286,7 @@ def predict_tile(
         H_r, W_r = rubin_cube.shape[1], rubin_cube.shape[2]
         rx, ry = detect_sources_detr(
             tile_images, tile_rms_d, _detr, device,
-            conf_threshold=getattr(args, 'detr_conf_threshold', 0.3),
+            conf_threshold=getattr(args, 'detector_conf_threshold', 0.3),
             tile_hw=(H_r, W_r),
         )
     else:
@@ -479,11 +479,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--v7-checkpoint', type=str, default='',
                    help='Path to jaisp_v7_baseline checkpoint. '
                         'Required when the matcher checkpoint is a V7AstrometryMatcher.')
-    p.add_argument('--detr-checkpoint', type=str, default='',
-                   help='Path to detector_v7.pt for DETR source detection '
+    p.add_argument('--detector-checkpoint', type=str, default='',
+                   help='Path to centernet_best.pt for neural source detection '
                         '(omit for classical peak-finding).')
-    p.add_argument('--detr-conf-threshold', type=float, default=0.3,
-                   help='DETR confidence threshold (default: 0.3).')
+    p.add_argument('--detector-conf-threshold', type=float, default=0.3,
+                   help='CenterNet confidence threshold (default: 0.3).')
     p.add_argument('--all-bands', action='store_true', default=False,
                    help='Export concordance for every target band in a multiband checkpoint '
                         'in one FITS file (one DRA/DDE/COV triplet per band per tile).')
@@ -535,11 +535,11 @@ def main():
     model, ckpt = load_model(args.checkpoint, device,
                              v6_checkpoint=v6_ckpt, v7_checkpoint=v7_ckpt)
 
-    # Optional DETR detector for Rubin source detection
-    detr_ckpt = getattr(args, 'detr_checkpoint', '') or ''
+    # Optional neural detector for Rubin source detection
+    detr_ckpt = getattr(args, 'detector_checkpoint', '') or ''
     if detr_ckpt and v7_ckpt:
-        from train_astro_v7 import _load_detr_detector
-        args._detr_detector = _load_detr_detector(detr_ckpt, v7_ckpt, device)
+        from train_astro_v7 import _load_detector
+        args._detr_detector = _load_detector(detr_ckpt, v7_ckpt, device)
     else:
         args._detr_detector = None
 

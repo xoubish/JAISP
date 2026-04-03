@@ -70,7 +70,7 @@ def _load_encoder(encoder_ckpt, device, freeze=True):
 # Visualization
 # ---------------------------------------------------------------------------
 
-def _log_tile(batch, out, wandb, step, conf_thr=0.3, nms_kernel=3, euclid_dir=None):
+def _log_tile(batch, out, wandb, step, conf_thr=0.3, nms_kernel=7, euclid_dir=None):
     """Overlay GT centroids and CenterNet heatmap + detected peaks."""
     import matplotlib
     matplotlib.use('Agg')
