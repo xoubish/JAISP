@@ -34,11 +34,17 @@ def _to_float32(x) -> np.ndarray:
     return np.asarray(x).astype(np.float32, copy=False)
 
 
+MAX_REASONABLE_RMS = np.float32(1.0e10)
+MAX_REASONABLE_VAR = np.float32(MAX_REASONABLE_RMS * MAX_REASONABLE_RMS)
+
+
 def _safe_rms(var: np.ndarray, fallback_image: np.ndarray) -> np.ndarray:
-    """sqrt(variance), replacing non-positive/nan with MAD-based estimate."""
+    """sqrt(variance), replacing bad or sentinel values with MAD fallback."""
     var = _to_float32(var)
     rms = np.zeros_like(var)
-    good = np.isfinite(var) & (var > 0)
+    # Some Euclid products carry huge finite sentinel variance values (~1e32).
+    # Treat them as invalid so they do not collapse normalized inputs to zero.
+    good = np.isfinite(var) & (var > 0) & (var <= MAX_REASONABLE_VAR)
     rms[good] = np.sqrt(var[good])
     if not good.all():
         # MAD-based fallback for bad pixels

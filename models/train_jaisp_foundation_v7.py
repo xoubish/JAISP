@@ -1,6 +1,9 @@
 """Training script for JAISP Foundation v7 mixed-resolution pretraining."""
 
 import argparse
+import contextlib
+import copy
+import os
 import random
 from collections import defaultdict
 from pathlib import Path
@@ -11,6 +14,10 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data import DataLoader, Subset
+from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 
 _HERE = Path(__file__).resolve().parent
@@ -18,7 +25,8 @@ if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
 
 from jaisp_foundation_v7 import ALL_BANDS, JAISPFoundationV7, create_optimizer, create_scheduler
-from jaisp_dataset_v7 import make_loader_v7, sample_context_target, sample_context_target_phaseB_mixed
+from jaisp_dataset_v6 import JAISPDatasetV6, collate_v6
+from jaisp_dataset_v7 import sample_context_target, sample_context_target_phaseB_mixed
 
 try:
     import wandb
@@ -49,6 +57,15 @@ def short_band_name(band: str) -> str:
     return band.split("_", 1)[1]
 
 
+@contextlib.contextmanager
+def suppress_stdout(enabled: bool):
+    if not enabled:
+        yield
+        return
+    with open(os.devnull, "w") as devnull, contextlib.redirect_stdout(devnull):
+        yield
+
+
 class JAISPTrainerV7:
     def __init__(
         self,
@@ -75,11 +92,42 @@ class JAISPTrainerV7:
         cross_instrument_prob: float = 1.0,
         wandb_project: str = "JAISP-Foundation-v7",
         wandb_name: str = None,
+        seed: int = 42,
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
     ):
-        self.device = torch.device(device)
+        self.rank = int(os.environ.get("RANK", "0"))
+        self.local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+        self.world_size = int(os.environ.get("WORLD_SIZE", "1"))
+        self.distributed = self.world_size > 1
+
+        requested_device = torch.device(device)
+        if self.distributed and not dist.is_initialized():
+            backend = "nccl" if requested_device.type == "cuda" else "gloo"
+            init_method = os.environ.get("DIST_INIT_METHOD")
+            if init_method:
+                dist.init_process_group(
+                    backend=backend,
+                    init_method=init_method,
+                    rank=self.rank,
+                    world_size=self.world_size,
+                )
+            else:
+                dist.init_process_group(backend=backend)
+
+        if requested_device.type == "cuda" and torch.cuda.is_available():
+            if self.distributed:
+                torch.cuda.set_device(self.local_rank)
+                self.device = torch.device("cuda", self.local_rank)
+            else:
+                self.device = requested_device
+        else:
+            self.device = requested_device
+
+        self.is_main_process = self.rank == 0
         self.output_dir = Path(output_dir)
-        self.output_dir.mkdir(parents=True, exist_ok=True)
+        if self.is_main_process:
+            self.output_dir.mkdir(parents=True, exist_ok=True)
+        self._barrier()
 
         self.epochs = epochs
         self.accum_steps = accum_steps
@@ -87,44 +135,83 @@ class JAISPTrainerV7:
         self.n_targets = n_targets_per_step
         self.vis_every = vis_every_n_epochs
         self.cross_instrument_prob = float(cross_instrument_prob)
-        self.rng = np.random.RandomState(42)
+        self.batch_size = int(batch_size)
+        self.num_workers = int(num_workers)
+        self.seed = int(seed)
 
-        print("Loading dataset...")
-        full_dataset, _ = make_loader_v7(
-            rubin_dir=rubin_dir,
-            euclid_dir=euclid_dir,
-            batch_size=batch_size,
-            num_workers=num_workers,
-            augment=True,
-            load_euclid=True,
-        )
-        self.full_dataset = full_dataset
+        random.seed(self.seed)
+        np.random.seed(self.seed)
+        torch.manual_seed(self.seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(self.seed)
+        self.rng = np.random.RandomState(self.seed)
 
-        n_total = len(full_dataset)
+        if self.is_main_process:
+            print("Loading training dataset...")
+        with suppress_stdout(not self.is_main_process):
+            self.train_dataset = JAISPDatasetV6(
+                rubin_dir=rubin_dir,
+                euclid_dir=euclid_dir,
+                augment=True,
+                load_euclid=True,
+                seed=self.seed,
+            )
+        # Validation should be deterministic and augmentation-free.
+        self.val_dataset = copy.deepcopy(self.train_dataset)
+        self.val_dataset.augment = False
+        self.val_dataset.rng = np.random.RandomState(self.seed)
+
+        n_total = len(self.train_dataset)
         n_val = max(1, int(n_total * val_fraction))
-        idx = list(range(n_total))
-        random.shuffle(idx)
-        self.val_indices = set(idx[:n_val])
-        self.train_indices = idx[n_val:]
-        print(f"  Train tiles: {len(self.train_indices)}, Val tiles: {n_val}")
+        split_order = self.rng.permutation(n_total).tolist()
+        self.val_indices = sorted(split_order[:n_val])
+        self.train_indices = sorted(split_order[n_val:])
+        self.train_loader, self.train_sampler = self._make_subset_loader(
+            self.train_dataset,
+            self.train_indices,
+            shuffle=True,
+            generator_seed=self.seed,
+        )
+        self.val_loader = self._make_subset_loader(self.val_dataset, self.val_indices, shuffle=False)
+        if self.is_main_process:
+            print(f"  Train tiles: {len(self.train_indices)}, Val tiles: {n_val}")
 
-        print("Initializing JAISPFoundationV7...")
-        self.model = JAISPFoundationV7(
-            band_names=ALL_BANDS,
-            stem_ch=stem_ch,
-            hidden_ch=hidden_ch,
-            blocks_per_stage=blocks_per_stage,
-            transformer_depth=transformer_depth,
-            transformer_heads=transformer_heads,
-            fused_pixel_scale_arcsec=fused_pixel_scale_arcsec,
-        ).to(self.device)
+        if self.is_main_process:
+            print("Initializing JAISPFoundationV7...")
+        with suppress_stdout(not self.is_main_process):
+            base_model = JAISPFoundationV7(
+                band_names=ALL_BANDS,
+                stem_ch=stem_ch,
+                hidden_ch=hidden_ch,
+                blocks_per_stage=blocks_per_stage,
+                transformer_depth=transformer_depth,
+                transformer_heads=transformer_heads,
+                fused_pixel_scale_arcsec=fused_pixel_scale_arcsec,
+            ).to(self.device)
+        if self.distributed:
+            # Each step touches only a subset of band-specific stems/decoders,
+            # so some parameters legitimately receive no gradient on a rank.
+            self.model = DDP(
+                base_model,
+                device_ids=[self.local_rank] if self.device.type == "cuda" else None,
+                find_unused_parameters=True,
+            )
+        else:
+            self.model = base_model
 
         self.optimizer = create_optimizer(self.model, lr=lr, weight_decay=weight_decay)
         self.scheduler = create_scheduler(self.optimizer, warmup_epochs, epochs)
 
-        self.use_wandb = wandb is not None
+        wandb_mode = (os.environ.get("WANDB_MODE") or "").strip().lower()
+        wandb_disabled = (os.environ.get("WANDB_DISABLED") or "").strip().lower() in {"1", "true", "yes"}
+        self.use_wandb = (
+            wandb is not None
+            and self.is_main_process
+            and not wandb_disabled
+            and wandb_mode != "disabled"
+        )
         if self.use_wandb:
-            wandb.init(
+            wandb_kwargs = dict(
                 project=wandb_project,
                 name=wandb_name or f"v7_h{hidden_ch}_depth{transformer_depth}",
                 config={
@@ -143,8 +230,12 @@ class JAISPTrainerV7:
                     "cross_instrument_prob": cross_instrument_prob,
                     "train_tiles": len(self.train_indices),
                     "val_tiles": n_val,
+                    "seed": self.seed,
                 },
             )
+            if wandb_mode:
+                wandb_kwargs["mode"] = wandb_mode
+            wandb.init(**wandb_kwargs)
 
         self.config = {
             "band_names": ALL_BANDS,
@@ -154,9 +245,113 @@ class JAISPTrainerV7:
             "transformer_depth": transformer_depth,
             "transformer_heads": transformer_heads,
             "fused_pixel_scale_arcsec": fused_pixel_scale_arcsec,
+            "seed": self.seed,
         }
         self.best_val_loss = float("inf")
         self.global_step = 0
+
+    def _worker_init_fn(self, worker_id: int) -> None:
+        base_seed = self.seed + 1000 * self.rank + worker_id
+        random.seed(base_seed)
+        np.random.seed(base_seed)
+        torch.manual_seed(base_seed)
+
+        worker_info = torch.utils.data.get_worker_info()
+        if worker_info is None:
+            return
+        dataset = worker_info.dataset
+        base_dataset = getattr(dataset, "dataset", dataset)
+        if hasattr(base_dataset, "rng"):
+            base_dataset.rng = np.random.RandomState(base_seed)
+
+    def _make_subset_loader(
+        self,
+        dataset,
+        indices,
+        shuffle: bool,
+        generator_seed: int = None,
+    ):
+        subset = Subset(dataset, list(indices))
+        generator = None
+        sampler = None
+        if self.distributed and shuffle:
+            sampler = DistributedSampler(
+                subset,
+                num_replicas=self.world_size,
+                rank=self.rank,
+                shuffle=True,
+                seed=int(generator_seed if generator_seed is not None else self.seed),
+                drop_last=False,
+            )
+        elif shuffle:
+            generator = torch.Generator()
+            generator.manual_seed(int(generator_seed if generator_seed is not None else self.seed))
+        loader = DataLoader(
+            subset,
+            batch_size=self.batch_size,
+            shuffle=(shuffle and sampler is None),
+            num_workers=self.num_workers,
+            pin_memory=(self.device.type == "cuda"),
+            persistent_workers=(self.num_workers > 0),
+            drop_last=False,
+            collate_fn=collate_v6,
+            generator=generator,
+            sampler=sampler,
+            worker_init_fn=self._worker_init_fn,
+        )
+        if shuffle:
+            return loader, sampler
+        return loader
+
+    def _raw_model(self):
+        return self.model.module if isinstance(self.model, DDP) else self.model
+
+    def _barrier(self) -> None:
+        if not self.distributed or not dist.is_initialized():
+            return
+        if self.device.type == "cuda":
+            dist.barrier(device_ids=[self.local_rank])
+        else:
+            dist.barrier()
+
+    def _reduce_mean_scalar(self, value: float) -> float:
+        if not self.distributed:
+            return float(value)
+        tensor = torch.tensor(float(value), device=self.device)
+        dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
+        tensor /= self.world_size
+        return float(tensor.item())
+
+    def _reduce_mean_stats(self, total: float, count: int) -> float:
+        total_t = torch.tensor(float(total), device=self.device)
+        count_t = torch.tensor(float(count), device=self.device)
+        if self.distributed:
+            dist.all_reduce(total_t, op=dist.ReduceOp.SUM)
+            dist.all_reduce(count_t, op=dist.ReduceOp.SUM)
+        denom = max(float(count_t.item()), 1.0)
+        return float(total_t.item() / denom)
+
+    def _reduce_band_losses(self, band_losses: dict) -> dict:
+        reduced = {}
+        for band in ALL_BANDS:
+            values = band_losses.get(band, [])
+            total = float(np.sum(values)) if values else 0.0
+            count = len(values)
+            total_t = torch.tensor(total, device=self.device)
+            count_t = torch.tensor(float(count), device=self.device)
+            if self.distributed:
+                dist.all_reduce(total_t, op=dist.ReduceOp.SUM)
+                dist.all_reduce(count_t, op=dist.ReduceOp.SUM)
+            if count_t.item() > 0:
+                reduced[band] = float(total_t.item() / count_t.item())
+        return reduced
+
+    def _broadcast_scalar(self, value: float) -> float:
+        if not self.distributed:
+            return float(value)
+        tensor = torch.tensor(float(value), device=self.device)
+        dist.broadcast(tensor, src=0)
+        return float(tensor.item())
 
     def _prepare_batch(self, sample: dict, rng: np.random.RandomState, force_phase_b: bool = False) -> dict:
         use_phase_b = (
@@ -184,101 +379,140 @@ class JAISPTrainerV7:
 
     def _train_epoch(self, epoch: int) -> dict:
         self.model.train()
-        epoch_loss = 0.0
+        epoch_loss_total = 0.0
         band_losses = defaultdict(list)
         n_steps = 0
 
         self.optimizer.zero_grad(set_to_none=True)
         accum_count = 0
-        train_order = self.rng.permutation(self.train_indices).tolist()
+        microbatch_loss_sum = 0.0
+        microbatch_count = 0
 
-        pbar = tqdm(train_order, desc=f"Epoch {epoch+1}/{self.epochs}", leave=False)
-        for tile_idx in pbar:
-            sample = self.full_dataset[tile_idx]
-            batch = self._prepare_batch(sample, self.rng)
-            if batch is None:
-                continue
+        if self.train_sampler is not None:
+            self.train_sampler.set_epoch(epoch)
 
-            step_loss_val = 0.0
-            n_tgts = len(batch["targets"])
-            for tgt in batch["targets"]:
-                out = self.model(
-                    batch["ctx_img"],
-                    batch["ctx_rms"],
-                    tgt["band"],
-                    tgt["image"],
-                    tgt["rms"],
-                )
-                (out["loss"] / (n_tgts * self.accum_steps)).backward()
-                step_loss_val += float(out["loss"].detach())
-                band_losses[tgt["band"]].append(float(out["loss"].detach()))
+        pbar = tqdm(
+            self.train_loader,
+            desc=f"Epoch {epoch+1}/{self.epochs}",
+            leave=False,
+            disable=not self.is_main_process,
+        )
+        for sample_list in pbar:
+            for sample in sample_list:
+                batch = self._prepare_batch(sample, self.rng)
+                if batch is None:
+                    continue
 
-            step_loss_val /= n_tgts
-            accum_count += 1
+                step_loss_val = 0.0
+                n_tgts = len(batch["targets"])
+                for tgt in batch["targets"]:
+                    out = self.model(
+                        batch["ctx_img"],
+                        batch["ctx_rms"],
+                        tgt["band"],
+                        tgt["image"],
+                        tgt["rms"],
+                    )
+                    (out["loss"] / (n_tgts * self.accum_steps)).backward()
+                    loss_scalar = float(out["loss"].detach())
+                    step_loss_val += loss_scalar
+                    band_losses[tgt["band"]].append(loss_scalar)
 
-            if accum_count >= self.accum_steps:
-                if self.grad_clip > 0:
-                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
-                self.optimizer.step()
-                self.optimizer.zero_grad(set_to_none=True)
-                accum_count = 0
-                n_steps += 1
-                self.global_step += 1
+                step_loss_val /= n_tgts
+                accum_count += 1
+                microbatch_count += 1
+                microbatch_loss_sum += step_loss_val
 
-                loss_val = step_loss_val
-                epoch_loss += loss_val
-                if self.use_wandb:
-                    wandb.log({
-                        "train/loss": loss_val,
-                        "step": self.global_step,
-                        "lr": self.optimizer.param_groups[0]["lr"],
-                    })
-                pbar.set_postfix(loss=f"{loss_val:.4f}")
+                if accum_count >= self.accum_steps:
+                    if self.grad_clip > 0:
+                        torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
+                    self.optimizer.step()
+                    self.optimizer.zero_grad(set_to_none=True)
+                    accum_count = 0
+                    self.global_step += 1
+                    n_steps += 1
+
+                    loss_val = microbatch_loss_sum / max(1, microbatch_count)
+                    loss_val = self._reduce_mean_scalar(loss_val)
+                    epoch_loss_total += loss_val
+                    microbatch_loss_sum = 0.0
+                    microbatch_count = 0
+
+                    if self.use_wandb:
+                        wandb.log({
+                            "train/loss": loss_val,
+                            "step": self.global_step,
+                            "lr": self.optimizer.param_groups[0]["lr"],
+                        })
+                    pbar.set_postfix(loss=f"{loss_val:.4f}")
 
         if accum_count > 0:
             if self.grad_clip > 0:
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
             self.optimizer.step()
             self.optimizer.zero_grad(set_to_none=True)
+            self.global_step += 1
+            n_steps += 1
+            loss_val = microbatch_loss_sum / max(1, microbatch_count)
+            loss_val = self._reduce_mean_scalar(loss_val)
+            epoch_loss_total += loss_val
+            if self.use_wandb:
+                wandb.log({
+                    "train/loss": loss_val,
+                    "step": self.global_step,
+                    "lr": self.optimizer.param_groups[0]["lr"],
+                })
 
-        avg_loss = epoch_loss / max(1, n_steps)
-        per_band = {b: float(np.mean(v)) for b, v in band_losses.items()}
+        avg_loss = self._reduce_mean_stats(epoch_loss_total, n_steps)
+        per_band = self._reduce_band_losses(band_losses)
         return {"loss": avg_loss, "per_band": per_band}
 
     @torch.no_grad()
     def _validate(self) -> float:
+        if not self.is_main_process:
+            return float("nan")
         self.model.eval()
+        eval_model = self._raw_model()
+        eval_model.eval()
         val_losses = []
         val_rng = np.random.RandomState(0)
+        n_seen = 0
 
-        for tile_idx in list(self.val_indices)[:50]:
-            sample = self.full_dataset[tile_idx]
-            batch = self._prepare_batch(sample, val_rng, force_phase_b=sample.get("has_euclid", False))
-            if batch is None:
-                continue
+        for sample_list in self.val_loader:
+            for sample in sample_list:
+                if n_seen >= 50:
+                    break
+                batch = self._prepare_batch(sample, val_rng, force_phase_b=sample.get("has_euclid", False))
+                if batch is None:
+                    continue
 
-            for tgt in batch["targets"]:
-                out = self.model(
-                    batch["ctx_img"],
-                    batch["ctx_rms"],
-                    tgt["band"],
-                    tgt["image"],
-                    tgt["rms"],
-                )
-                val_losses.append(float(out["loss"]))
+                for tgt in batch["targets"]:
+                    out = eval_model(
+                        batch["ctx_img"],
+                        batch["ctx_rms"],
+                        tgt["band"],
+                        tgt["image"],
+                        tgt["rms"],
+                    )
+                    val_losses.append(float(out["loss"]))
+                n_seen += 1
+            if n_seen >= 50:
+                break
 
         return float(np.mean(val_losses)) if val_losses else float("inf")
 
     @torch.no_grad()
     def _visualize(self, epoch: int) -> None:
-        if not self.use_wandb:
+        if not self.use_wandb or not self.is_main_process:
             return
 
         self.model.eval()
+        eval_model = self._raw_model()
+        eval_model.eval()
         raw_sample = None
         pool = None
-        for tile_idx in list(self.val_indices)[:25]:
-            candidate = self.full_dataset[tile_idx]
+        for tile_idx in self.val_indices[:25]:
+            candidate = self.val_dataset[tile_idx]
             candidate_pool = available_band_pool(candidate)
             if len(candidate_pool) < 2:
                 continue
@@ -310,7 +544,7 @@ class JAISPTrainerV7:
             tgt_img = pool[target_band]["image"].unsqueeze(0).to(self.device)
             tgt_rms = pool[target_band]["rms"].unsqueeze(0).to(self.device)
 
-            out = self.model(ctx_img, ctx_rms, target_band, tgt_img, tgt_rms)
+            out = eval_model(ctx_img, ctx_rms, target_band, tgt_img, tgt_rms)
 
             truth = out["target_norm"][0, 0].cpu().numpy()
             pred = out["pred"][0, 0].cpu().numpy()
@@ -430,68 +664,106 @@ class JAISPTrainerV7:
         wandb.log(log_dict)
 
     def _save_checkpoint(self, epoch: int, tag: str = "latest") -> None:
+        if not self.is_main_process:
+            return
         ckpt = {
             "epoch": epoch,
-            "model": self.model.state_dict(),
+            "model": self._raw_model().state_dict(),
             "optimizer": self.optimizer.state_dict(),
             "scheduler": self.scheduler.state_dict(),
             "best_val_loss": self.best_val_loss,
             "global_step": self.global_step,
             "config": self.config,
+            "train_indices": list(self.train_indices),
+            "val_indices": list(self.val_indices),
+            "rng_state": self.rng.get_state(),
+            "python_random_state": random.getstate(),
+            "torch_rng_state": torch.get_rng_state(),
+            "cuda_rng_state_all": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
         }
         torch.save(ckpt, self.output_dir / f"checkpoint_{tag}.pt")
 
     def load_checkpoint(self, path: str) -> int:
         ckpt = torch.load(path, map_location=self.device)
-        self.model.load_state_dict(ckpt["model"])
+        self._raw_model().load_state_dict(ckpt["model"])
         self.optimizer.load_state_dict(ckpt["optimizer"])
         self.scheduler.load_state_dict(ckpt["scheduler"])
         self.best_val_loss = ckpt.get("best_val_loss", float("inf"))
         self.global_step = ckpt.get("global_step", 0)
+        if "train_indices" in ckpt and "val_indices" in ckpt:
+            self.train_indices = list(ckpt["train_indices"])
+            self.val_indices = list(ckpt["val_indices"])
+            self.train_loader, self.train_sampler = self._make_subset_loader(
+                self.train_dataset,
+                self.train_indices,
+                shuffle=True,
+                generator_seed=self.seed,
+            )
+            self.val_loader = self._make_subset_loader(self.val_dataset, self.val_indices, shuffle=False)
+        if "rng_state" in ckpt:
+            self.rng.set_state(ckpt["rng_state"])
+        if "python_random_state" in ckpt:
+            random.setstate(ckpt["python_random_state"])
+        if "torch_rng_state" in ckpt:
+            torch.set_rng_state(ckpt["torch_rng_state"])
+        if torch.cuda.is_available() and ckpt.get("cuda_rng_state_all") is not None:
+            torch.cuda.set_rng_state_all(ckpt["cuda_rng_state_all"])
         return int(ckpt["epoch"])
 
     def train(self, resume_from: str = None) -> None:
         start_epoch = 0
         if resume_from:
             start_epoch = self.load_checkpoint(resume_from) + 1
-            print(f"Resumed from {resume_from} (epoch {start_epoch})")
+            if self.is_main_process:
+                print(f"Resumed from {resume_from} (epoch {start_epoch})")
 
         for epoch in range(start_epoch, self.epochs):
             train_metrics = self._train_epoch(epoch)
             self.scheduler.step()
+            self._barrier()
 
-            val_loss = self._validate()
-            is_best = val_loss < self.best_val_loss
-            if is_best:
-                self.best_val_loss = val_loss
-                self._save_checkpoint(epoch, "best")
+            is_best = False
+            if self.is_main_process:
+                val_loss = self._validate()
+                is_best = val_loss < self.best_val_loss
+                if is_best:
+                    self.best_val_loss = val_loss
+                    self._save_checkpoint(epoch, "best")
 
-            if self.use_wandb:
-                log_dict = {
-                    "epoch": epoch + 1,
-                    "train/epoch_loss": train_metrics["loss"],
-                    "val/loss": val_loss,
-                    "val/best_loss": self.best_val_loss,
-                }
-                for band, loss in train_metrics["per_band"].items():
-                    log_dict[f"train/band_{band}"] = loss
-                wandb.log(log_dict)
+                if self.use_wandb:
+                    log_dict = {
+                        "epoch": epoch + 1,
+                        "train/epoch_loss": train_metrics["loss"],
+                        "val/loss": val_loss,
+                        "val/best_loss": self.best_val_loss,
+                    }
+                    for band, loss in train_metrics["per_band"].items():
+                        log_dict[f"train/band_{band}"] = loss
+                    wandb.log(log_dict)
 
-            print(
-                f"Epoch {epoch+1:3d}/{self.epochs} | "
-                f"train {train_metrics['loss']:.4f} | "
-                f"val {val_loss:.4f}{'*' if is_best else ''}"
-            )
+                print(
+                    f"Epoch {epoch+1:3d}/{self.epochs} | "
+                    f"train {train_metrics['loss']:.4f} | "
+                    f"val {val_loss:.4f}{'*' if is_best else ''}"
+                )
 
-            if (epoch + 1) % 10 == 0:
-                self._save_checkpoint(epoch, "latest")
-            if (epoch + 1) % self.vis_every == 0 or epoch == 0:
-                self._visualize(epoch)
+                if (epoch + 1) % 10 == 0:
+                    self._save_checkpoint(epoch, "latest")
+                if (epoch + 1) % self.vis_every == 0 or epoch == 0:
+                    self._visualize(epoch)
+            else:
+                val_loss = 0.0
+
+            self.best_val_loss = self._broadcast_scalar(self.best_val_loss if self.is_main_process else 0.0)
+            self._barrier()
 
         self._save_checkpoint(self.epochs - 1, "final")
         if self.use_wandb:
             wandb.finish()
-        print(f"Training complete. Best val loss: {self.best_val_loss:.4f}")
+        if self.is_main_process:
+            print(f"Training complete. Best val loss: {self.best_val_loss:.4f}")
+        if self.distributed and dist.is_initialized():
+            dist.destroy_process_group()
 
 
 def build_argparser() -> argparse.ArgumentParser:
@@ -520,6 +792,7 @@ def build_argparser() -> argparse.ArgumentParser:
     p.add_argument("--cross_instrument_prob", type=float, default=1.0)
     p.add_argument("--wandb_project", default="JAISP-Foundation-v7")
     p.add_argument("--wandb_name", default=None)
+    p.add_argument("--seed", type=int, default=42)
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     return p
 
