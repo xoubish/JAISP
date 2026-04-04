@@ -8,6 +8,14 @@ For each tarball (tiles_product.tar.gz, batch_*.tar.gz, ...):
   - Optionally extracts valid tiles, preserving tract/patch subdirectory layout
   - Prints a per-tile summary table and final statistics
 
+Supported archive layouts include both older flat products such as:
+    rubin_tiles_tract5063/patch00/tile_x00000_y00000.npz
+    euclid_tiles_tract5063/tile_x00000_y00000_euclid.npz
+
+and newer mixed products such as:
+    tiles_product/tract_5063/patch_25/tile_x00000_y00000.npz
+    tiles_product/tract_5063/patch_25/tile_x00000_y00000_euclid.npz
+
 Usage
 -----
     # Dry run: report contents without extracting
@@ -19,9 +27,14 @@ Usage
     # Multiple archives
     python io/ingest_tiles.py data/batch_*.tar.gz --out_dir data/ --dry_run
 
-Output directory layout (mirrors archive structure):
+Hierarchical output layout:
     data/rubin_tiles_tract5063/patch00/tile_x00256_y00512.npz
     data/euclid_tiles_tract5063/tile_x00256_y00512_euclid.npz
+    data/euclid_tiles_tract5063/patch_25/tile_x00256_y00512_euclid.npz
+
+Flat output layout (`--layout flat`):
+    data/rubin_tiles_all/tile_x00256_y00512_tract5063_patch00.npz
+    data/euclid_tiles_all/tile_x00256_y00512_tract5063_patch00_euclid.npz
 """
 
 from __future__ import annotations
@@ -52,6 +65,8 @@ def _parse_path(archive_path: str) -> dict:
     Handles both:
       rubin_tiles_tract5063/patch00/tile_x00000_y00000.npz
       euclid_tiles_tract5063/tile_x00000_y00000_euclid.npz
+      tiles_product/tract_5063/patch_25/tile_x00000_y00000.npz
+      tiles_product/tract_5063/patch_25/tile_x00000_y00000_euclid.npz
     """
     p = PurePosixPath(archive_path)
     parts = p.parts           # e.g. ('rubin_tiles_tract5063', 'patch00', 'tile_x…npz')
@@ -64,26 +79,52 @@ def _parse_path(archive_path: str) -> dict:
         'instrument': None,
     }
 
-    # Identify instrument and tract from top-level dir
-    top = parts[0] if parts else ''
-    if top.startswith('rubin_tiles_tract'):
-        info['instrument'] = 'rubin'
-        info['tract'] = top.replace('rubin_tiles_tract', '')
-    elif top.startswith('euclid_tiles_tract'):
-        info['instrument'] = 'euclid'
-        info['tract'] = top.replace('euclid_tiles_tract', '')
-    elif top.startswith('rubin_tiles_ecdfs'):
-        info['instrument'] = 'rubin'
-        info['tract'] = 'ecdfs'
-    elif top.startswith('euclid_tiles_ecdfs'):
-        info['instrument'] = 'euclid'
-        info['tract'] = 'ecdfs'
+    filename = p.name
+    if filename.startswith('._'):
+        return info
 
-    # Patch (Rubin only, second path component)
-    if info['instrument'] == 'rubin' and len(parts) >= 3:
-        info['patch'] = parts[1]
-    elif info['instrument'] == 'euclid':
-        info['patch'] = None
+    inferred_instrument = None
+    if filename.endswith('_euclid.npz'):
+        inferred_instrument = 'euclid'
+    elif filename.endswith('.npz'):
+        inferred_instrument = 'rubin'
+
+    # Identify instrument / tract / patch from any meaningful path component so
+    # we can handle archives rooted at "data/", "tiles_product/", etc.
+    for idx, part in enumerate(parts[:-1]):
+        if part.startswith('rubin_tiles_tract'):
+            info['instrument'] = 'rubin'
+            info['tract'] = part.replace('rubin_tiles_tract', '')
+            if idx + 1 < len(parts) - 1 and parts[idx + 1].startswith('patch'):
+                info['patch'] = parts[idx + 1]
+            break
+        if part.startswith('euclid_tiles_tract'):
+            info['instrument'] = 'euclid'
+            info['tract'] = part.replace('euclid_tiles_tract', '')
+            if idx + 1 < len(parts) - 1 and parts[idx + 1].startswith('patch'):
+                info['patch'] = parts[idx + 1]
+            break
+        if part.startswith('rubin_tiles_ecdfs'):
+            info['instrument'] = 'rubin'
+            info['tract'] = 'ecdfs'
+            if idx + 1 < len(parts) - 1 and parts[idx + 1].startswith('patch'):
+                info['patch'] = parts[idx + 1]
+            break
+        if part.startswith('euclid_tiles_ecdfs'):
+            info['instrument'] = 'euclid'
+            info['tract'] = 'ecdfs'
+            if idx + 1 < len(parts) - 1 and parts[idx + 1].startswith('patch'):
+                info['patch'] = parts[idx + 1]
+            break
+        if part.startswith('tract_'):
+            info['instrument'] = inferred_instrument
+            info['tract'] = part.replace('tract_', '')
+            if idx + 1 < len(parts) - 1 and parts[idx + 1].startswith('patch'):
+                info['patch'] = parts[idx + 1]
+            break
+
+    if info['instrument'] is None:
+        info['instrument'] = inferred_instrument
 
     # Tile ID from filename
     stem = p.stem
@@ -193,10 +234,23 @@ def _fmt(val, width=8):
     return str(val)[:width].ljust(width)
 
 
+def _flat_filename(info: dict) -> str:
+    """Build a flat filename that still preserves tract/patch provenance."""
+    tile_id = info['tile_id']
+    tract = info['tract'] or 'unknown'
+    patch = info['patch']
+    patch_part = f'_{patch}' if patch else ''
+
+    if info['instrument'] == 'euclid':
+        return f'{tile_id}_tract{tract}{patch_part}_euclid.npz'
+    return f'{tile_id}_tract{tract}{patch_part}.npz'
+
+
 def process_archive(
     archive_path: Path,
     out_dir: Path | None,
     dry_run: bool,
+    layout: str = 'hierarchical',
     nsig_data: float = 3.0,
 ) -> list[dict]:
     """Process one tarball. Returns list of per-tile result dicts."""
@@ -213,6 +267,7 @@ def process_archive(
         # Group by tile_id within each tract/patch
         rubin_map: dict[str, tarfile.TarInfo] = {}
         euclid_map: dict[str, tarfile.TarInfo] = {}
+        matched_euclid_keys: set[str] = set()
 
         for m in npz_members:
             info = _parse_path(m.name)
@@ -245,14 +300,22 @@ def process_archive(
             data = np.load(io.BytesIO(f.read()), allow_pickle=True)
             r = _validate_rubin(data)
 
-            # Euclid counterpart (same tile_id, same tract, no patch)
-            euclid_key = f"{tract}/nopatch/{tile_id}"
+            # Prefer same-patch Euclid matches for mixed archives, but fall back
+            # to flat tract-level Euclid layouts used by older products.
+            euclid_keys = [f"{tract}/{info['patch'] or 'nopatch'}/{tile_id}"]
+            if info['patch'] is not None:
+                euclid_keys.append(f"{tract}/nopatch/{tile_id}")
             euclid_res = None
-            if euclid_key in euclid_map:
-                em, einfo = euclid_map[euclid_key]
-                ef = tar.extractfile(em)
-                edata = np.load(io.BytesIO(ef.read()), allow_pickle=True)
-                euclid_res = _validate_euclid(edata)
+            euclid_key = None
+            for candidate in euclid_keys:
+                if candidate in euclid_map:
+                    euclid_key = candidate
+                    em, einfo = euclid_map[euclid_key]
+                    ef = tar.extractfile(em)
+                    edata = np.load(io.BytesIO(ef.read()), allow_pickle=True)
+                    euclid_res = _validate_euclid(edata)
+                    matched_euclid_keys.add(euclid_key)
+                    break
 
             bands_str = ','.join(r['bands']) if r['bands'] else '?'
             issues_str = '; '.join(r['issues'][:2]) if r['issues'] else 'ok'
@@ -291,10 +354,19 @@ def process_archive(
 
             # Extract if requested
             if not dry_run and out_dir and r['has_data']:
-                _extract_tile(tar, m, info, out_dir)
+                _extract_tile(tar, m, info, out_dir, layout=layout)
                 if euclid_res and euclid_key in euclid_map:
                     em, einfo = euclid_map[euclid_key]
-                    _extract_tile(tar, em, einfo, out_dir)
+                    _extract_tile(tar, em, einfo, out_dir, layout=layout)
+
+        unmatched_euclid = sorted(set(euclid_map) - matched_euclid_keys)
+        if unmatched_euclid:
+            print()
+            print(f'  Note: {len(unmatched_euclid)} Euclid tiles had no Rubin counterpart')
+            for key in unmatched_euclid[:5]:
+                print(f'    unmatched euclid: {key}')
+            if len(unmatched_euclid) > 5:
+                print(f'    ... {len(unmatched_euclid) - 5} more')
 
     print()
     print(f'  Summary: {n_valid} with data, {n_no_data} NO_DATA, '
@@ -307,27 +379,38 @@ def _extract_tile(
     member: tarfile.TarInfo,
     info: dict,
     out_dir: Path,
+    layout: str = 'hierarchical',
 ) -> Path:
-    """Extract one tile member to out_dir, preserving tract/patch subdirs."""
+    """Extract one tile member to out_dir using the requested output layout."""
     instrument = info['instrument']
     tract      = info['tract']
     patch      = info['patch']
 
-    if instrument == 'rubin':
-        if tract == 'ecdfs':
-            subdir = out_dir / 'rubin_tiles_ecdfs'
+    if layout == 'flat':
+        if instrument == 'rubin':
+            subdir = out_dir / 'rubin_tiles_all'
         else:
-            subdir = out_dir / f'rubin_tiles_tract{tract}'
-            if patch:
-                subdir = subdir / patch
+            subdir = out_dir / 'euclid_tiles_all'
+        dest_name = _flat_filename(info)
     else:
-        if tract == 'ecdfs':
-            subdir = out_dir / 'euclid_tiles_ecdfs'
+        if instrument == 'rubin':
+            if tract == 'ecdfs':
+                subdir = out_dir / 'rubin_tiles_ecdfs'
+            else:
+                subdir = out_dir / f'rubin_tiles_tract{tract}'
+                if patch:
+                    subdir = subdir / patch
         else:
-            subdir = out_dir / f'euclid_tiles_tract{tract}'
+            if tract == 'ecdfs':
+                subdir = out_dir / 'euclid_tiles_ecdfs'
+            else:
+                subdir = out_dir / f'euclid_tiles_tract{tract}'
+                if patch:
+                    subdir = subdir / patch
+        dest_name = Path(member.name).name
 
     subdir.mkdir(parents=True, exist_ok=True)
-    dest = subdir / Path(member.name).name
+    dest = subdir / dest_name
 
     if dest.exists():
         return dest
@@ -378,6 +461,8 @@ def main():
     p.add_argument('archives', nargs='+', help='One or more .tar.gz files')
     p.add_argument('--out_dir', default=None,
                    help='Root data directory to extract into (default: dry-run only)')
+    p.add_argument('--layout', choices=['hierarchical', 'flat'], default='hierarchical',
+                   help='Extraction layout for written files (default: hierarchical)')
     p.add_argument('--dry_run', action='store_true',
                    help='Validate without extracting (default if --out_dir not given)')
     args = p.parse_args()
@@ -394,7 +479,7 @@ def main():
         if not path.exists():
             print(f'[warn] not found: {path}', file=sys.stderr)
             continue
-        results = process_archive(path, out_dir, dry_run)
+        results = process_archive(path, out_dir, dry_run, layout=args.layout)
         all_results.extend(results)
 
     if all_results:
