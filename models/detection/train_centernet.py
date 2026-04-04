@@ -328,6 +328,7 @@ def train(args):
                 'train/lr': lr_now,
                 'epoch': epoch + 1,
             }
+            wandb.log(log, step=step)
             if (epoch + 1) % 5 == 0 or epoch == 0:
                 try:
                     sample = next(iter(val_loader))
@@ -344,11 +345,11 @@ def train(args):
                             sim = {b: v.to(device) for b, v in sample['images'].items()}
                             srm = {b: v.to(device) for b, v in sample['rms'].items()}
                             sout = model(sim, srm)
-                    log['viz/tile'] = _log_tile(sample, sout, wandb, step,
-                                                euclid_dir=args.euclid_dir)
+                    wandb.log({'viz/tile': _log_tile(sample, sout, wandb, step,
+                                                     euclid_dir=args.euclid_dir)},
+                              step=step)
                 except Exception as exc:
                     print(f'  [warn] viz failed: {exc}')
-            wandb.log(log)
 
         if mean_val < best_val:
             best_val = mean_val

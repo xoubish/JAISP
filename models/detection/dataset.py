@@ -69,29 +69,35 @@ def _pseudo_labels_vis(
     vis_img: np.ndarray,       # [H_vis, W_vis]
     nsig: float = 3.0,
     max_sources: int = 1000,
-    spike_radius: int = 100,
+    spike_radius: int = 40,
+    min_star_area: int = 20,
 ) -> Tuple[np.ndarray, np.ndarray, int, int]:
     """Detect sources from Euclid VIS at native 0.1"/px resolution.
 
     Returns centroids normalized to VIS frame [0,1], preserving the full
     VIS spatial precision without projecting through a coarser grid.
 
-    Saturated pixels (top 0.5%) are dilated by spike_radius VIS pixels
-    (~10" at 0.1"/px) to mask diffraction spike arms before returning labels.
-    The star cores themselves will be recovered by the self-training promote
-    step (the 10-band model sees them clearly in multiple bands).
+    Saturated blobs with area >= min_star_area pixels are identified as star
+    cores and dilated by spike_radius to mask diffraction spike regions.
+    Small saturated blobs (hot pixels, CRs) are ignored.
 
     Returns (centroids_norm [M,2], classes [M], H_vis, W_vis).
     """
-    from scipy.ndimage import binary_dilation
+    from scipy.ndimage import binary_dilation, label as ndlabel
     H, W = vis_img.shape
 
-    # Build spike mask: dilate saturated pixels to cover spike arms
+    # Build spike mask: dilate only real star cores (large saturated blobs)
     nonzero_vals = vis_img[vis_img > 0]
     if len(nonzero_vals) > 100:
         sat_thresh = np.percentile(nonzero_vals, 99.5)
         sat_mask = vis_img > sat_thresh
-        # Disk-shaped structuring element of radius spike_radius
+        # Remove small blobs (hot pixels / CRs) — keep only star cores
+        labeled, n_blobs = ndlabel(sat_mask)
+        if n_blobs > 0:
+            areas = np.bincount(labeled.ravel())  # areas[0] = background
+            small = areas < min_star_area
+            sat_mask[small[labeled]] = False
+        # Dilate surviving star cores
         r = spike_radius
         yg, xg = np.ogrid[-r:r + 1, -r:r + 1]
         disk = (xg ** 2 + yg ** 2) <= r ** 2
