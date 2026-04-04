@@ -127,6 +127,11 @@ class CenterNetDetector(nn.Module):
         images: Dict[str, torch.Tensor],
         rms: Dict[str, torch.Tensor],
     ) -> Dict[str, torch.Tensor]:
+        if self.encoder is None:
+            raise RuntimeError(
+                'CenterNetDetector was built without an encoder (encoder=None). '
+                'Use the neck/head attributes directly, or supply an encoder.'
+            )
         feats = self.encoder(images, rms)     # [B, encoder_dim, H, W]
         feats = self.neck(feats)              # [B, head_ch, H, W]
 
@@ -193,9 +198,10 @@ class CenterNetDetector(nn.Module):
         dx = off[0, yi, xi]
         dy = off[1, yi, xi]
 
-        # Normalize to [0, 1] (x = col, y = row)
-        cx = (xi.float() + dx) / max(W - 1, 1)
-        cy = (yi.float() + dy) / max(H - 1, 1)
+        # Normalize to [0, 1] (x = col, y = row); clamp so offsets can't push
+        # predictions outside the tile boundary.
+        cx = ((xi.float() + dx) / max(W - 1, 1)).clamp(0.0, 1.0)
+        cy = ((yi.float() + dy) / max(H - 1, 1)).clamp(0.0, 1.0)
         centroids = torch.stack([cx, cy], dim=1)  # [N, 2]
 
         flux = out['log_flux'][0, yi, xi]
@@ -242,7 +248,7 @@ class CenterNetDetector(nn.Module):
         # strict=False: checkpoints saved in head-only mode (encoder=None) won't
         # have encoder keys, so missing keys are expected when loading with a
         # real encoder for inference.
-        missing, unexpected = model.load_state_dict(ckpt['state_dict'], strict=False)
+        missing, _ = model.load_state_dict(ckpt['state_dict'], strict=False)
         neck_missing = [k for k in missing if not k.startswith('encoder.')]
         if neck_missing:
             print(f'  [warn] Missing non-encoder keys: {neck_missing}')

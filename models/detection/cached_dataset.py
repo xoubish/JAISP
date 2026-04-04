@@ -25,8 +25,38 @@ for _p in (_HERE, _MODELS):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
-from astrometry2.source_matching import detect_sources
 from detection.dataset import _pseudo_labels, _pseudo_labels_vis, TileDetectionDataset
+
+
+def _compute_one_label(args):
+    """Compute pseudo-labels for a single tile (top-level for pickling)."""
+    tid, euclid_dir, rubin_dir, nsig, max_sources = args
+    if euclid_dir:
+        euclid_path = Path(euclid_dir) / f'{tid}_euclid.npz'
+        if euclid_path.exists():
+            try:
+                edata = np.load(str(euclid_path), allow_pickle=True, mmap_mode='r')
+                vis_img = np.nan_to_num(
+                    np.asarray(edata['img_VIS'], dtype=np.float32), nan=0.0)
+                c, cl, _, _ = _pseudo_labels_vis(vis_img, nsig, max_sources)
+                return tid, c, cl, 'vis'
+            except Exception:
+                pass
+
+    rubin_path = Path(rubin_dir) / f'{tid}.npz'
+    if not rubin_path.exists():
+        candidates = list(Path(rubin_dir).glob(f'{tid}*.npz'))
+        rubin_path = candidates[0] if candidates else rubin_path
+    try:
+        rdata = np.load(str(rubin_path), allow_pickle=True, mmap_mode='r')
+        raw_img = np.nan_to_num(
+            np.asarray(rdata['img'], dtype=np.float32), nan=0.0)
+        c, cl, _, _ = _pseudo_labels(raw_img, nsig, max_sources)
+        return tid, c, cl, 'rubin'
+    except Exception as exc:
+        print(f'\n  [warn] skip {tid}: {exc}')
+        return (tid, np.zeros((0, 2), dtype=np.float32),
+                np.zeros(0, dtype=np.int64), 'fail')
 
 
 class CachedFeatureDataset(Dataset):
@@ -124,54 +154,65 @@ class CachedFeatureDataset(Dataset):
             print(f'  Label refinement: +{n_added} promoted, -{n_removed} demoted')
 
     def _compute_labels(self, rubin_dir: str, euclid_dir: Optional[str]):
-        """Compute pseudo-labels from VIS (preferred) or Rubin (fallback)."""
+        """Compute pseudo-labels from VIS (preferred) or Rubin (fallback).
+
+        Labels are cached to ``{feature_dir}/pseudo_labels.pt``.  On load the
+        cached ``nsig`` is validated; a mismatch triggers full recomputation.
+        Tiles present in the dataset but absent from the cache are computed
+        incrementally rather than silently receiving empty labels.
+        """
+        cache_path = self.feature_dir / 'pseudo_labels.pt'
+        tiles_to_compute = list(self._tile_ids)  # default: compute everything
+
+        if cache_path.exists():
+            saved = torch.load(cache_path, map_location='cpu', weights_only=False)
+            # Handle old format: plain dict without 'labels'/'nsig' keys.
+            if isinstance(saved, dict) and 'labels' not in saved:
+                saved = {'labels': saved, 'nsig': None}
+            cached_nsig = saved.get('nsig')
+
+            if cached_nsig is not None and abs(cached_nsig - self.nsig) > 1e-6:
+                print(f'  [warn] Cache has nsig={cached_nsig}, requested nsig={self.nsig} '
+                      f'— recomputing all labels.')
+            else:
+                label_data = saved['labels']
+                # Populate cache for tiles that are already stored.
+                for tid in self._tile_ids:
+                    if tid in label_data:
+                        self._label_cache[tid] = label_data[tid]
+                tiles_to_compute = [tid for tid in self._tile_ids if tid not in label_data]
+                if not tiles_to_compute:
+                    print(f'  Loaded cached pseudo-labels from {cache_path} '
+                          f'({len(self._label_cache)} tiles)')
+                    return
+                print(f'  Loaded {len(self._label_cache)} cached tiles; '
+                      f'computing {len(tiles_to_compute)} new tiles')
+
         rubin_dir = Path(rubin_dir)
         euclid_dir = Path(euclid_dir) if euclid_dir else None
         n_vis, n_rubin = 0, 0
 
-        print(f'  Computing pseudo-labels (nsig={self.nsig}) ...', end=' ', flush=True)
-        for tid in self._tile_ids:
-            # Try VIS
-            used_vis = False
-            if euclid_dir:
-                euclid_path = euclid_dir / f'{tid}_euclid.npz'
-                if euclid_path.exists():
-                    try:
-                        edata = np.load(str(euclid_path), allow_pickle=True, mmap_mode='r')
-                        vis_img = np.nan_to_num(
-                            np.asarray(edata['img_VIS'], dtype=np.float32), nan=0.0
-                        )
-                        centroids, classes, _, _ = _pseudo_labels_vis(
-                            vis_img, self.nsig, self.max_sources
-                        )
-                        used_vis = True
-                        n_vis += 1
-                    except Exception:
-                        pass
+        print(f'  Computing pseudo-labels (nsig={self.nsig}) for '
+              f'{len(tiles_to_compute)} tiles ...', end=' ', flush=True)
 
-            if not used_vis:
-                rubin_path = rubin_dir / f'{tid}.npz'
-                if not rubin_path.exists():
-                    # Try to find it
-                    candidates = list(rubin_dir.glob(f'{tid}*.npz'))
-                    rubin_path = candidates[0] if candidates else rubin_path
-                try:
-                    rdata = np.load(str(rubin_path), allow_pickle=True, mmap_mode='r')
-                    raw_img = np.nan_to_num(
-                        np.asarray(rdata['img'], dtype=np.float32), nan=0.0
-                    )
-                    centroids, classes, _, _ = _pseudo_labels(
-                        raw_img, self.nsig, self.max_sources
-                    )
+        from concurrent.futures import ProcessPoolExecutor
+        import os
+        euclid_str = str(euclid_dir) if euclid_dir else None
+        rubin_str = str(rubin_dir)
+        work = [(tid, euclid_str, rubin_str, self.nsig, self.max_sources)
+                for tid in tiles_to_compute]
+        n_workers = min(len(work), max(1, os.cpu_count() // 2))
+        with ProcessPoolExecutor(max_workers=n_workers) as pool:
+            for tid, centroids, classes, src in pool.map(_compute_one_label, work):
+                self._label_cache[tid] = (centroids, classes)
+                if src == 'vis':
+                    n_vis += 1
+                elif src == 'rubin':
                     n_rubin += 1
-                except Exception as exc:
-                    print(f'\n  [warn] skip {tid}: {exc}')
-                    centroids = np.zeros((0, 2), dtype=np.float32)
-                    classes = np.zeros(0, dtype=np.int64)
 
-            self._label_cache[tid] = (centroids, classes)
-
-        print(f'done ({n_vis} VIS, {n_rubin} Rubin)')
+        # Save full cache (existing + newly computed) with current nsig.
+        torch.save({'labels': dict(self._label_cache), 'nsig': self.nsig}, cache_path)
+        print(f'done ({n_vis} VIS, {n_rubin} Rubin) → saved {cache_path}')
 
     def __len__(self) -> int:
         return len(self._samples)

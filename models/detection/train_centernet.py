@@ -72,8 +72,12 @@ def _load_encoder(encoder_ckpt, device, freeze=True):
 
 def _log_tile(batch, out, wandb, step, conf_thr=0.3, nms_kernel=7, euclid_dir=None):
     """Overlay GT centroids and CenterNet heatmap + detected peaks."""
+    import sys
     import matplotlib
-    matplotlib.use('Agg')
+    # matplotlib.use() must be called before pyplot is first imported; after
+    # that it is silently ignored.  Guard so repeated calls don't warn.
+    if 'matplotlib.pyplot' not in sys.modules:
+        matplotlib.use('Agg')
     import matplotlib.pyplot as plt
     import torch.nn.functional as F
 
@@ -138,9 +142,10 @@ def _log_tile(batch, out, wandb, step, conf_thr=0.3, nms_kernel=7, euclid_dir=No
     if n_pred > 0:
         off = out['offset'][0].detach().cpu()
         yi, xi = torch.where(peaks[0, 0])
-        hm_h, hm_w = hm.shape
-        px = (xi.float() + off[0, yi, xi]) / max(hm_w - 1, 1) * (W - 1)
-        py = (yi.float() + off[1, yi, xi]) / max(hm_h - 1, 1) * (H - 1)
+        # Normalize heatmap coords → [0,1], then scale to background image pixels.
+        # Clamp so out-of-range offsets don't scatter outside the axes.
+        px = ((xi.float() + off[0, yi, xi]) / max(hm_w - 1, 1) * (W - 1)).clamp(0, W - 1)
+        py = ((yi.float() + off[1, yi, xi]) / max(hm_h - 1, 1) * (H - 1)).clamp(0, H - 1)
         ax.scatter(px.numpy(), py.numpy(),
                    s=15, marker='x', c='red', lw=0.8, label=f'pred ({n_pred})')
 
@@ -164,8 +169,25 @@ def _log_tile(batch, out, wandb, step, conf_thr=0.3, nms_kernel=7, euclid_dir=No
 # Training
 # ---------------------------------------------------------------------------
 
+def _cached_forward(model, feats: torch.Tensor) -> dict:
+    """Run the CenterNet head on pre-computed encoder features.
+
+    Used in cached-feature training mode where the encoder is not called.
+    Centralizes the neck→head logic so profile_head is never silently skipped.
+    """
+    neck_out = model.neck(feats)
+    out = {
+        'heatmap':  model.hm_head(neck_out).sigmoid(),
+        'offset':   model.off_head(neck_out),
+        'log_flux': model.flux_head(neck_out).squeeze(1),
+    }
+    if model.profile_head is not None:
+        out['profile'] = model.profile_head(neck_out)
+    return out
+
+
 def train(args):
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = torch.device(args.device if args.device else ('cuda' if torch.cuda.is_available() else 'cpu'))
     use_cached = args.feature_dir is not None
     mode_str = 'cached features' if use_cached else 'live encoder'
     print(f'Training CenterNet detector on {device} ({mode_str})')
@@ -214,7 +236,7 @@ def train(args):
         )
         tr_loader = DataLoader(tr_ds, batch_size=args.batch_size, shuffle=True,
                                collate_fn=collate_fn, num_workers=4, pin_memory=True)
-        val_loader = DataLoader(val_ds, batch_size=1, shuffle=False,
+        val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False,
                                 collate_fn=collate_fn, num_workers=2)
         encoder_dim = None  # determined by _load_encoder
 
@@ -223,7 +245,6 @@ def train(args):
     # Model
     if use_cached:
         # Head-only model (no encoder needed)
-        from detection.centernet_detector import CenterNetDetector
         model = CenterNetDetector(
             encoder=None,
             encoder_dim=encoder_dim,
@@ -256,15 +277,7 @@ def train(args):
         tr_losses = []
         for batch in tr_loader:
             if use_cached:
-                feats = batch['features'].to(device)
-                neck_out = model.neck(feats)
-                out = {
-                    'heatmap':  model.hm_head(neck_out).sigmoid(),
-                    'offset':   model.off_head(neck_out),
-                    'log_flux': model.flux_head(neck_out).squeeze(1),
-                }
-                if model.profile_head is not None:
-                    out['profile'] = model.profile_head(neck_out)
+                out = _cached_forward(model, batch['features'].to(device))
             else:
                 images = {b: v.to(device) for b, v in batch['images'].items()}
                 rms = {b: v.to(device) for b, v in batch['rms'].items()}
@@ -283,9 +296,10 @@ def train(args):
             step += 1
             if use_wandb and step % 10 == 0:
                 wandb.log({
-                    'train/loss':     float(losses['loss_total']),
-                    'train/loss_hm':  float(losses['loss_hm']),
-                    'train/loss_off': float(losses['loss_off']),
+                    'train/loss':      float(losses['loss_total']),
+                    'train/loss_hm':   float(losses['loss_hm']),
+                    'train/loss_off':  float(losses['loss_off']),
+                    'train/loss_flux': float(losses['loss_flux']),
                     'train/n_sources': float(losses['n_sources']),
                     'step': step,
                 })
@@ -299,13 +313,7 @@ def train(args):
         with torch.no_grad():
             for batch in val_loader:
                 if use_cached:
-                    feats = batch['features'].to(device)
-                    neck_out = model.neck(feats)
-                    out = {
-                        'heatmap':  model.hm_head(neck_out).sigmoid(),
-                        'offset':   model.off_head(neck_out),
-                        'log_flux': model.flux_head(neck_out).squeeze(1),
-                    }
+                    out = _cached_forward(model, batch['features'].to(device))
                 else:
                     images = {b: v.to(device) for b, v in batch['images'].items()}
                     rms = {b: v.to(device) for b, v in batch['rms'].items()}
@@ -328,28 +336,21 @@ def train(args):
                 'train/lr': lr_now,
                 'epoch': epoch + 1,
             }
-            wandb.log(log, step=step)
             if (epoch + 1) % 5 == 0 or epoch == 0:
                 try:
                     sample = next(iter(val_loader))
                     with torch.no_grad():
                         if use_cached:
-                            feats = sample['features'].to(device)
-                            neck_out = model.neck(feats)
-                            sout = {
-                                'heatmap':  model.hm_head(neck_out).sigmoid(),
-                                'offset':   model.off_head(neck_out),
-                                'log_flux': model.flux_head(neck_out).squeeze(1),
-                            }
+                            sout = _cached_forward(model, sample['features'].to(device))
                         else:
                             sim = {b: v.to(device) for b, v in sample['images'].items()}
                             srm = {b: v.to(device) for b, v in sample['rms'].items()}
                             sout = model(sim, srm)
-                    wandb.log({'viz/tile': _log_tile(sample, sout, wandb, step,
-                                                     euclid_dir=args.euclid_dir)},
-                              step=step)
+                    log['viz/tile'] = _log_tile(sample, sout, wandb, step,
+                                                euclid_dir=args.euclid_dir)
                 except Exception as exc:
                     print(f'  [warn] viz failed: {exc}')
+            wandb.log(log, step=step)
 
         if mean_val < best_val:
             best_val = mean_val
@@ -390,5 +391,7 @@ if __name__ == '__main__':
                    help='Add profile head (e1, e2, r_half, sersic_n)')
     p.add_argument('--wandb_project',    default=None)
     p.add_argument('--wandb_run',        default=None)
+    p.add_argument('--device',           default='',
+                   help='Device to use: "cuda", "cuda:1", "cpu" (default: auto)')
     args = p.parse_args()
     train(args)

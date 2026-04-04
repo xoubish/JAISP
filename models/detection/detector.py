@@ -44,7 +44,7 @@ from typing import Dict, Optional, Tuple
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F  # noqa: F401
+
 
 _HERE   = Path(__file__).resolve().parent
 _MODELS = _HERE.parent
@@ -109,7 +109,7 @@ class _StubEncoder(nn.Module):
     def forward(
         self,
         images: Dict[str, torch.Tensor],
-        rms:    Dict[str, torch.Tensor],    # noqa: unused in stub
+        _rms:   Dict[str, torch.Tensor],    # unused in stub, kept for interface compat
     ) -> torch.Tensor:
         # Stack all bands along channel dim → [B, C, H, W]
         imgs = torch.cat(list(images.values()), dim=1)
@@ -233,7 +233,7 @@ class JaispDetector(nn.Module):
         -------
         dict with:
             centroids  [B, N_q, 2]   normalised (x, y) ∈ [0, 1]
-            logits     [B, N_q, 3]   class logits (star / galaxy / artifact)
+            logits     [B, N_q, 1]   class logits (single 'source' class)
             conf       [B, N_q]      objectness logit
             log_flux   [B, N_q]      log10 flux proxy
         """
