@@ -17,7 +17,7 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.optim as optim
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader, Subset, random_split
 
 _HERE = Path(__file__).resolve().parent
 _MODELS = _HERE.parent
@@ -208,12 +208,19 @@ def train(args):
             max_sources=1000,
             extra_labels=args.extra_labels,
         )
-        n_val = max(1, int(0.1 * len(full_ds)))
-        n_tr = len(full_ds) - n_val
-        tr_ds, val_ds = random_split(
-            full_ds, [n_tr, n_val],
-            generator=torch.Generator().manual_seed(42),
-        )
+        # Split at tile level so all augmentations of a tile stay together.
+        # A sample-level split leaks: different augments of the same tile end up
+        # in both train and val, making val loss misleadingly low then rising.
+        rng = np.random.default_rng(42)
+        tile_ids = full_ds._tile_ids  # list[str]
+        shuffled = rng.permutation(len(tile_ids))
+        n_val_tiles = max(1, int(0.1 * len(tile_ids)))
+        val_tile_set = {tile_ids[int(i)] for i in shuffled[:n_val_tiles]}
+        tr_indices  = [i for i, (tid, _) in enumerate(full_ds._samples) if tid not in val_tile_set]
+        val_indices = [i for i, (tid, _) in enumerate(full_ds._samples) if tid in val_tile_set]
+        tr_ds  = Subset(full_ds, tr_indices)
+        val_ds = Subset(full_ds, val_indices)
+        n_tr, n_val = len(tr_indices), len(val_indices)
         tr_loader = DataLoader(tr_ds, batch_size=args.batch_size, shuffle=True,
                                collate_fn=collate_cached, num_workers=4, pin_memory=True)
         val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False,
@@ -229,7 +236,7 @@ def train(args):
             augment=True,
         )
         n_val = max(1, int(0.1 * len(full_ds)))
-        n_tr = len(full_ds) - n_val
+        n_tr  = len(full_ds) - n_val
         tr_ds, val_ds = random_split(
             full_ds, [n_tr, n_val],
             generator=torch.Generator().manual_seed(42),
@@ -271,6 +278,11 @@ def train(args):
     best_val = float('inf')
     step = 0
 
+    # Pre-build a single fixed viz sample (middle of val set) so the same tile
+    # is shown every epoch, enabling direct cross-epoch comparison.
+    _collate = collate_cached if use_cached else collate_fn
+    viz_sample = _collate([val_ds[len(val_ds) // 2]])
+
     for epoch in range(args.epochs):
         # Train
         model.train()
@@ -301,8 +313,7 @@ def train(args):
                     'train/loss_off':  float(losses['loss_off']),
                     'train/loss_flux': float(losses['loss_flux']),
                     'train/n_sources': float(losses['n_sources']),
-                    'step': step,
-                })
+                }, step=step)
 
         scheduler.step()
         mean_tr = float(np.mean(tr_losses)) if tr_losses else float('nan')
@@ -338,16 +349,15 @@ def train(args):
             }
             if (epoch + 1) % 5 == 0 or epoch == 0:
                 try:
-                    sample = next(iter(val_loader))
                     with torch.no_grad():
                         if use_cached:
-                            sout = _cached_forward(model, sample['features'].to(device))
+                            sout = _cached_forward(model, viz_sample['features'].to(device))
                         else:
-                            sim = {b: v.to(device) for b, v in sample['images'].items()}
-                            srm = {b: v.to(device) for b, v in sample['rms'].items()}
+                            sim = {b: v.to(device) for b, v in viz_sample['images'].items()}
+                            srm = {b: v.to(device) for b, v in viz_sample['rms'].items()}
                             sout = model(sim, srm)
-                    log['viz/tile'] = _log_tile(sample, sout, wandb, step,
-                                                euclid_dir=args.euclid_dir)
+                    log['viz/tile'] = _log_tile(
+                        viz_sample, sout, wandb, step, euclid_dir=args.euclid_dir)
                 except Exception as exc:
                     print(f'  [warn] viz failed: {exc}')
             wandb.log(log, step=step)

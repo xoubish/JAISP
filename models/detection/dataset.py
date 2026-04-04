@@ -78,48 +78,58 @@ def _pseudo_labels_vis(
     VIS spatial precision without projecting through a coarser grid.
 
     Saturated blobs with area >= min_star_area pixels are identified as star
-    cores and dilated by spike_radius to mask diffraction spike regions.
+    or galaxy cores. Their centroids are recorded as detections, then the blobs
+    are dilated by spike_radius to mask diffraction spike regions. Classical
+    peak-finding runs on the full image but its results are filtered to exclude
+    positions inside the spike mask. This means bright sources are always
+    detected (from blob centroids) while fake spike sources are suppressed.
     Small saturated blobs (hot pixels, CRs) are ignored.
 
     Returns (centroids_norm [M,2], classes [M], H_vis, W_vis).
     """
-    from scipy.ndimage import binary_dilation, label as ndlabel
+    from scipy.ndimage import binary_dilation, center_of_mass, label as ndlabel
     H, W = vis_img.shape
 
-    # Build spike mask: dilate only real star cores (large saturated blobs)
+    bright_xs = np.empty(0, dtype=np.float64)
+    bright_ys = np.empty(0, dtype=np.float64)
+    spike_mask = np.zeros((H, W), dtype=bool)
+
     nonzero_vals = vis_img[vis_img > 0]
     if len(nonzero_vals) > 100:
         sat_thresh = np.percentile(nonzero_vals, 99.5)
         sat_mask = vis_img > sat_thresh
-        # Remove small blobs (hot pixels / CRs) — keep only star cores
         labeled, n_blobs = ndlabel(sat_mask)
         if n_blobs > 0:
             areas = np.bincount(labeled.ravel())  # areas[0] = background
-            small = areas < min_star_area
-            sat_mask[small[labeled]] = False
-        # Dilate surviving star cores
-        r = spike_radius
-        yg, xg = np.ogrid[-r:r + 1, -r:r + 1]
-        disk = (xg ** 2 + yg ** 2) <= r ** 2
-        spike_mask = binary_dilation(sat_mask, structure=disk)
-    else:
-        spike_mask = np.zeros((H, W), dtype=bool)
+            core_labels = [lb for lb in range(1, n_blobs + 1)
+                           if areas[lb] >= min_star_area]
+            if core_labels:
+                # Centroid of each core: these ARE real sources we want to keep
+                coms = center_of_mass(np.ones_like(vis_img), labeled, core_labels)
+                if isinstance(coms, tuple):
+                    coms = [coms]  # single blob: center_of_mass returns a bare tuple
+                bright_ys = np.array([c[0] for c in coms], dtype=np.float64)
+                bright_xs = np.array([c[1] for c in coms], dtype=np.float64)
 
+                # Build spike mask from cores only (exclude small blobs = hot px/CRs)
+                core_mask = np.isin(labeled, core_labels)
+                r = spike_radius
+                yg, xg = np.ogrid[-r:r + 1, -r:r + 1]
+                disk = (xg ** 2 + yg ** 2) <= r ** 2
+                spike_mask = binary_dilation(core_mask, structure=disk)
+
+    # Classical peak-finding on the full image, then filter spike regions
     xs, ys = detect_sources(vis_img, nsig=nsig, max_sources=max_sources,
                             smooth_sigma=1.2, min_dist=9)
+    if xs.size > 0:
+        xi = np.clip(xs.round().astype(int), 0, W - 1)
+        yi = np.clip(ys.round().astype(int), 0, H - 1)
+        keep = ~spike_mask[yi, xi]
+        xs, ys = xs[keep], ys[keep]
 
-    if xs.size == 0:
-        return (
-            np.zeros((0, 2), dtype=np.float32),
-            np.zeros((0,), dtype=np.int64),
-            H, W,
-        )
-
-    # Filter detections inside spike-masked regions
-    xi = np.clip(xs.round().astype(int), 0, W - 1)
-    yi = np.clip(ys.round().astype(int), 0, H - 1)
-    keep = ~spike_mask[yi, xi]
-    xs, ys = xs[keep], ys[keep]
+    # Prepend bright-core centroids (always kept regardless of spike mask)
+    xs = np.concatenate([bright_xs, xs])
+    ys = np.concatenate([bright_ys, ys])
 
     if xs.size == 0:
         return (
