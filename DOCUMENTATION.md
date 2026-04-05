@@ -394,19 +394,25 @@ Historical detection development used 130 training tiles and 14 validation tiles
 
 Astrometry concordance measures and corrects the smooth spatial distortion between Rubin and Euclid coordinate systems. Even after standard WCS calibration, there are residual sub-arcsecond offsets that vary smoothly across a tile. These must be corrected for joint analysis -- stacking images, measuring galaxy shapes for weak lensing, or combining photometry across instruments.
 
-The approach works at the individual source level: detect sources in both instruments, match them across surveys, extract small image patches around each matched pair, predict the precise pixel offset between the Rubin and VIS positions of each source, and then fit a smooth spatial field from all these per-source measurements.
+The approach works at the individual source level: detect sources in one or both instruments, extract small image patches around each source, predict the precise pixel offset between the Rubin and VIS positions of each source, and then fit a smooth spatial field from all these per-source measurements. With multiband mode, each of the 10 bands gets its own per-source offset prediction (capturing band-specific chromatic effects like differential chromatic refraction), conditioned by a learned band embedding.
 
 #### Pipeline
 
 For each tile, the pipeline proceeds through six stages:
 
-1. **Source detection**: Find sources in the Rubin tile (using either classical peak-finding or the trained CenterNet detector) and in the Euclid VIS image (classical peak-finding). The neural detector option is valuable because it sees all 10 bands through the V7 encoder and can find fainter sources than classical 3-band detection, giving more anchor points for the field fit.
+1. **Source detection**: Find sources using either classical peak-finding (Rubin g+r+i+z coadd and VIS independently, then WCS cross-match) or the trained CenterNet detector (10-band neural detection in the VIS frame, no cross-matching needed). The neural detector option is valuable because it sees all 10 bands through the V7 encoder and can find fainter sources than classical 3-band detection, giving more anchor points for the field fit.
 
-2. **Cross-instrument matching**: Match Rubin and VIS source lists using WCS sky coordinates. Mutual nearest-neighbor matching with separation limits and sigma-clipping removes spurious matches. Typically yields 50-200 matched pairs per tile.
+2. **Cross-instrument matching** (classical path only): Match Rubin and VIS source lists using WCS sky coordinates. Mutual nearest-neighbor matching with separation limits, sigma-clipping, and object-level deduplication removes spurious matches. Typically yields 50-200 matched pairs per tile. The CenterNet path skips this step since detections are already in the VIS frame.
 
-3. **Patch extraction**: For each matched source, extract a 33x33 pixel patch centered on the VIS position, and reproject the corresponding Rubin bands onto the VIS pixel grid. Each patch pair shows the same source as seen by both instruments.
+3. **Patch extraction**: For each matched source, extract a 33x33 pixel patch centered on the VIS position. All 10 bands (6 Rubin + VIS + 3 NISP) are reprojected onto the VIS pixel grid via WCS. When per-pixel variance maps are available in the NPZ files (which they are for both Rubin `var` and Euclid `var_VIS/Y/J/H`), per-pixel RMS patches are also extracted and reprojected alongside the image patches.
 
-4. **Per-patch offset prediction**: The core of the matcher. Frozen V7 BandStems extract features from the Rubin and VIS patches independently, then trainable ConvNeXt adapter blocks refine these features toward astrometry-relevant signals. A spatially-weighted cross-correlation (cost volume) between the two feature maps produces a coarse offset via differentiable soft-argmax. An MLP refines this with a residual correction and outputs `(dx, dy, log_sigma)` in pixels, which a Jacobian matrix transforms to `(dRA*, dDec)` in arcseconds. The uncertainty `sigma` is used to weight the field fit.
+4. **Per-patch offset prediction**: The core of the matcher. Frozen V7 features extract representations from the Rubin/NISP and VIS patches independently. Two encoder modes are available:
+   - **Stem-only** (`--stream-stages 0`, default): Uses only the V7 BandStem CNNs, producing 33x33 feature maps at full patch resolution. This is equivalent to the V6 matcher.
+   - **Stem + stream stages** (`--stream-stages 1`): Applies one frozen V7 stream encoder ConvNeXt stage after the stems, producing 16x16 feature maps with richer cross-channel mixing. This leverages V7's deeper pretrained representations while maintaining enough spatial resolution for the cost volume.
+
+   When per-pixel RMS patches are available, the full BandStem normalization (`image / rms`) is used -- matching the normalization the stems saw during foundation pretraining. When RMS is absent, the legacy scalar MAD normalization is used as a fallback.
+
+   Trainable ConvNeXt adapter blocks then refine these features toward astrometry-relevant signals. A spatially-weighted cross-correlation (cost volume) between the two feature maps produces a coarse offset via differentiable soft-argmax. An MLP refines this with a residual correction and outputs `(dx, dy, log_sigma)` in pixels, which a Jacobian matrix transforms to `(dRA*, dDec)` in arcseconds. In multiband mode, a learned band embedding conditions the MLP so each band gets a wavelength-specific correction. The uncertainty `sigma` is used to weight the field fit.
 
 5. **Smooth field fitting**: The per-source offsets are noisy -- each individual measurement has ~30-50 mas scatter. But the true distortion varies smoothly across the tile. A control-grid least-squares solver (bilinear basis functions with smoothness regularization and adaptive per-node anchor weights) fits a smooth 2D field from the noisy per-source measurements. An alternative MLP-based solver is also available.
 
@@ -414,19 +420,20 @@ For each tile, the pipeline proceeds through six stages:
 
 ```
 For each tile:
-  1. Detect sources in Rubin (classical or DETR) and VIS (classical)
-  2. Match sources across instruments via WCS nearest-neighbor
-  3. Extract 33x33 patches around each matched source
-  4. Per-patch prediction:
-       Frozen V7 BandStems -> ConvNeXt adapters
+  1. Detect sources (classical cross-match OR CenterNet 10-band)
+  2. Extract 33x33 patches + optional per-pixel RMS patches
+  3. Per-patch prediction:
+       Frozen V7 BandStems (+ optional stream stages)
+       -> per-pixel RMS normalization (or scalar MAD fallback)
+       -> ConvNeXt adapters
        -> spatially-weighted cost volume (cross-correlation)
        -> soft-argmax (differentiable coarse offset)
-       -> MLP refinement -> (dx, dy, log_sigma) in pixels
+       -> MLP refinement + band embedding -> (dx, dy, log_sigma) in pixels
        -> Jacobian transform -> (dRA*, dDec) in arcsec
-  5. Fit smooth field from per-source offsets:
+  4. Fit smooth field from per-source offsets:
        Control-grid least squares (or MLP solver)
        with adaptive anchor regularization
-  6. Export concordance FITS (dRA, dDec, coverage maps)
+  5. Export concordance FITS (dRA, dDec, coverage maps)
 ```
 
 #### Matcher Versions
@@ -434,16 +441,24 @@ For each tile:
 Two matcher versions are available, differing only in which foundation model's BandStems they reuse:
 
 - **V6** (`matcher_v6.py`): Uses frozen V6 Phase B BandStems. These were trained with cross-instrument masking where VIS was downsampled to Rubin resolution. Best result: 31.9 mas median astrometric precision.
-- **V7** (`matcher_v7.py`): Uses frozen V7 BandStems, where VIS was processed at native resolution. API-compatible drop-in replacement for V6.
+- **V7** (`matcher_v7.py`): Uses frozen V7 BandStems, where VIS was processed at native resolution. API-compatible drop-in replacement for V6. Additionally supports `--stream-stages N` to use frozen V7 stream encoder ConvNeXt stages after the stems for richer features.
 
-Both versions support multiband mode (per-band learned embeddings for wavelength-specific chromatic correction) and separate learning rates (full LR for adapters and heads, 0.1x for stems if unfrozen for fine-tuning).
+Both versions support multiband mode (per-band learned embeddings for wavelength-specific chromatic correction) and separate learning rates (full LR for adapters and heads, 0.1x for stems and stream stages if unfrozen for fine-tuning).
+
+#### Data Augmentation
+
+Training patches are augmented with random 90/180/270-degree rotations and horizontal/vertical flips, giving up to 16 distinct orientations per source patch. The pixel-to-sky Jacobian matrix is correctly transformed for each augmentation so the sky-space loss remains valid. This is important for the data-limited regime -- with ~200 training tiles, augmentation significantly increases effective sample diversity.
+
+#### Per-Pixel RMS Normalization
+
+When variance maps are available in the tile NPZ files (Rubin `var`, Euclid `var_VIS/Y/J/H`), the dataset extracts and reprojects per-pixel RMS patches alongside each image patch. During training, the V7 matcher uses the full BandStem normalization (`image / rms`, matching what the stems saw during foundation pretraining) instead of the legacy scalar MAD normalization. This preserves spatial noise structure -- tile edges with higher variance, chip gaps, proximity to bright objects -- which becomes increasingly important as the dataset covers more varied sky regions with heterogeneous noise properties. When RMS data is absent, the pipeline falls back to scalar MAD normalization automatically.
 
 #### Source Detection Options
 
-The first stage of the pipeline -- detecting sources in Rubin -- can use either:
+The first stage of the pipeline -- detecting sources -- can use either:
 
-- **Classical** (default): `detect_sources()` performs median background subtraction, Gaussian smoothing, and local maximum detection above an N-sigma threshold. Simple, fast, and well-understood.
-- **Neural** (optional): Pass `--detector-checkpoint` to replace classical Rubin detection with the trained CenterNet detector. The neural detector sees all 10 bands through the V7 encoder and can detect fainter sources that are invisible in a 3-band coadd, providing more anchor points for the concordance fit. VIS detection still uses the classical method.
+- **Classical** (default): `detect_sources()` performs median background subtraction, Gaussian smoothing, and local maximum detection above an N-sigma threshold in both Rubin (g+r+i+z coadd) and VIS independently, then cross-matches via WCS. Simple, fast, and well-understood.
+- **Neural** (optional): Pass `--detector-checkpoint` to replace classical detection with the trained CenterNet detector. The neural detector sees all 10 bands through the V7 encoder and produces source positions directly in the VIS frame -- no cross-matching step needed. It can find fainter sources that are invisible in a 3-band coadd, providing more anchor points for the concordance fit (typically 200+ anchors per tile vs 50-150 with classical).
 
 #### Field Solvers
 
@@ -457,16 +472,17 @@ Two solvers are available for fitting the smooth concordance field from per-sour
 | File | Description |
 |------|-------------|
 | `matcher_v6.py` | V6-based patch matcher (frozen V6 stems + trainable adapters) |
-| `matcher_v7.py` | V7-based patch matcher (frozen V7 stems + trainable adapters) |
-| `dataset.py` | Patch extraction, WCS matching, optional detector integration |
+| `matcher_v7.py` | V7-based patch matcher (frozen V7 stems + optional stream stages + trainable adapters, per-pixel RMS support) |
+| `dataset.py` | Patch + RMS extraction, WCS matching, CenterNet detector integration, rotation/flip augmentation |
 | `source_matching.py` | Classical peak-finding, WCS-based source matching |
 | `field_solver.py` | Control-grid least-squares field solver |
 | `nn_field_solver.py` | MLP-based field solver |
 | `train_astro_v6.py` | Training script (V6 backbone) |
-| `train_astro_v7.py` | Training script (V7 backbone, CenterNet or classical sources) |
+| `train_astro_v7.py` | Training script (V7 backbone, CenterNet or classical sources, saves full checkpoint metadata) |
 | `infer_concordance.py` | Per-tile inference -> FITS export |
 | `infer_global_concordance.py` | Global multi-tile concordance fitting |
 | `apply_concordance.py` | Apply fitted concordance fields to data |
+| `sky_cube.py` | Aligned 10-band sky cube extraction with concordance correction |
 | `viz.py` | Diagnostic visualizations |
 
 ### 3. PSF + Forced Photometry
@@ -528,16 +544,19 @@ JAISP/
 |   |   +-- train_detection.py        DETR training script (archived)
 |   |
 |   +-- astrometry2/                   Rubin<->Euclid concordance
-|   |   +-- matcher_v7.py              V7 patch matcher
+|   |   +-- matcher_v7.py              V7 patch matcher (stem + optional stream stages)
 |   |   +-- matcher_v6.py              V6 patch matcher
-|   |   +-- dataset.py                 Patch dataset + optional detector integration
+|   |   +-- dataset.py                 Patch dataset + per-pixel RMS + detector integration
 |   |   +-- source_matching.py         Classical detection utilities
-|   |   +-- field_solver.py            Control-grid field solver
+|   |   +-- field_solver.py            Control-grid least-squares field solver
 |   |   +-- nn_field_solver.py         MLP field solver
+|   |   +-- train_astro_v6.py          V6 training script
 |   |   +-- train_astro_v7.py          V7 training script (CenterNet or classical sources)
-|   |   +-- infer_concordance.py       Per-tile inference
-|   |   +-- infer_global_concordance.py
-|   |   +-- apply_concordance.py
+|   |   +-- infer_concordance.py       Per-tile inference -> FITS export
+|   |   +-- infer_global_concordance.py  Global multi-tile concordance fitting
+|   |   +-- apply_concordance.py       Apply fitted concordance fields to data
+|   |   +-- sky_cube.py                Aligned 10-band sky cube extraction
+|   |   +-- viz.py                     Diagnostic visualizations
 |   |
 |   +-- photometry/                    PSF + forced photometry
 |   |   +-- psf_net.py
@@ -618,6 +637,8 @@ python models/detection/self_train_stem.py \
 
 ### 3. Astrometry Matcher
 
+The matcher is a patch-level model -- it only needs to learn "given a 33x33 patch pair, predict the offset." Training on ~200 tiles is sufficient; inference and field solving then run on all 790. Use `--val-frac 0.75` to train on ~200 tiles while holding out the rest for validation.
+
 ```bash
 # V7 backbone with CenterNet source detection (recommended)
 python models/astrometry2/train_astro_v7.py \
@@ -626,6 +647,9 @@ python models/astrometry2/train_astro_v7.py \
     --rubin-dir      data/rubin_tiles_all \
     --euclid-dir     data/euclid_tiles_all \
     --multiband \
+    --stream-stages 1 \
+    --val-frac 0.75 \
+    --epochs 60 \
     --output-dir     checkpoints/astro_v7 \
     --wandb-project  JAISP-Astrometry-v7
 
@@ -635,6 +659,9 @@ python models/astrometry2/train_astro_v7.py \
     --rubin-dir      data/rubin_tiles_all \
     --euclid-dir     data/euclid_tiles_all \
     --multiband \
+    --stream-stages 1 \
+    --val-frac 0.75 \
+    --epochs 60 \
     --output-dir     checkpoints/astro_v7_classical
 ```
 
@@ -680,6 +707,12 @@ python models/photometry/train_psf_net.py \
 
 - **V7 foundation** now has a working flat-set checkpoint at `checkpoints/jaisp_v7_tiles_all_ddp_online/checkpoint_best.pt`, which is the backbone currently used for downstream experiments on the new flat tile layout. The older `jaisp_v7_baseline` checkpoint is still useful as a historical reference.
 - **Detection** now has three supported choices in the repo: classical VIS, fused-bottleneck `CenterNet`, and native-resolution `StemCenterNet`. The DETR code remains archived for historical reference only. The two neural detectors are intentionally both kept because they test different hypotheses about whether deep multi-band fusion or native-resolution stem reuse is more valuable for science detection tasks.
-- **Astrometry V7** matcher is implemented (`matcher_v7.py`, `train_astro_v7.py`) and ready for reruns on the expanded flat tile set once the refreshed detector / foundation checkpoints exist. The V6 matcher achieved 31.9 mas; V7 should improve on this by preserving VIS native resolution.
+- **Astrometry V7** matcher is actively being trained and evaluated. Recent improvements:
+  - **Stream stages**: `--stream-stages 1` uses frozen V7 stream encoder ConvNeXt stages after the stems, giving richer features that leverage V7's deeper pretrained representations (not just the bare stems which are equivalent to V6).
+  - **Per-pixel RMS**: When variance maps are available in the tile NPZ files, the full BandStem normalization (`image / rms`) is used instead of scalar MAD normalization, matching the foundation pretraining distribution.
+  - **Rotation augmentation**: Random 90/180/270-degree rotations alongside flips give 16 augmentation variants (up from 4).
+  - **Checkpoint metadata**: V7 training checkpoints now save full metadata (input bands, target bands, args) so inference scripts can correctly reconstruct the model configuration.
+  - **Recommended workflow**: Train on ~200 tiles (`--val-frac 0.75`), then run inference on all 790 tiles and fit the global concordance field. The matcher learns a patch-level skill that generalizes across tiles; the field solver is where full-footprint coverage matters.
+  - Early results on a 16-tile subset with CenterNet anchors: raw WCS 60 mas → NN 25 mas per-source, 15 mas field residual at epoch 27.
 - **Photometry** is functional but still mostly documented against the older data paths and has not yet been rerun on the expanded flat dataset.
 - This is an active research codebase. Architecture and training defaults evolve with experiments.
