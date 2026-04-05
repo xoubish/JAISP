@@ -236,6 +236,16 @@ class JAISPTrainerV7:
             if wandb_mode:
                 wandb_kwargs["mode"] = wandb_mode
             wandb.init(**wandb_kwargs)
+            # Keep step-based training curves separate from epoch-based
+            # validation / visualization logs so W&B panels get cleaner axes.
+            wandb.define_metric("global_step")
+            wandb.define_metric("epoch")
+            wandb.define_metric("train/loss", step_metric="global_step")
+            wandb.define_metric("lr", step_metric="global_step")
+            wandb.define_metric("train/epoch_loss", step_metric="epoch")
+            wandb.define_metric("train/band_*", step_metric="epoch")
+            wandb.define_metric("val/*", step_metric="epoch")
+            wandb.define_metric("vis/*", step_metric="epoch")
 
         self.config = {
             "band_names": ALL_BANDS,
@@ -441,7 +451,7 @@ class JAISPTrainerV7:
                     if self.use_wandb:
                         wandb.log({
                             "train/loss": loss_val,
-                            "step": self.global_step,
+                            "global_step": self.global_step,
                             "lr": self.optimizer.param_groups[0]["lr"],
                         })
                     pbar.set_postfix(loss=f"{loss_val:.4f}")
@@ -459,7 +469,7 @@ class JAISPTrainerV7:
             if self.use_wandb:
                 wandb.log({
                     "train/loss": loss_val,
-                    "step": self.global_step,
+                    "global_step": self.global_step,
                     "lr": self.optimizer.param_groups[0]["lr"],
                 })
 

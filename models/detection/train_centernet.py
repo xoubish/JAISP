@@ -192,6 +192,17 @@ def train(args):
     mode_str = 'cached features' if use_cached else 'live encoder'
     print(f'Training CenterNet detector on {device} ({mode_str})')
 
+    if args.predict_profile:
+        raise ValueError(
+            '--predict_profile is not ready yet: the current CenterNet loss '
+            'has no profile supervision.'
+        )
+
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
+
     use_wandb = args.wandb_project is not None
     if use_wandb:
         import wandb
@@ -211,7 +222,7 @@ def train(args):
         # Split at tile level so all augmentations of a tile stay together.
         # A sample-level split leaks: different augments of the same tile end up
         # in both train and val, making val loss misleadingly low then rising.
-        rng = np.random.default_rng(42)
+        rng = np.random.default_rng(args.seed)
         tile_ids = full_ds._tile_ids  # list[str]
         shuffled = rng.permutation(len(tile_ids))
         n_val_tiles = max(1, int(0.1 * len(tile_ids)))
@@ -221,10 +232,12 @@ def train(args):
         tr_ds  = Subset(full_ds, tr_indices)
         val_ds = Subset(full_ds, val_indices)
         n_tr, n_val = len(tr_indices), len(val_indices)
+        val_workers = max(1, args.num_workers // 2) if args.num_workers > 0 else 0
         tr_loader = DataLoader(tr_ds, batch_size=args.batch_size, shuffle=True,
-                               collate_fn=collate_cached, num_workers=4, pin_memory=True)
+                               collate_fn=collate_cached, num_workers=args.num_workers,
+                               pin_memory=True)
         val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False,
-                                collate_fn=collate_cached, num_workers=2)
+                                collate_fn=collate_cached, num_workers=val_workers)
         encoder_dim = 256  # V7 default
     else:
         full_ds = TileDetectionDataset(
@@ -239,12 +252,14 @@ def train(args):
         n_tr  = len(full_ds) - n_val
         tr_ds, val_ds = random_split(
             full_ds, [n_tr, n_val],
-            generator=torch.Generator().manual_seed(42),
+            generator=torch.Generator().manual_seed(args.seed),
         )
+        val_workers = max(1, args.num_workers // 2) if args.num_workers > 0 else 0
         tr_loader = DataLoader(tr_ds, batch_size=args.batch_size, shuffle=True,
-                               collate_fn=collate_fn, num_workers=4, pin_memory=True)
+                               collate_fn=collate_fn, num_workers=args.num_workers,
+                               pin_memory=True)
         val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False,
-                                collate_fn=collate_fn, num_workers=2)
+                                collate_fn=collate_fn, num_workers=val_workers)
         encoder_dim = None  # determined by _load_encoder
 
     print(f'Train: {n_tr} samples   Val: {n_val} samples')
@@ -281,7 +296,15 @@ def train(args):
     # Pre-build a single fixed viz sample (middle of val set) so the same tile
     # is shown every epoch, enabling direct cross-epoch comparison.
     _collate = collate_cached if use_cached else collate_fn
-    viz_sample = _collate([val_ds[len(val_ds) // 2]])
+    if use_cached:
+        viz_sample = _collate([val_ds[len(val_ds) // 2]])
+    else:
+        prev_augment = full_ds._base.augment
+        full_ds._base.augment = False
+        try:
+            viz_sample = _collate([val_ds[len(val_ds) // 2]])
+        finally:
+            full_ds._base.augment = prev_augment
 
     for epoch in range(args.epochs):
         # Train
@@ -321,19 +344,27 @@ def train(args):
         # Validate
         model.eval()
         val_losses = []
+        prev_augment = None
+        if not use_cached:
+            prev_augment = full_ds._base.augment
+            full_ds._base.augment = False
         with torch.no_grad():
-            for batch in val_loader:
-                if use_cached:
-                    out = _cached_forward(model, batch['features'].to(device))
-                else:
-                    images = {b: v.to(device) for b, v in batch['images'].items()}
-                    rms = {b: v.to(device) for b, v in batch['rms'].items()}
-                    out = model(images, rms)
-                losses = criterion(
-                    out,
-                    [c.to(device) for c in batch['centroids']],
-                )
-                val_losses.append(float(losses['loss_total']))
+            try:
+                for batch in val_loader:
+                    if use_cached:
+                        out = _cached_forward(model, batch['features'].to(device))
+                    else:
+                        images = {b: v.to(device) for b, v in batch['images'].items()}
+                        rms = {b: v.to(device) for b, v in batch['rms'].items()}
+                        out = model(images, rms)
+                    losses = criterion(
+                        out,
+                        [c.to(device) for c in batch['centroids']],
+                    )
+                    val_losses.append(float(losses['loss_total']))
+            finally:
+                if prev_augment is not None:
+                    full_ds._base.augment = prev_augment
         mean_val = float(np.mean(val_losses)) if val_losses else float('nan')
 
         lr_now = scheduler.get_last_lr()[0]
@@ -403,5 +434,9 @@ if __name__ == '__main__':
     p.add_argument('--wandb_run',        default=None)
     p.add_argument('--device',           default='',
                    help='Device to use: "cuda", "cuda:1", "cpu" (default: auto)')
+    p.add_argument('--num_workers',      type=int, default=4,
+                   help='DataLoader workers for training (val uses about half)')
+    p.add_argument('--seed',             type=int, default=42,
+                   help='Random seed for train/val split and training setup')
     args = p.parse_args()
     train(args)
