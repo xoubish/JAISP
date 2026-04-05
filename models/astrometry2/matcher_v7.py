@@ -57,10 +57,11 @@ class V7RubinEncoder(nn.Module):
         super().__init__()
         self.n_input_bands = n_input_bands
         stem_ch = v7_model.stem_ch
+        stems = v7_model.stems if hasattr(v7_model, 'stems') else v7_model.encoder.stems
 
         band_names = [f'rubin_{b}' for b in RUBIN_BAND_ORDER[:n_input_bands]]
         self.band_stems = nn.ModuleList([
-            v7_model.stems[name].net  # nn.Sequential: Conv→GN→GELU→Conv→GN→GELU
+            stems[name].net  # nn.Sequential: Conv→GN→GELU→Conv→GN→GELU
             for name in band_names
         ])
 
@@ -104,8 +105,9 @@ class V7VISEncoder(nn.Module):
     ):
         super().__init__()
         stem_ch = v7_model.stem_ch
+        stems = v7_model.stems if hasattr(v7_model, 'stems') else v7_model.encoder.stems
 
-        self.vis_stem = v7_model.stems['euclid_VIS'].net
+        self.vis_stem = stems['euclid_VIS'].net
 
         if freeze_stem:
             for p in self.vis_stem.parameters():

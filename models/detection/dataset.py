@@ -65,6 +65,56 @@ def _pseudo_labels(
     return centroids, classes, H, W
 
 
+def _vis_bright_core_and_spike_mask(
+    vis_img: np.ndarray,
+    spike_radius: int = 40,
+    min_star_area: int = 20,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return bright-source centroids and a dilated mask around their cores.
+
+    This is used both by the classical VIS pseudo-labeler and by self-training
+    refinement so artifact suppression stays consistent across stages.
+    """
+    from scipy.ndimage import binary_dilation, center_of_mass, label as ndlabel
+
+    H, W = vis_img.shape
+    bright_xs = np.empty(0, dtype=np.float64)
+    bright_ys = np.empty(0, dtype=np.float64)
+    spike_mask = np.zeros((H, W), dtype=bool)
+
+    nonzero_vals = vis_img[vis_img > 0]
+    if len(nonzero_vals) <= 100:
+        return bright_xs, bright_ys, spike_mask
+
+    sat_thresh = np.percentile(nonzero_vals, 99.5)
+    sat_mask = vis_img > sat_thresh
+    labeled, n_blobs = ndlabel(sat_mask)
+    if n_blobs <= 0:
+        return bright_xs, bright_ys, spike_mask
+
+    areas = np.bincount(labeled.ravel())  # areas[0] = background
+    core_labels = [lb for lb in range(1, n_blobs + 1) if areas[lb] >= min_star_area]
+    if not core_labels:
+        return bright_xs, bright_ys, spike_mask
+
+    coms = center_of_mass(np.ones_like(vis_img), labeled, core_labels)
+    if isinstance(coms, tuple):
+        coms = [coms]  # single blob: center_of_mass returns a bare tuple
+    bright_ys = np.array([c[0] for c in coms], dtype=np.float64)
+    bright_xs = np.array([c[1] for c in coms], dtype=np.float64)
+
+    core_mask = np.isin(labeled, core_labels)
+    r = max(int(spike_radius), 0)
+    if r > 0:
+        yg, xg = np.ogrid[-r:r + 1, -r:r + 1]
+        disk = (xg ** 2 + yg ** 2) <= r ** 2
+        spike_mask = binary_dilation(core_mask, structure=disk)
+    else:
+        spike_mask = core_mask
+
+    return bright_xs, bright_ys, spike_mask
+
+
 def _pseudo_labels_vis(
     vis_img: np.ndarray,       # [H_vis, W_vis]
     nsig: float = 3.0,
@@ -87,36 +137,13 @@ def _pseudo_labels_vis(
 
     Returns (centroids_norm [M,2], classes [M], H_vis, W_vis).
     """
-    from scipy.ndimage import binary_dilation, center_of_mass, label as ndlabel
     H, W = vis_img.shape
 
-    bright_xs = np.empty(0, dtype=np.float64)
-    bright_ys = np.empty(0, dtype=np.float64)
-    spike_mask = np.zeros((H, W), dtype=bool)
-
-    nonzero_vals = vis_img[vis_img > 0]
-    if len(nonzero_vals) > 100:
-        sat_thresh = np.percentile(nonzero_vals, 99.5)
-        sat_mask = vis_img > sat_thresh
-        labeled, n_blobs = ndlabel(sat_mask)
-        if n_blobs > 0:
-            areas = np.bincount(labeled.ravel())  # areas[0] = background
-            core_labels = [lb for lb in range(1, n_blobs + 1)
-                           if areas[lb] >= min_star_area]
-            if core_labels:
-                # Centroid of each core: these ARE real sources we want to keep
-                coms = center_of_mass(np.ones_like(vis_img), labeled, core_labels)
-                if isinstance(coms, tuple):
-                    coms = [coms]  # single blob: center_of_mass returns a bare tuple
-                bright_ys = np.array([c[0] for c in coms], dtype=np.float64)
-                bright_xs = np.array([c[1] for c in coms], dtype=np.float64)
-
-                # Build spike mask from cores only (exclude small blobs = hot px/CRs)
-                core_mask = np.isin(labeled, core_labels)
-                r = spike_radius
-                yg, xg = np.ogrid[-r:r + 1, -r:r + 1]
-                disk = (xg ** 2 + yg ** 2) <= r ** 2
-                spike_mask = binary_dilation(core_mask, structure=disk)
+    bright_xs, bright_ys, spike_mask = _vis_bright_core_and_spike_mask(
+        vis_img,
+        spike_radius=spike_radius,
+        min_star_area=min_star_area,
+    )
 
     # Classical peak-finding on the full image, then filter spike regions
     xs, ys = detect_sources(vis_img, nsig=nsig, max_sources=max_sources,
