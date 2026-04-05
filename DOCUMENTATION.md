@@ -14,7 +14,7 @@ A self-supervised multi-instrument foundation model for precision cosmology with
    - [Architecture History (v1 through v7)](#architecture-history-v1-through-v7)
    - [v7 Mixed-Resolution MAE (Current)](#v7-mixed-resolution-mae-current)
 4. [Downstream Heads](#downstream-heads)
-   - [Detection (CenterNet)](#1-detection)
+   - [Detection](#1-detection)
    - [Astrometry Concordance](#2-astrometry-concordance)
    - [PSF + Forced Photometry](#3-psf--forced-photometry)
 5. [Project Structure](#project-structure)
@@ -44,7 +44,7 @@ The system works in two layers. First, a foundation model is trained once throug
     +----+----+--------------------+
     |         |                    |
  Detection  Astrometry         Photometry
- (CenterNet)(patch matching)   (PSF + matched filter)
+ (3 choices)(patch matching)   (PSF + matched filter)
 ```
 
 This two-layer design means the expensive foundation pretraining only happens once. Each downstream task gets the benefit of 10-band multi-instrument features without paying the cost of encoding from scratch.
@@ -255,11 +255,19 @@ All downstream heads reuse the frozen V7 foundation encoder. Only lightweight ta
 
 **Directory**: `models/detection/`
 
-The detection head finds astronomical sources (galaxies and stars) in tiles. Unlike classical detection pipelines that operate on a single coadded image, this detector sees all available bands (6 Rubin + 4 Euclid = 10) through the V7 encoder's learned features, giving it access to sources that may only be visible in specific wavelength ranges or at Euclid's finer resolution.
+The detection stack now supports three complementary source-finding choices:
+
+1. **Classical VIS baseline**: native-resolution Euclid VIS peak-finding with bright-star masking. This is fast, robust, and remains the bootstrap source list for pseudo-label generation.
+2. **V7 + CenterNet**: a dense detector on top of the frozen V7 **fused bottleneck**. This is the strongest current option for broad 10-band semantic fusion, especially when the signal is spread across multiple bands rather than carried by one sharp VIS peak.
+3. **V7 + StemCenterNet**: a dense detector on top of the frozen V7 **BandStems** at native resolution. This preserves more local spatial detail and is the highest-resolution neural option currently in the repo.
+
+The point of keeping all three is scientific comparison, not redundancy. Classical VIS is the baseline and pseudo-label source. The fused-bottleneck detector tests whether the self-supervised latent has learned genuinely multi-band source evidence. The stem detector tests whether native-resolution V7 features improve local source finding beyond what the coarser bottleneck can express.
+
+![Detection overview](models/detection/detect.png)
 
 #### Detection Approach: Why CenterNet, Not DETR
 
-The detection head went through two iterations. Understanding why the first was abandoned helps explain the current design.
+The detection head went through two major neural iterations. Understanding why the first was abandoned helps explain the current design.
 
 **DETR (Detection Transformer) -- tried first, abandoned.** DETR is a set-prediction architecture from natural image detection. It uses a transformer decoder with learned "object queries" -- fixed-size slots that each learn to claim one object through cross-attention to spatial features. Training requires Hungarian matching to find the optimal assignment between predicted slots and ground-truth objects, and a composite loss that teaches matched slots to predict positions while pushing unmatched slots toward zero confidence.
 
@@ -272,7 +280,11 @@ DETR was a poor fit for astronomical source detection for several reasons:
 
 The DETR code is preserved in `detector.py`, `matcher.py`, and `train_detection.py` for reference.
 
-**CenterNet (heatmap regression) -- current approach.** CenterNet treats detection as a per-pixel prediction problem. The V7 encoder bottleneck is already a dense spatial feature map at ~130x130 resolution. Instead of asking a transformer decoder to "discover" objects, CenterNet directly predicts at every pixel: "how likely is it that a source is centered here?" This is the learned version of what classical peak-finding already does -- but operating on rich 10-band learned features instead of a simple 3-band coadd.
+#### Current Detection Choices
+
+**Classical VIS** is the control baseline. It runs source detection directly on the Euclid VIS image at native 0.1"/px resolution and remains the pseudo-label source for both neural training loops. It is useful because it is simple, interpretable, and usually conservative around obvious sources, but it is limited to what is visible in VIS.
+
+**V7 + CenterNet (fused bottleneck)** treats detection as a per-pixel prediction problem on the frozen V7 bottleneck. The foundation model has already fused Rubin, VIS, and NISP streams into a shared multi-band latent, so the detector head operates on a representation that has deep cross-band mixing built in. This is the learned version of classical peak-finding -- but operating on rich 10-band features instead of a simple coadd.
 
 This approach is a natural fit for astronomical source detection because:
 
@@ -280,7 +292,14 @@ This approach is a natural fit for astronomical source detection because:
 - **Fast convergence.** With direct per-pixel supervision and only 3.5M trainable parameters, CenterNet converges much faster than DETR on the historical 144-tile subset. Val loss drops steadily from epoch 1 without the query-collapse plateau that plagued DETR.
 - **Naturally extensible.** Additional per-pixel heads can be added cheaply by appending more output channels. The current architecture already supports an optional profile head for source shape parameters (ellipticity, half-light radius, Sersic index) that can be activated when training labels become available -- this is important for future integration with tools like Tractor that need shape priors for deblending and forced photometry.
 
-#### How CenterNet Works
+**V7 + StemCenterNet (native stems)** reuses the pretrained V7 BandStems directly at native band resolution. Rubin, VIS, and NISP streams are projected into a common VIS-frame feature grid, fused with a lightweight residual encoder-decoder, and then converted to the same heatmap/offset-style outputs as the bottleneck detector. This path preserves more local spatial detail than the fused 0.8"/px bottleneck, which makes it appealing for high-resolution source finding and deblending, but it also makes the model more sensitive to sharp instrumental structure such as diffraction spikes and bright-star halos. The stem self-training loop therefore now uses a lighter bright-star veto during round-2 label promotion to reduce artifact pickup without masking too aggressively.
+
+In practice, the two neural detectors test different hypotheses:
+
+- **CenterNet on the fused bottleneck** asks whether the foundation model learned strong multi-band source evidence.
+- **StemCenterNet on native-resolution stems** asks whether V7 pretraining improves local detection when the head keeps more of the original spatial detail.
+
+#### How V7 + CenterNet Works
 
 The frozen V7 encoder processes the multi-band input tile and produces a bottleneck feature map at approximately 130x130 spatial resolution. A decoder neck with three progressive 2x bilinear upsampling stages (each followed by Conv-BN-ReLU) upsamples the bottleneck 8x to ~1040x1040, matching Euclid VIS native resolution (0.1"/px). Channel widths narrow as spatial resolution increases (256 -> 128 -> 64 -> 64) to keep memory manageable. Four parallel prediction heads then produce dense per-pixel outputs at VIS resolution:
 
@@ -301,18 +320,42 @@ Frozen V7 encoder
 
 At inference, source detection is simple: find local maxima in the heatmap (via max-pooling NMS with kernel 7), threshold on confidence, and read off the offset, flux, and profile values at each peak location. Because the heatmap is at VIS resolution, each pixel corresponds to 0.1" on the sky -- the offset head only needs to cover tiny sub-pixel corrections (±0.05"), giving VIS-native centroid precision without relying on large sub-pixel offsets from a coarse bottleneck grid.
 
+#### How V7 + StemCenterNet Works
+
+StemCenterNet keeps the same CenterNet-style output heads but swaps the backbone:
+
+```
+Frozen V7 BandStems at native resolution
+  -> Rubin bands -> learned weighted Rubin stream
+  -> VIS band    -> VIS stream
+  -> Y/J/H bands -> learned weighted NISP stream
+  -> concatenate Rubin / VIS / NISP in VIS frame
+  -> shallow residual encoder-decoder
+  -> Dense prediction heads at VIS resolution:
+       Heatmap  [B, 1, ~1050, ~1050]
+       Offset   [B, 2, ~1050, ~1050]
+       Log flux [B, 1, ~1050, ~1050]
+       Profile  [B, 4, ~1050, ~1050]  [optional]
+```
+
+Compared with the bottleneck detector, this path gives the head much more local spatial information but less deep cross-band fusion. That tradeoff is scientifically useful: if it wins, native-resolution pretraining is paying off directly for detection; if it loses on NIR-only or dropout-style sources, that tells us the fused latent is doing something genuinely important for multi-band reasoning.
+
 #### Training: Self-Training Pipeline
 
-Since there is no curated source catalog for this field, the detector uses a **self-training loop** that bootstraps from noisy classical pseudo-labels and progressively cleans them.
+Since there is no curated source catalog for this field, both neural detectors use a **self-training loop** that bootstraps from noisy classical pseudo-labels and progressively cleans them.
 
-**Pseudo-labels**: When Euclid VIS is available, sources are detected in the VIS image at native 0.1"/px resolution using classical peak-finding (3-sigma threshold, Gaussian smoothing, subpixel centroiding). This preserves VIS's spatial precision. A **saturation mask** (dilating the top 0.5% brightest pixels by 100 VIS pixels ≈ 10") automatically removes diffraction spike artifacts from bright stars. When VIS is unavailable, Rubin g+r+i coadd pseudo-labels are used as a fallback.
+**Pseudo-labels**: When Euclid VIS is available, sources are detected in the VIS image at native 0.1"/px resolution using classical peak-finding (3-sigma threshold, Gaussian smoothing, subpixel centroiding). This preserves VIS's spatial precision. A **bright-star spike mask** (dilating saturated VIS cores by 40 VIS pixels, about 4 arcsec) suppresses obvious diffraction-spike detections during pseudo-label creation. When VIS is unavailable, Rubin g+r+i coadd pseudo-labels are used as a fallback.
 
-**Precomputed features**: To make training fast, the frozen V7 encoder can be run once on the chosen tile set (historically the 144-tile ECDFS subset; next, the 790-tile flat set). With 8 augmentation variants each (4 rotations × 2 flips), the bottleneck feature tensors `[256, ~130, ~130]` are saved to disk and training then runs only the lightweight decoder neck + heads on cached features -- no encoder forward pass needed per step.
+**Precomputed features**: The fused-bottleneck CenterNet path can cache encoder outputs to disk. With 8 augmentation variants each (4 rotations × 2 flips), bottleneck tensors `[256, ~130, ~130]` are saved and training then runs only the lightweight decoder neck + heads -- no encoder forward pass needed per step. This is the fastest neural detection path in the repo.
+
+**Live stem training**: StemCenterNet does not use cached bottleneck features. It runs directly from the frozen V7 BandStems at native resolution, which is more expensive but preserves more local structure.
 
 **Self-training rounds**:
 1. **Round 1**: Train on VIS pseudo-labels. The model learns what sources look like in 10-band feature space.
 2. **Label refinement**: Run the trained detector on all tiles. High-confidence (>0.8) novel detections that don't match any VIS pseudo-label are **promoted** as new labels (sources visible in other bands but not VIS). Existing pseudo-labels where the model has low confidence (<0.3) are **demoted** (artifacts like diffraction spikes that appear only in VIS — the other 9 bands show nothing, so the model assigns low confidence). This is self-consistent: the model's multi-band understanding cleans its own training data.
 3. **Round 2**: Retrain on VIS labels + promoted labels - demoted labels.
+
+For the stem path, round-2 promotion now includes a **lighter bright-star veto mask** (`promotion_spike_radius=20` by default) so the model can still promote real novel sources near bright objects without freely promoting long spike chains as new training labels.
 
 **Loss**: Each ground-truth source is rendered as a 2D Gaussian (sigma=2 pixels in VIS-resolution heatmap coordinates, ≈ 0.2") on the heatmap target. Gaussian rendering uses bounded per-source computation (only within 3σ radius) to avoid OOM at VIS resolution. The loss combines:
 
@@ -329,12 +372,16 @@ Historical detection development used 130 training tiles and 14 validation tiles
 | File | Description |
 |------|-------------|
 | `centernet_detector.py` | `CenterNetDetector` model: 8× decoder neck + heatmap/offset/flux/profile heads |
+| `stem_centernet_detector.py` | `StemCenterNetDetector`: native-resolution V7 BandStem fusion + dense heads |
 | `centernet_loss.py` | Focal loss, bounded Gaussian heatmap rendering (memory-safe at VIS scale), masked offset/flux L1 |
 | `train_centernet.py` | CenterNet training loop (supports live encoder or cached features mode) |
+| `train_stem_centernet.py` | StemCenterNet training loop (live native-resolution stem features) |
 | `precompute_features.py` | One-time V7 encoder feature caching (all tiles × 8 augmentation variants) |
 | `cached_dataset.py` | Dataset loading precomputed features + pseudo-labels with label refinement support |
 | `self_train.py` | Self-training loop: VIS labels → train → promote/demote → retrain |
+| `self_train_stem.py` | Self-training loop for StemCenterNet with lighter artifact-aware promotion |
 | `dataset.py` | Pseudo-label generation (VIS with saturation mask, or Rubin fallback), tile dataset |
+| `detect.png` | Example qualitative comparison figure for the three detection choices |
 | `detector.py` | `JaispDetector` (DETR, archived -- kept for reference, see note below) |
 | `matcher.py` | Hungarian matcher + DETR loss (archived) |
 | `train_detection.py` | DETR training loop (archived) |
@@ -466,12 +513,16 @@ JAISP/
 |   |
 |   +-- detection/                     Source detection head
 |   |   +-- centernet_detector.py      CenterNet model: 8x decoder + heads
+|   |   +-- stem_centernet_detector.py Native-resolution stem-based CenterNet
 |   |   +-- centernet_loss.py          Focal loss + bounded heatmap targets
 |   |   +-- train_centernet.py         CenterNet training (live or cached features)
+|   |   +-- train_stem_centernet.py    StemCenterNet training
 |   |   +-- precompute_features.py     One-time V7 encoder feature caching
 |   |   +-- cached_dataset.py          Dataset for cached features + labels
 |   |   +-- self_train.py              Self-training: train -> refine -> retrain
+|   |   +-- self_train_stem.py         Stem self-training: train -> refine -> retrain
 |   |   +-- dataset.py                 Pseudo-labels (VIS + saturation mask)
+|   |   +-- detect.png                 Example detection comparison figure
 |   |   +-- detector.py               DETR model (archived)
 |   |   +-- matcher.py                Hungarian matcher (archived)
 |   |   +-- train_detection.py        DETR training script (archived)
@@ -532,7 +583,12 @@ CUDA_VISIBLE_DEVICES=0,1 WANDB_MODE=online torchrun \
 ### 2. Detection Head
 
 ```bash
-# Step 1: Precompute encoder features (one-time, ~20 min on GPU)
+# Classical VIS baseline
+# No training step required; the classical detector is built into
+# models/detection/dataset.py and astrometry2/source_matching.py.
+
+# Option A: fused-bottleneck CenterNet
+# Step 1: Precompute encoder features (one-time)
 python models/detection/precompute_features.py \
     --rubin_dir    data/rubin_tiles_all \
     --euclid_dir   data/euclid_tiles_all \
@@ -544,8 +600,19 @@ python models/detection/self_train.py \
     --feature_dir  data/cached_features_v7_tiles_all \
     --rubin_dir    data/rubin_tiles_all \
     --euclid_dir   data/euclid_tiles_all \
-    --out_dir      checkpoints/centernet_v7_selftrain_vis \
+    --out_dir      checkpoints/centernet_v7 \
     --rounds 2 --epochs 100 --batch_size 4 \
+    --wandb_project jaisp-detection
+
+# Option B: native-resolution StemCenterNet
+python models/detection/self_train_stem.py \
+    --encoder_ckpt checkpoints/<v7-foundation>/checkpoint_best.pt \
+    --rubin_dir    data/rubin_tiles_all \
+    --euclid_dir   data/euclid_tiles_all \
+    --out_dir      checkpoints/stem_centernet_v7 \
+    --rounds 2 --epochs 60 --batch_size 1 \
+    --stream_ch 16 --base_ch 32 \
+    --promotion_spike_radius 20 \
     --wandb_project jaisp-detection
 ```
 
@@ -555,7 +622,7 @@ python models/detection/self_train.py \
 # V7 backbone with CenterNet source detection (recommended)
 python models/astrometry2/train_astro_v7.py \
     --v7-checkpoint       checkpoints/<v7-foundation>/checkpoint_best.pt \
-    --detector-checkpoint checkpoints/centernet_v7_selftrain_vis/centernet_best.pt \
+    --detector-checkpoint checkpoints/<detector>/centernet_best.pt \
     --rubin-dir      data/rubin_tiles_all \
     --euclid-dir     data/euclid_tiles_all \
     --multiband \
@@ -578,7 +645,7 @@ python models/astrometry2/train_astro_v7.py \
 python models/astrometry2/infer_concordance.py \
     --checkpoint         checkpoints/astro_v7/checkpoint_best.pt \
     --v7-checkpoint      checkpoints/<v7-foundation>/checkpoint_best.pt \
-    --detector-checkpoint checkpoints/centernet_v7_selftrain_vis/centernet_best.pt \
+    --detector-checkpoint checkpoints/<detector>/centernet_best.pt \
     --rubin-dir     data/rubin_tiles_all \
     --euclid-dir    data/euclid_tiles_all \
     --output        concordance_v7.fits \
@@ -602,15 +669,17 @@ python models/photometry/train_psf_net.py \
 | Checkpoint / Artifact | Location | Description |
 |-----------------------|----------|-------------|
 | Historical V7 foundation baseline | `checkpoints/jaisp_v7_baseline/checkpoint_best.pt` | Legacy 144-tile V7 baseline (epoch 86, val_loss 1.4689) |
-| V7 detector (CenterNet) | `checkpoints/centernet_v7_selftrain_vis/centernet_best.pt` | Historical / current CenterNet self-training output location |
-| Cached features (recommended flat rerun path) | `data/cached_features_v7_tiles_all/` | Suggested output directory when rerunning CenterNet precompute on the 790-tile flat set |
+| Current flat-set V7 working checkpoint | `checkpoints/jaisp_v7_tiles_all_ddp_online/checkpoint_best.pt` | Current downstream backbone used for recent detection experiments on the flat tile layout |
+| V7 detector (CenterNet bottleneck) | `checkpoints/centernet_v7_patch25_box16_round2/centernet_best.pt` | Current development checkpoint for fused-bottleneck CenterNet self-training |
+| V7 detector (StemCenterNet, artifact-aware) | `checkpoints/stem_centernet_v7_patch25_box16_round2_mask20/stem_centernet_best.pt` | Current development checkpoint for native-resolution StemCenterNet with lighter bright-star veto during round-2 promotion |
+| Cached features (recommended bottleneck path) | `data/cached_features_v7_tiles_all/` | Suggested output directory when rerunning CenterNet precompute on the flat tile set |
 
 ---
 
 ## Current Status
 
-- **V7 foundation** is currently being retrained from scratch on the 790-pair flat Rubin+Euclid dataset with 2-GPU DDP and W&B. The older `jaisp_v7_baseline` checkpoint is still useful as a historical reference, but it is no longer the recommended training target.
-- **Detection** has been migrated from DETR to CenterNet (heatmap regression), which converged much faster on the historical 144-tile subset and is the intended next downstream comparison once the new foundation checkpoints are ready. An optional profile head (`e1`, `e2`, `r_half`, `sersic_n`) remains available for future shape/deblending integration.
+- **V7 foundation** now has a working flat-set checkpoint at `checkpoints/jaisp_v7_tiles_all_ddp_online/checkpoint_best.pt`, which is the backbone currently used for downstream experiments on the new flat tile layout. The older `jaisp_v7_baseline` checkpoint is still useful as a historical reference.
+- **Detection** now has three supported choices in the repo: classical VIS, fused-bottleneck `CenterNet`, and native-resolution `StemCenterNet`. The DETR code remains archived for historical reference only. The two neural detectors are intentionally both kept because they test different hypotheses about whether deep multi-band fusion or native-resolution stem reuse is more valuable for science detection tasks.
 - **Astrometry V7** matcher is implemented (`matcher_v7.py`, `train_astro_v7.py`) and ready for reruns on the expanded flat tile set once the refreshed detector / foundation checkpoints exist. The V6 matcher achieved 31.9 mas; V7 should improve on this by preserving VIS native resolution.
 - **Photometry** is functional but still mostly documented against the older data paths and has not yet been rerun on the expanded flat dataset.
 - This is an active research codebase. Architecture and training defaults evolve with experiments.
