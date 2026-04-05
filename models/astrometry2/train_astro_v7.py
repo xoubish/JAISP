@@ -39,11 +39,13 @@ import torch
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
 _MODELS_DIR = _SCRIPT_DIR.parent
-for _p in (_SCRIPT_DIR, _MODELS_DIR):
-    if str(_p) not in sys.path:
-        sys.path.insert(0, str(_p))
+for _p in (_MODELS_DIR, _SCRIPT_DIR):
+    _sp = str(_p)
+    if _sp in sys.path:
+        sys.path.remove(_sp)
+    sys.path.insert(0, _sp)
 
-from train_local_matcher import (
+from astrometry2.train_local_matcher import (
     build_parser,
     compute_loss,
     compute_metrics,
@@ -51,7 +53,7 @@ from train_local_matcher import (
     make_field_preview,
     run_epoch,
 )
-from dataset import (
+from astrometry2.dataset import (
     ALL_BAND_ORDER,
     MatchedPatchDataset,
     build_patch_samples,
@@ -62,7 +64,7 @@ from dataset import (
     normalize_rubin_bands,
     split_tile_pairs,
 )
-from matcher_v7 import load_v7_matcher
+from astrometry2.matcher_v7 import load_v7_matcher
 
 try:
     import wandb
@@ -119,6 +121,11 @@ def build_v7_parser() -> argparse.ArgumentParser:
                         '(omit for classical peak-finding)')
     g.add_argument('--detector-conf-threshold', type=float, default=0.3,
                    help='CenterNet confidence threshold for source detection (default: 0.3)')
+    g.add_argument('--stream-stages', type=int, default=0,
+                   help='Number of frozen V7 stream encoder stages to use after the stem. '
+                        '0 = stem only (V6-equivalent). 1 = adds one ConvNeXt downsample '
+                        'stage per stream, giving richer features at half spatial resolution. '
+                        '(default: 0)')
 
     p.set_defaults(
         hidden_channels=64,
@@ -144,6 +151,8 @@ def train(args):
     if args.detector_checkpoint:
         detr_detector = _load_detector(
             args.detector_checkpoint, args.v7_checkpoint, device)
+    # Keep the preview path on the exact same detector as dataset building.
+    args._detr_detector = detr_detector
 
     # ---- Dataset ---------------------------------------------------------
     detect_bands = normalize_rubin_bands(args.detect_bands) or [
@@ -190,10 +199,13 @@ def train(args):
         val_samples   = build_patch_samples_multiband(val_pairs,   split_name='val',   **multiband_kwargs) if val_pairs else []
         all_band_idxs = sorted(set(s['band_idx'] for s in train_samples))
         n_target_bands = max(all_band_idxs) + 1
+        target_band = 'multiband'
         preview_target_bands = sorted(
             set(s['target_band'] for s in train_samples),
             key=lambda b: ALL_BAND_ORDER.index(b) if b in ALL_BAND_ORDER else len(ALL_BAND_ORDER),
         )
+        if 'rubin_r' in preview_target_bands:
+            preview_target_bands = ['rubin_r'] + [b for b in preview_target_bands if b != 'rubin_r']
     else:
         target_band   = normalize_rubin_band(args.rubin_band)
         context_bands = normalize_rubin_bands(args.context_bands)
@@ -215,23 +227,28 @@ def train(args):
     # ---- Model (V7 backbone) ---------------------------------------------
     print(f'\nLoading V7 backbone from: {args.v7_checkpoint}')
     model = load_v7_matcher(
-        v7_checkpoint   = args.v7_checkpoint,
-        device          = device,
-        n_rubin_bands   = n_rubin_bands,
-        hidden_channels = args.hidden_channels,
-        n_adapter_blocks= args.adapter_blocks,
-        freeze_stems    = not args.unfreeze_stems,
-        search_radius   = args.search_radius,
-        n_target_bands  = n_target_bands,
-        band_embed_dim  = getattr(args, 'band_embed_dim', 16),
-        mlp_hidden      = args.mlp_hidden,
+        v7_checkpoint    = args.v7_checkpoint,
+        device           = device,
+        n_rubin_bands    = n_rubin_bands,
+        hidden_channels  = args.hidden_channels,
+        n_adapter_blocks = args.adapter_blocks,
+        freeze_stems     = not args.unfreeze_stems,
+        search_radius    = args.search_radius,
+        n_target_bands   = n_target_bands,
+        band_embed_dim   = getattr(args, 'band_embed_dim', 16),
+        mlp_hidden       = args.mlp_hidden,
+        n_stream_stages  = getattr(args, 'stream_stages', 0),
     )
 
-    # Separate LRs: adapter/heads get full LR; stems (if unfrozen) get 0.1×
-    stem_params    = list(model.rubin_encoder.band_stems.parameters())
-    stem_param_ids = {id(p) for p in stem_params}
-    other_params   = [p for p in model.parameters() if id(p) not in stem_param_ids and p.requires_grad]
-    stem_trainable = [p for p in stem_params if p.requires_grad]
+    # Separate LRs: adapter/heads get full LR; frozen-origin params (stems +
+    # stream stages) get 0.1× if unfrozen to avoid destabilizing pretrained weights.
+    frozen_origin_params  = list(model.rubin_encoder.band_stems.parameters())
+    frozen_origin_params += list(model.vis_encoder.vis_stem.parameters())
+    frozen_origin_params += list(model.rubin_encoder.stream_stages.parameters())
+    frozen_origin_params += list(model.vis_encoder.stream_stages.parameters())
+    frozen_origin_ids = {id(p) for p in frozen_origin_params}
+    other_params      = [p for p in model.parameters() if id(p) not in frozen_origin_ids and p.requires_grad]
+    stem_trainable    = [p for p in frozen_origin_params if p.requires_grad]
 
     param_groups = [{'params': other_params, 'lr': args.lr}]
     if stem_trainable:
@@ -293,15 +310,24 @@ def train(args):
             f"{val_str} | {elapsed:.1f}s"
         )
 
+        save_meta = {
+            'epoch': epoch,
+            'model': model.state_dict(),
+            'optimizer': optimizer.state_dict(),
+            'args': dict(vars(args)),
+            'rubin_channels': n_rubin_bands,
+            'n_target_bands': n_target_bands,
+            'input_bands': list(train_samples[0]['input_bands']),
+            'target_band': target_band,
+            'target_bands': sorted(set(s['target_band'] for s in train_samples)),
+            'include_nisp': getattr(args, 'include_nisp', False),
+        }
         if score < best_score:
             best_score = score
-            torch.save({'epoch': epoch, 'model': model.state_dict(),
-                        'optimizer': optimizer.state_dict(), 'val_score': score},
+            torch.save({**save_meta, 'val_score': score},
                        out_dir / 'checkpoint_best.pt')
 
-        torch.save({'epoch': epoch, 'model': model.state_dict(),
-                    'optimizer': optimizer.state_dict()},
-                   out_dir / 'checkpoint_latest.pt')
+        torch.save(save_meta, out_dir / 'checkpoint_latest.pt')
 
         if wandb_run is not None:
             log = {f'train/{k}': v for k, v in train_metrics.items()}
@@ -315,7 +341,7 @@ def train(args):
                     log['preview/patch'] = img
 
                 field_imgs = make_field_preview(
-                    model, device, preview_pairs[:1],
+                    model, device, preview_pairs,
                     preview_target_bands[:1],
                     [f'rubin_{b}' for b in ('u', 'g', 'r', 'i', 'z', 'y')][:n_rubin_bands],
                     detect_bands, args, epoch, preview_split,

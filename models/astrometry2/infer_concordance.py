@@ -38,33 +38,37 @@ def _setup_imports():
 
 _setup_imports()
 
-from dataset import (
+from astrometry2.dataset import (
     BAND_TO_IDX,
     NISP_BAND_ORDER,
+    detect_sources_multiband,
     discover_tile_pairs,
     extract_vis_patch,
     local_vis_pixel_to_sky_matrix,
     normalize_nisp_band,
     normalize_rubin_band,
     normalize_rubin_bands,
+    project_vis_to_band_xy,
     reproject_nisp_patch_to_vis,
     reproject_rubin_patch_to_vis,
+    signal_mask_in_band,
 )
-from field_solver import auto_grid_shape, evaluate_control_grid_mesh, solve_control_grid_field
-from matcher import LocalAstrometryMatcher
+from astrometry2.field_solver import auto_grid_shape, evaluate_control_grid_mesh, solve_control_grid_field
+from older_architectures.matcher import LocalAstrometryMatcher
 try:
-    from matcher_v6 import load_v6_matcher
+    from astrometry2.matcher_v6 import load_v6_matcher
     _V6_AVAILABLE = True
 except ImportError:
     _V6_AVAILABLE = False
 try:
-    from matcher_v7 import load_v7_matcher
+    from astrometry2.matcher_v7 import load_v7_matcher
     _V7_AVAILABLE = True
 except ImportError:
     _V7_AVAILABLE = False
-from viz import save_tile_diagnostic
-from jaisp_dataset_v4 import RUBIN_BAND_ORDER, _to_float32
-from source_matching import (
+from astrometry2.viz import save_tile_diagnostic
+from astrometry2.source_matching import (
+    RUBIN_BAND_ORDER,
+    _to_float32,
     build_detection_image,
     detect_sources,
     match_sources_wcs,
@@ -89,16 +93,17 @@ def load_model(checkpoint_path: str, device: torch.device,
         cfg = ckpt.get('args', {})
         n_rubin = int(ckpt.get('rubin_channels', len(ckpt.get('input_bands', ['rubin_r']))))
         model = load_v7_matcher(
-            v7_checkpoint   = v7_checkpoint,
-            device          = device,
-            n_rubin_bands   = n_rubin,
-            hidden_channels = cfg.get('hidden_channels', 64),
-            n_adapter_blocks= cfg.get('adapter_blocks', 2),
-            freeze_stems    = True,
-            search_radius   = cfg.get('search_radius', 3),
-            n_target_bands  = int(ckpt.get('n_target_bands', 1)),
-            band_embed_dim  = int(cfg.get('band_embed_dim', 16)),
-            mlp_hidden      = cfg.get('mlp_hidden', 128),
+            v7_checkpoint    = v7_checkpoint,
+            device           = device,
+            n_rubin_bands    = n_rubin,
+            hidden_channels  = cfg.get('hidden_channels', 64),
+            n_adapter_blocks = cfg.get('adapter_blocks', 2),
+            freeze_stems     = True,
+            search_radius    = cfg.get('search_radius', 3),
+            n_target_bands   = int(ckpt.get('n_target_bands', 1)),
+            band_embed_dim   = int(cfg.get('band_embed_dim', 16)),
+            mlp_hidden       = cfg.get('mlp_hidden', 128),
+            n_stream_stages  = int(cfg.get('stream_stages', 0)),
         )
         model.load_state_dict(ckpt['model'], strict=True)
     elif v6_checkpoint:
@@ -269,46 +274,73 @@ def predict_tile(
     need_nisp = target_band.startswith('nisp_') or any(b.startswith('nisp_') for b in input_bands_norm)
     nisp_data = _load_nisp_data(edata) if need_nisp else {}
 
-    # Source detection (DETR or classical)
+    # Source detection: either classical Rubin<->VIS matching, or 10-band
+    # neural anchors in the VIS frame.
     _detr = getattr(args, '_detr_detector', None)
+    raw_anchor_xy = None
+    vis_anchor_xy = None
     if _detr is not None:
-        from dataset import detect_sources_detr
-        rubin_bands_list = [f'rubin_{b}' for b in RUBIN_BAND_ORDER]
-        tile_images = {}
-        tile_rms_d = {}
-        for i, band in enumerate(rubin_bands_list):
-            if i < rubin_cube.shape[0]:
-                img_np = np.nan_to_num(_to_float32(rubin_cube[i]), nan=0.0)
-                tile_images[band] = img_np
-                med = float(np.median(img_np))
-                sig = float(1.4826 * np.median(np.abs(img_np - med)))
-                tile_rms_d[band] = np.full_like(img_np, max(sig, 1e-10))
-        H_r, W_r = rubin_cube.shape[1], rubin_cube.shape[2]
-        rx, ry = detect_sources_detr(
-            tile_images, tile_rms_d, _detr, device,
+        ax, ay = detect_sources_multiband(
+            edata,
+            rubin_cube,
+            _detr,
+            device,
             conf_threshold=getattr(args, 'detector_conf_threshold', 0.3),
-            tile_hw=(H_r, W_r),
         )
+        if ax.size == 0:
+            return None
+        vis_seed_xy = np.stack([ax, ay], axis=1).astype(np.float32)
+        raw_anchor_xy = vis_seed_xy.copy()
+        vis_keep = signal_mask_in_band(
+            vis_img,
+            vis_seed_xy,
+            radius=args.refine_radius,
+            flux_floor_sigma=args.refine_flux_floor_sigma,
+        )
+        if not vis_keep.any():
+            return None
+        vis_xy = refine_centroids_in_band(
+            vis_img,
+            vis_seed_xy[vis_keep],
+            radius=args.refine_radius,
+            flux_floor_sigma=args.refine_flux_floor_sigma,
+        ).astype(np.float32)
+        vis_anchor_xy = vis_xy.copy()
     else:
         rubin_det = build_detection_image(rubin_cube, detect_bands, clip_sigma=args.detect_clip_sigma)
         rx, ry = detect_sources(rubin_det, nsig=args.rubin_nsig, smooth_sigma=args.rubin_smooth, min_dist=args.rubin_min_dist, max_sources=args.max_sources_rubin)
-    vx, vy = detect_sources(vis_img, nsig=args.vis_nsig, smooth_sigma=args.vis_smooth, min_dist=args.vis_min_dist, max_sources=args.max_sources_vis)
-    matched = match_sources_wcs(
-        rx, ry, vx, vy, rwcs, vwcs,
-        max_sep_arcsec=args.max_sep_arcsec,
-        clip_sigma=args.clip_sigma,
-        max_matches=args.max_matches,
-    )
-    if matched['vis_xy'].shape[0] < int(args.min_matches):
-        return None
-
-    vis_xy = matched['vis_xy'].astype(np.float32)
+        vx, vy = detect_sources(vis_img, nsig=args.vis_nsig, smooth_sigma=args.vis_smooth, min_dist=args.vis_min_dist, max_sources=args.max_sources_vis)
+        matched = match_sources_wcs(
+            rx, ry, vx, vy, rwcs, vwcs,
+            max_sep_arcsec=args.max_sep_arcsec,
+            clip_sigma=args.clip_sigma,
+            max_matches=args.max_matches,
+        )
+        if matched['vis_xy'].shape[0] < int(args.min_matches):
+            return None
+        vis_xy = matched['vis_xy'].astype(np.float32)
+        raw_anchor_xy = vis_xy.copy()
+        vis_anchor_xy = vis_xy.copy()
     if target_band.startswith('rubin_'):
         target_idx = RUBIN_BAND_ORDER.index(target_band.split('_', 1)[1])
         rubin_target = np.nan_to_num(_to_float32(rubin_cube[target_idx]), nan=0.0)
+        if _detr is not None:
+            rubin_xy_seed = project_vis_to_band_xy(vis_xy, vwcs, rwcs)
+            target_keep = signal_mask_in_band(
+                rubin_target,
+                rubin_xy_seed,
+                radius=args.refine_radius,
+                flux_floor_sigma=args.refine_flux_floor_sigma,
+            )
+            if int(target_keep.sum()) < int(args.min_matches):
+                return None
+            vis_xy = vis_xy[target_keep]
+            rubin_xy_seed = rubin_xy_seed[target_keep]
+        else:
+            rubin_xy_seed = matched['rubin_xy']
         rubin_xy_target = refine_centroids_in_band(
             rubin_target,
-            matched['rubin_xy'],
+            rubin_xy_seed,
             radius=args.refine_radius,
             flux_floor_sigma=args.refine_flux_floor_sigma,
         )
@@ -322,12 +354,22 @@ def predict_tile(
         if nb not in nisp_data:
             return None
         nisp_img, nwcs = nisp_data[nb]
-        nisp_x, nisp_y = nwcs.wcs_world2pix(*vwcs.wcs_pix2world(vis_xy[:, 0], vis_xy[:, 1], 0), 0)
-        nisp_xy_init = np.stack([nisp_x, nisp_y], axis=1).astype(np.float32)
+        nisp_xy_init = project_vis_to_band_xy(vis_xy, vwcs, nwcs)
+        nisp_radius = max(1, int(args.refine_radius) // 3)
+        target_keep = signal_mask_in_band(
+            nisp_img,
+            nisp_xy_init,
+            radius=nisp_radius,
+            flux_floor_sigma=args.refine_flux_floor_sigma,
+        )
+        if int(target_keep.sum()) < int(args.min_matches):
+            return None
+        vis_xy = vis_xy[target_keep]
+        nisp_xy_init = nisp_xy_init[target_keep]
         nisp_xy_refined = refine_centroids_in_band(
             nisp_img,
             nisp_xy_init,
-            radius=max(1, int(args.refine_radius) // 3),
+            radius=nisp_radius,
             flux_floor_sigma=args.refine_flux_floor_sigma,
         )
         n_ra, n_dec = nwcs.wcs_pix2world(nisp_xy_refined[:, 0], nisp_xy_refined[:, 1], 0)
@@ -406,6 +448,8 @@ def predict_tile(
     conf = np.concatenate(confs, axis=0).astype(np.float32)
     kept_xy = np.asarray(kept_xy, dtype=np.float32)
     kept_raw = np.asarray(kept_raw, dtype=np.float32)
+    if kept_xy.shape[0] < 4:
+        return None
     weights = 1.0 / np.maximum(sigma, 1e-4) ** 2
 
     # Auto grid shape: reduce resolution for sparse tiles.
@@ -443,10 +487,17 @@ def predict_tile(
 
     raw_mag = np.hypot(kept_raw[:, 0], kept_raw[:, 1]) * 1000.0
     pred_mag = np.hypot(pred_offsets[:, 0], pred_offsets[:, 1]) * 1000.0
+    if raw_anchor_xy is None:
+        raw_anchor_xy = kept_xy.copy()
+    if vis_anchor_xy is None:
+        vis_anchor_xy = kept_xy.copy()
+
     return {
         'vis_image': vis_img,
         'vis_wcs_header': vhdr,
         'vis_shape': vis_img.shape,
+        'raw_anchor_xy': raw_anchor_xy,
+        'vis_anchor_xy': vis_anchor_xy,
         'vis_xy': kept_xy,
         'raw_offsets': kept_raw,
         'pred_offsets': pred_offsets,
@@ -457,6 +508,8 @@ def predict_tile(
         'grid_shape_used': (grid_h, grid_w),
         'anchor_radius_used': anchor_radius,
         'summary': {
+            'raw_anchor_count': int(len(raw_anchor_xy)),
+            'vis_anchor_count': int(len(vis_anchor_xy)),
             'matches': int(pred_offsets.shape[0]),
             'raw_median_mas': float(np.median(raw_mag)),
             'pred_median_mas': float(np.median(pred_mag)),

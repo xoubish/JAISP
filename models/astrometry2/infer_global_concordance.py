@@ -50,17 +50,17 @@ def _setup_imports():
 _setup_imports()
 
 import torch
-from infer_concordance import (
+from astrometry2.infer_concordance import (
     _normalize_any_band,
     build_parser as build_infer_parser,
     load_model,
     predict_tile,
 )
-from dataset import (
+from astrometry2.dataset import (
     discover_tile_pairs,
     normalize_rubin_bands,
 )
-from field_solver import auto_grid_shape, evaluate_control_grid_mesh, solve_control_grid_field
+from astrometry2.field_solver import auto_grid_shape, evaluate_control_grid_mesh, solve_control_grid_field
 
 
 # ============================================================

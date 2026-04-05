@@ -40,10 +40,18 @@ RUBIN_BAND_ORDER = ['u', 'g', 'r', 'i', 'z', 'y']
 # ============================================================
 
 class V7RubinEncoder(nn.Module):
-    """Per-band frozen V7 BandStem CNNs → mean → ConvNeXt adapter.
+    """Per-band frozen V7 BandStem CNNs → mean → optional stream stages → ConvNeXt adapter.
 
     Input : [B, n_bands, H, W]  pre-noise-normalized patches
-    Output: [B, out_ch, H, W]
+    Output: [B, out_ch, H', W']  where H'=H/2^n_stream_stages
+
+    Parameters
+    ----------
+    n_stream_stages : int
+        Number of frozen V7 Rubin stream encoder stages to apply after the
+        stem mean.  0 = stem only (original behavior).  Each stage halves
+        spatial dims and enriches features via ConvNeXt blocks.  The Rubin
+        stream has 2 stages; values > 2 are clamped.
     """
 
     def __init__(
@@ -53,35 +61,61 @@ class V7RubinEncoder(nn.Module):
         out_ch: int = 64,
         n_adapter_blocks: int = 2,
         freeze_stems: bool = True,
+        n_stream_stages: int = 0,
     ):
         super().__init__()
         self.n_input_bands = n_input_bands
-        stem_ch = v7_model.stem_ch
-        stems = v7_model.stems if hasattr(v7_model, 'stems') else v7_model.encoder.stems
+        encoder = v7_model.encoder if hasattr(v7_model, 'encoder') else v7_model
+        stem_ch = encoder.stem_ch
+        stems = encoder.stems
 
         band_names = [f'rubin_{b}' for b in RUBIN_BAND_ORDER[:n_input_bands]]
         self.band_stems = nn.ModuleList([
             stems[name].net  # nn.Sequential: Conv→GN→GELU→Conv→GN→GELU
             for name in band_names
         ])
+        # Full BandStem objects (with image/rms normalization) for per-pixel RMS mode.
+        self.band_stems_full = nn.ModuleList([stems[name] for name in band_names])
+
+        # Optional frozen stream encoder stages for deeper features.
+        n_stream_stages = min(int(max(0, n_stream_stages)), 2)
+        self.stream_stages = nn.ModuleList()
+        if n_stream_stages > 0:
+            rubin_stream = encoder.stream_encoders['rubin']
+            for i in range(n_stream_stages):
+                self.stream_stages.append(rubin_stream.stages[i])
+        adapter_in_ch = encoder.hidden_ch if n_stream_stages > 0 else stem_ch
 
         if freeze_stems:
             for stem in self.band_stems:
                 for p in stem.parameters():
                     p.requires_grad = False
+            for stage in self.stream_stages:
+                for p in stage.parameters():
+                    p.requires_grad = False
 
-        adapter: list = [ConvNeXtBlock(stem_ch) for _ in range(n_adapter_blocks)]
-        if out_ch != stem_ch:
-            adapter.append(nn.Conv2d(stem_ch, out_ch, kernel_size=1))
+        adapter: list = [ConvNeXtBlock(adapter_in_ch) for _ in range(n_adapter_blocks)]
+        if out_ch != adapter_in_ch:
+            adapter.append(nn.Conv2d(adapter_in_ch, out_ch, kernel_size=1))
         self.adapter = nn.Sequential(*adapter)
 
-    def forward(self, rubin_patch: torch.Tensor) -> torch.Tensor:
+    def forward(self, rubin_patch: torch.Tensor, rubin_rms: torch.Tensor = None) -> torch.Tensor:
         n = min(rubin_patch.shape[1], len(self.band_stems))
-        feats = [
-            self.band_stems[i](rubin_patch[:, i:i+1, :, :])
-            for i in range(n)
-        ]
+        if rubin_rms is not None:
+            # Per-pixel RMS path: use full BandStem (image/rms normalization).
+            feats = [
+                self.band_stems_full[i](rubin_patch[:, i:i+1, :, :], rubin_rms[:, i:i+1, :, :])
+                for i in range(n)
+            ]
+        else:
+            # Legacy path: patches are already scalar-normalized by _normalize_patch.
+            feats = [
+                self.band_stems[i](rubin_patch[:, i:i+1, :, :])
+                for i in range(n)
+            ]
         x = torch.stack(feats, dim=0).mean(dim=0)
+        for stage in self.stream_stages:
+            x = stage(x)
         return self.adapter(x)
 
 
@@ -90,10 +124,20 @@ class V7RubinEncoder(nn.Module):
 # ============================================================
 
 class V7VISEncoder(nn.Module):
-    """Frozen V7 euclid_VIS BandStem CNN → ConvNeXt adapter.
+    """Frozen V7 euclid_VIS BandStem CNN → optional stream stages → ConvNeXt adapter.
 
     Input : [B, 1, H, W]  pre-noise-normalized VIS patch
-    Output: [B, out_ch, H, W]
+    Output: [B, out_ch, H', W']  where H'=H/2^n_stream_stages
+
+    Parameters
+    ----------
+    n_stream_stages : int
+        Number of frozen V7 VIS stream encoder stages to apply after the
+        stem.  0 = stem only (original behavior).  Each stage halves spatial
+        dims and enriches features.  The VIS stream has 3 stages; values > 3
+        are clamped.  Using 1 stage on a 33×33 patch gives 16×16 features —
+        still large enough for the cost volume while capturing richer
+        cross-channel mixing that is the key V7 improvement over V6.
     """
 
     def __init__(
@@ -102,24 +146,45 @@ class V7VISEncoder(nn.Module):
         out_ch: int = 64,
         n_adapter_blocks: int = 2,
         freeze_stem: bool = True,
+        n_stream_stages: int = 0,
     ):
         super().__init__()
-        stem_ch = v7_model.stem_ch
-        stems = v7_model.stems if hasattr(v7_model, 'stems') else v7_model.encoder.stems
+        encoder = v7_model.encoder if hasattr(v7_model, 'encoder') else v7_model
+        stem_ch = encoder.stem_ch
+        stems = encoder.stems
 
         self.vis_stem = stems['euclid_VIS'].net
+        self.vis_stem_full = stems['euclid_VIS']  # Full BandStem with image/rms norm.
+
+        # Optional frozen stream encoder stages for deeper features.
+        n_stream_stages = min(int(max(0, n_stream_stages)), 3)
+        self.stream_stages = nn.ModuleList()
+        if n_stream_stages > 0:
+            vis_stream = encoder.stream_encoders['vis']
+            for i in range(n_stream_stages):
+                self.stream_stages.append(vis_stream.stages[i])
+        adapter_in_ch = encoder.hidden_ch if n_stream_stages > 0 else stem_ch
 
         if freeze_stem:
             for p in self.vis_stem.parameters():
                 p.requires_grad = False
+            for stage in self.stream_stages:
+                for p in stage.parameters():
+                    p.requires_grad = False
 
-        adapter: list = [ConvNeXtBlock(stem_ch) for _ in range(n_adapter_blocks)]
-        if out_ch != stem_ch:
-            adapter.append(nn.Conv2d(stem_ch, out_ch, kernel_size=1))
+        adapter: list = [ConvNeXtBlock(adapter_in_ch) for _ in range(n_adapter_blocks)]
+        if out_ch != adapter_in_ch:
+            adapter.append(nn.Conv2d(adapter_in_ch, out_ch, kernel_size=1))
         self.adapter = nn.Sequential(*adapter)
 
-    def forward(self, vis_patch: torch.Tensor) -> torch.Tensor:
-        return self.adapter(self.vis_stem(vis_patch))
+    def forward(self, vis_patch: torch.Tensor, vis_rms: torch.Tensor = None) -> torch.Tensor:
+        if vis_rms is not None:
+            x = self.vis_stem_full(vis_patch, vis_rms)
+        else:
+            x = self.vis_stem(vis_patch)
+        for stage in self.stream_stages:
+            x = stage(x)
+        return self.adapter(x)
 
 
 # ============================================================
@@ -152,6 +217,7 @@ class V7AstrometryMatcher(nn.Module):
         mlp_hidden: int = 128,
         n_target_bands: int = 6,
         band_embed_dim: int = 16,
+        n_stream_stages: int = 0,
     ):
         super().__init__()
         self.search_radius = int(max(0, search_radius))
@@ -165,12 +231,14 @@ class V7AstrometryMatcher(nn.Module):
             out_ch=hidden_channels,
             n_adapter_blocks=n_adapter_blocks,
             freeze_stems=freeze_stems,
+            n_stream_stages=n_stream_stages,
         )
         self.vis_encoder = V7VISEncoder(
             v7_model=v7_model,
             out_ch=hidden_channels,
             n_adapter_blocks=n_adapter_blocks,
             freeze_stem=freeze_stems,
+            n_stream_stages=n_stream_stages,
         )
 
         # ---- Cost volume projection heads ----------------------------------
@@ -254,10 +322,11 @@ class V7AstrometryMatcher(nn.Module):
         return (rubin_w.unsqueeze(2) * vis_w).sum(dim=(1, 3, 4)) * scale
 
     def _encode(
-        self, rubin_patch: torch.Tensor, vis_patch: torch.Tensor
+        self, rubin_patch: torch.Tensor, vis_patch: torch.Tensor,
+        rubin_rms: torch.Tensor = None, vis_rms: torch.Tensor = None,
     ) -> Dict[str, torch.Tensor]:
-        rubin_feat = self.rubin_encoder(rubin_patch)
-        vis_feat   = self.vis_encoder(vis_patch)
+        rubin_feat = self.rubin_encoder(rubin_patch, rubin_rms)
+        vis_feat   = self.vis_encoder(vis_patch, vis_rms)
 
         logits = self._weighted_cost_volume(rubin_feat, vis_feat)
         probs  = torch.softmax(logits / self.temperature, dim=1)
@@ -326,8 +395,10 @@ class V7AstrometryMatcher(nn.Module):
         vis_patch: torch.Tensor,
         pixel_to_sky: torch.Tensor,
         band_idx: Optional[torch.Tensor] = None,
+        rubin_rms: Optional[torch.Tensor] = None,
+        vis_rms: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
-        enc = self._encode(rubin_patch, vis_patch)
+        enc = self._encode(rubin_patch, vis_patch, rubin_rms, vis_rms)
         return self._mlp_head(enc, pixel_to_sky, band_idx, rubin_patch.shape[0], rubin_patch.device)
 
     def predict_all_bands(
@@ -335,10 +406,12 @@ class V7AstrometryMatcher(nn.Module):
         rubin_patch: torch.Tensor,
         vis_patch: torch.Tensor,
         pixel_to_sky: torch.Tensor,
+        rubin_rms: Optional[torch.Tensor] = None,
+        vis_rms: Optional[torch.Tensor] = None,
     ) -> Dict[int, Dict[str, torch.Tensor]]:
         """Encode once, predict for every target band."""
         B   = rubin_patch.shape[0]
-        enc = self._encode(rubin_patch, vis_patch)
+        enc = self._encode(rubin_patch, vis_patch, rubin_rms, vis_rms)
         return {
             bi: self._mlp_head(
                 enc, pixel_to_sky,
@@ -364,12 +437,14 @@ def load_v7_matcher(
     n_target_bands: int = 6,
     band_embed_dim: int = 16,
     mlp_hidden: int = 128,
+    n_stream_stages: int = 0,
 ) -> V7AstrometryMatcher:
     """Load a V7 checkpoint and wrap it in V7AstrometryMatcher.
 
     Reused from V7 (frozen by default):
       - Rubin BandStem CNNs  (rubin_u/g/r/i/z/y)
       - euclid_VIS BandStem  (trained cross-instrument in Phase B)
+      - Optionally: per-stream ConvNeXt encoder stages (n_stream_stages > 0)
 
     Freshly initialized:
       - ConvNeXt adapter blocks
@@ -391,27 +466,30 @@ def load_v7_matcher(
         fused_pixel_scale_arcsec = cfg.get('fused_pixel_scale_arcsec', 0.8),
     )
     missing, unexpected = v7.load_state_dict(ckpt['model'], strict=False)
-    # skip_projs and target_decoders are not needed for stem extraction
+    # skip_projs and target_decoders are not needed for stem/stream extraction
     enc_missing = [k for k in missing if not k.startswith(('encoder.skip_projs', 'target_decoders'))]
     if enc_missing:
         print(f'  [warn] Missing encoder keys: {enc_missing}')
     v7.eval()
 
     matcher = V7AstrometryMatcher(
-        v7_model        = v7,
-        n_rubin_bands   = n_rubin_bands,
-        hidden_channels = hidden_channels,
-        n_adapter_blocks= n_adapter_blocks,
-        freeze_stems    = freeze_stems,
-        search_radius   = search_radius,
-        n_target_bands  = n_target_bands,
-        band_embed_dim  = band_embed_dim,
-        mlp_hidden      = mlp_hidden,
+        v7_model         = v7,
+        n_rubin_bands    = n_rubin_bands,
+        hidden_channels  = hidden_channels,
+        n_adapter_blocks = n_adapter_blocks,
+        freeze_stems     = freeze_stems,
+        search_radius    = search_radius,
+        n_target_bands   = n_target_bands,
+        band_embed_dim   = band_embed_dim,
+        mlp_hidden       = mlp_hidden,
+        n_stream_stages  = n_stream_stages,
     ).to(device)
 
     n_total     = sum(p.numel() for p in matcher.parameters())
     n_trainable = sum(p.numel() for p in matcher.parameters() if p.requires_grad)
+    n_frozen    = n_total - n_trainable
+    stages_str  = f', {n_stream_stages} stream stages' if n_stream_stages > 0 else ''
     print(f'V7AstrometryMatcher: {n_total/1e6:.1f}M total, {n_trainable/1e6:.1f}M trainable')
-    print(f'  (frozen v7 stems: {(n_total - n_trainable)/1e6:.1f}M)')
+    print(f'  (frozen v7 stems{stages_str}: {n_frozen/1e6:.1f}M)')
 
     return matcher

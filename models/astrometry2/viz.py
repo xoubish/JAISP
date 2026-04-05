@@ -115,6 +115,8 @@ def make_tile_diagnostic_figure(
 
     vis = np.asarray(item["vis_image"], dtype=np.float32)
     mesh = item["mesh"]
+    raw_anchor_xy = np.asarray(item.get("raw_anchor_xy", item["vis_xy"]), dtype=np.float32)
+    vis_anchor_xy = np.asarray(item.get("vis_anchor_xy", item["vis_xy"]), dtype=np.float32)
     vis_xy = np.asarray(item["vis_xy"], dtype=np.float32)
     raw_offsets = np.asarray(item["raw_offsets"], dtype=np.float32)
     pred_offsets = np.asarray(item["pred_offsets"], dtype=np.float32)
@@ -181,13 +183,44 @@ def make_tile_diagnostic_figure(
     # (0,0) VIS + NN predicted offset magnitudes at source positions
     ax = axes[0, 0]
     ax.imshow(vis, origin="lower", cmap="gray", vmin=p1v, vmax=p99v, aspect="auto")
-    sc = ax.scatter(vis_xy[keep_s, 0], vis_xy[keep_s, 1],
-                    c=np.hypot(pred_mas[keep_s, 0], pred_mas[keep_s, 1]),
-                    s=12, cmap="magma", alpha=0.85, vmin=0)
+    keep_raw = _downsample_indices(len(raw_anchor_xy), 1200)
+    keep_vis = _downsample_indices(len(vis_anchor_xy), 1200)
+    plot_mag = np.hypot(pred_mas[keep_s, 0], pred_mas[keep_s, 1])
+    vmax_mag = max(1.0, float(np.percentile(plot_mag, 95))) if len(plot_mag) > 0 else 1.0
+    if len(keep_raw) > 0:
+        ax.scatter(
+            raw_anchor_xy[keep_raw, 0], raw_anchor_xy[keep_raw, 1],
+            s=18, facecolors="none", edgecolors="deepskyblue",
+            linewidths=0.7, alpha=0.45, label="raw detector anchors",
+        )
+    if len(keep_vis) > 0:
+        ax.scatter(
+            vis_anchor_xy[keep_vis, 0], vis_anchor_xy[keep_vis, 1],
+            s=10, facecolors="none", edgecolors="springgreen",
+            linewidths=0.6, alpha=0.45, label="VIS-kept anchors",
+        )
+    sc = ax.scatter(
+        vis_xy[keep_s, 0], vis_xy[keep_s, 1],
+        c=plot_mag,
+        s=14, cmap="plasma", alpha=0.95, vmin=0, vmax=vmax_mag,
+        edgecolors="white", linewidths=0.25, label="target-band anchors",
+    )
     plt.colorbar(sc, ax=ax, fraction=0.03, pad=0.02, label="|pred| (mas)")
+    counts_txt = (
+        f"raw={len(raw_anchor_xy)}  "
+        f"VIS-kept={len(vis_anchor_xy)}  "
+        f"target-kept={len(vis_xy)}"
+    )
+    ax.text(
+        0.02, 0.98, counts_txt,
+        transform=ax.transAxes, va="top", ha="left",
+        fontsize=8, color="white",
+        bbox=dict(boxstyle="round,pad=0.25", facecolor="black", alpha=0.55),
+    )
     ax.set_xlim(0, vis.shape[1]); ax.set_ylim(0, vis.shape[0])
     ax.set_title("NN predicted offsets at source anchors", fontsize=9)
     ax.set_xlabel("VIS x (px)", fontsize=8); ax.set_ylabel("VIS y (px)", fontsize=8)
+    ax.legend(fontsize=7, loc="lower right")
 
     # (0,1) Solved ΔRA* field — the East-West component of the correction
     ax = axes[0, 1]
@@ -306,6 +339,8 @@ def make_tile_diagnostic_figure(
     ax = axes[2, 2]
     ax.axis("off")
     n = len(vis_xy)
+    raw_n = len(raw_anchor_xy)
+    vis_n = len(vis_anchor_xy)
     raw_med = float(np.median(np.hypot(raw_mas[:, 0], raw_mas[:, 1])))
     pred_med = float(np.median(np.hypot(pred_mas[:, 0], pred_mas[:, 1])))
     sigma_med = float(np.median(sigma_mas))
@@ -316,7 +351,9 @@ def make_tile_diagnostic_figure(
         f"Tile:   {tile_id}\n"
         f"Band:   {rubin_band} → euclid_VIS\n"
         f"Input:  {', '.join(input_bands)}\n\n"
-        f"Anchors used:         {n}\n\n"
+        f"Raw anchors:          {raw_n}\n"
+        f"VIS-kept anchors:     {vis_n}\n"
+        f"Target-kept anchors:  {n}\n\n"
         f"Raw |offset| median:\n  {raw_med:.1f} mas\n\n"
         f"NN |offset| median:\n  {pred_med:.1f} mas\n\n"
         f"σ median:\n  {sigma_med:.1f} mas\n\n"

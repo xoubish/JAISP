@@ -113,9 +113,13 @@ def match_sources_wcs(
     max_sep_arcsec: float,
     clip_sigma: float,
     max_matches: int,
+    dedup_vis_px: float = 50.0,
+    dedup_rubin_px: float = 25.0,
 ) -> Dict[str, np.ndarray]:
     """
     Mutual-nearest WCS matching with sigma clipping in radial offset space.
+    Nearby matched peaks on the same bright object are merged so anchors are
+    closer to object-level matches than knot-level detections.
     """
     empty = {
         "rubin_xy": np.zeros((0, 2), dtype=np.float32),
@@ -167,6 +171,49 @@ def match_sources_wcs(
         dra = dra[order]
         ddec = ddec[order]
         sep = sep[order]
+
+    # Object-level deduplication: local-peak detection can place several
+    # matched anchors on different knots of the same bright extended source.
+    # For astrometry anchors we want one representative match per object, so
+    # greedily keep the smallest-separation pair and suppress nearby matches
+    # in both VIS and Rubin frames.
+    if vis_sel.size > 1 and (float(dedup_vis_px) > 0.0 or float(dedup_rubin_px) > 0.0):
+        vis_xy = np.stack([vis_x[vis_sel], vis_y[vis_sel]], axis=1).astype(np.float32)
+        rub_xy = np.stack([rubin_x[rub_sel], rubin_y[rub_sel]], axis=1).astype(np.float32)
+        keep = np.zeros((vis_sel.size,), dtype=bool)
+        kept_idx: list[int] = []
+        order = np.argsort(sep)  # prefer the tightest WCS agreement
+        vis_thr = float(max(0.0, dedup_vis_px))
+        rub_thr = float(max(0.0, dedup_rubin_px))
+        for idx in order:
+            if not kept_idx:
+                keep[idx] = True
+                kept_idx.append(int(idx))
+                continue
+            prev = np.asarray(kept_idx, dtype=np.int64)
+            vis_close = np.zeros((prev.size,), dtype=bool)
+            rub_close = np.zeros((prev.size,), dtype=bool)
+            if vis_thr > 0.0:
+                dvis = np.hypot(
+                    vis_xy[idx, 0] - vis_xy[prev, 0],
+                    vis_xy[idx, 1] - vis_xy[prev, 1],
+                )
+                vis_close = dvis < vis_thr
+            if rub_thr > 0.0:
+                drub = np.hypot(
+                    rub_xy[idx, 0] - rub_xy[prev, 0],
+                    rub_xy[idx, 1] - rub_xy[prev, 1],
+                )
+                rub_close = drub < rub_thr
+            if np.any(vis_close) or np.any(rub_close):
+                continue
+            keep[idx] = True
+            kept_idx.append(int(idx))
+        vis_sel = vis_sel[keep]
+        rub_sel = rub_sel[keep]
+        dra = dra[keep]
+        ddec = ddec[keep]
+        sep = sep[keep]
 
     return {
         "rubin_xy": np.stack([rubin_x[rub_sel], rubin_y[rub_sel]], axis=1).astype(np.float32),
@@ -220,6 +267,8 @@ def refine_centroids_in_band(
         xb = min(W, x0 + r + 1)
         ya = max(0, y0 - r)
         yb = min(H, y0 + r + 1)
+        if xa >= xb or ya >= yb:
+            continue
         patch = img[ya:yb, xa:xb]
         if patch.size == 0:
             continue
@@ -231,4 +280,3 @@ def refine_centroids_in_band(
         out[i, 0] = float((w * gx).sum() / w.sum())
         out[i, 1] = float((w * gy).sum() / w.sum())
     return out
-

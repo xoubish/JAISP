@@ -91,6 +91,98 @@ def detect_sources_neural(
     return pos[:, 0], pos[:, 1]
 
 
+def _constant_rms_image(image: np.ndarray) -> np.ndarray:
+    """Cheap per-band RMS proxy for detector inference."""
+    img = np.asarray(image, dtype=np.float32)
+    med = float(np.median(img))
+    sig = float(1.4826 * np.median(np.abs(img - med)))
+    return np.full_like(img, max(sig, 1e-10), dtype=np.float32)
+
+
+def build_full_context_detector_inputs(edata, rubin_cube: np.ndarray) -> Tuple[Dict[str, np.ndarray], Dict[str, np.ndarray], Tuple[int, int]]:
+    """Build the full 10-band input dict expected by the V7 detector."""
+    tile_images: Dict[str, np.ndarray] = {}
+    tile_rms: Dict[str, np.ndarray] = {}
+
+    for i, short in enumerate(RUBIN_BAND_ORDER):
+        if i >= rubin_cube.shape[0]:
+            continue
+        band = f'rubin_{short}'
+        img = np.nan_to_num(_to_float32(rubin_cube[i]), nan=0.0)
+        tile_images[band] = img
+        tile_rms[band] = _constant_rms_image(img)
+
+    vis_img = np.nan_to_num(_to_float32(edata['img_VIS']), nan=0.0)
+    tile_images['euclid_VIS'] = vis_img
+    tile_rms['euclid_VIS'] = _constant_rms_image(vis_img)
+
+    for short in NISP_BAND_ORDER:
+        key = f'img_{short}'
+        if key not in edata:
+            continue
+        img = np.nan_to_num(_to_float32(edata[key]), nan=0.0)
+        tile_images[f'euclid_{short}'] = img
+        tile_rms[f'euclid_{short}'] = _constant_rms_image(img)
+
+    return tile_images, tile_rms, vis_img.shape
+
+
+def detect_sources_multiband(
+    edata,
+    rubin_cube: np.ndarray,
+    detector,
+    device,
+    conf_threshold: float = 0.3,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Run the neural detector on the full 10-band tile and return VIS-frame anchors."""
+    tile_images, tile_rms, tile_hw = build_full_context_detector_inputs(edata, rubin_cube)
+    return detect_sources_neural(
+        tile_images,
+        tile_rms,
+        detector,
+        device,
+        conf_threshold=conf_threshold,
+        tile_hw=tile_hw,
+    )
+
+
+def signal_mask_in_band(
+    image: np.ndarray,
+    seed_xy: np.ndarray,
+    radius: int = 3,
+    flux_floor_sigma: float = 1.5,
+) -> np.ndarray:
+    """Return which seed positions have enough local positive flux to refine."""
+    img = np.asarray(image, dtype=np.float32)
+    H, W = img.shape
+    seed_xy = np.asarray(seed_xy, dtype=np.float32)
+    out = np.zeros((seed_xy.shape[0],), dtype=bool)
+    global_sig = float(np.median(np.abs(img - np.median(img))) * 1.4826)
+    global_sig = max(global_sig, 1e-8)
+    r = max(1, int(radius))
+    for i, (x0f, y0f) in enumerate(seed_xy):
+        x0 = int(round(float(x0f)))
+        y0 = int(round(float(y0f)))
+        xa = max(0, x0 - r)
+        xb = min(W, x0 + r + 1)
+        ya = max(0, y0 - r)
+        yb = min(H, y0 + r + 1)
+        patch = img[ya:yb, xa:xb]
+        if patch.size == 0:
+            continue
+        bg = float(np.percentile(patch, 30))
+        w = np.clip(patch - bg, 0.0, None)
+        out[i] = float(w.sum()) > float(flux_floor_sigma) * global_sig
+    return out
+
+
+def project_vis_to_band_xy(vis_xy: np.ndarray, vis_wcs: WCS, band_wcs: WCS) -> np.ndarray:
+    """Project VIS pixel positions into another band's pixel frame."""
+    ra, dec = vis_wcs.wcs_pix2world(vis_xy[:, 0], vis_xy[:, 1], 0)
+    bx, by = band_wcs.wcs_world2pix(ra, dec, 0)
+    return np.stack([bx, by], axis=1).astype(np.float32)
+
+
 # Backward-compatible alias
 detect_sources_detr = detect_sources_neural
 
@@ -193,12 +285,19 @@ def normalize_nisp_band(name: str) -> str:
 def discover_tile_pairs(rubin_dir: str, euclid_dir: str) -> List[Tuple[str, str, str]]:
     pairs = []
     for rubin_path in sorted(glob.glob(os.path.join(rubin_dir, 'tile_x*_y*.npz'))):
-        tile_id = os.path.splitext(os.path.basename(rubin_path))[0]
+        basename = os.path.basename(rubin_path)
+        if basename.endswith('_euclid.npz'):
+            continue  # skip euclid files if rubin_dir happens to contain them
+        tile_id = os.path.splitext(basename)[0]
         euclid_path = os.path.join(euclid_dir, f'{tile_id}_euclid.npz')
         if os.path.exists(euclid_path):
             pairs.append((tile_id, rubin_path, euclid_path))
     if not pairs:
-        raise FileNotFoundError('No tile pairs found.')
+        raise FileNotFoundError(
+            f'No tile pairs found. Checked rubin_dir={rubin_dir} '
+            f'(pattern tile_x*_y*.npz) and euclid_dir={euclid_dir} '
+            f'(pattern {{tile_id}}_euclid.npz).'
+        )
     return pairs
 
 
@@ -368,32 +467,45 @@ def build_patch_samples(
 
         # --- Source detection (DETR or classical) --------------------------
         if use_detr:
-            # Build band dicts for the DETR detector
-            rubin_bands_list = [f'rubin_{b}' for b in RUBIN_BAND_ORDER]
-            tile_images = {}
-            tile_rms_d = {}
-            for i, band in enumerate(rubin_bands_list):
-                if i < rubin_cube.shape[0]:
-                    img_np = np.nan_to_num(_to_float32(rubin_cube[i]), nan=0.0)
-                    tile_images[band] = img_np
-                    # Use robust sigma as RMS estimate
-                    med = float(np.median(img_np))
-                    sig = float(1.4826 * np.median(np.abs(img_np - med)))
-                    tile_rms_d[band] = np.full_like(img_np, max(sig, 1e-10))
-
-            H_r, W_r = rubin_cube.shape[1], rubin_cube.shape[2]
-            rx, ry = detect_sources_detr(
-                tile_images, tile_rms_d, detr_detector, detr_device,
+            ax, ay = detect_sources_multiband(
+                edata,
+                rubin_cube,
+                detr_detector,
+                detr_device,
                 conf_threshold=detr_conf_threshold,
-                tile_hw=(H_r, W_r),
             )
-            # VIS: still use classical detection (DETR is Rubin-only for now)
-            vx, vy = detect_sources(
+            if ax.size == 0:
+                continue
+            vis_seed_xy = np.stack([ax, ay], axis=1).astype(np.float32)
+            vis_keep = signal_mask_in_band(
                 vis_img,
-                nsig=vis_nsig,
-                smooth_sigma=vis_smooth,
-                min_dist=vis_min_dist,
-                max_sources=max_sources_vis,
+                vis_seed_xy,
+                radius=refine_radius,
+                flux_floor_sigma=refine_flux_floor_sigma,
+            )
+            if not vis_keep.any():
+                continue
+            vis_xy = refine_centroids_in_band(
+                vis_img,
+                vis_seed_xy[vis_keep],
+                radius=refine_radius,
+                flux_floor_sigma=refine_flux_floor_sigma,
+            )
+            rubin_xy_seed = project_vis_to_band_xy(vis_xy, vwcs, rwcs)
+            target_keep = signal_mask_in_band(
+                rubin_target,
+                rubin_xy_seed,
+                radius=refine_radius,
+                flux_floor_sigma=refine_flux_floor_sigma,
+            )
+            if int(target_keep.sum()) < int(min_matches):
+                continue
+            vis_xy = vis_xy[target_keep]
+            rubin_xy_target = refine_centroids_in_band(
+                rubin_target,
+                rubin_xy_seed[target_keep],
+                radius=refine_radius,
+                flux_floor_sigma=refine_flux_floor_sigma,
             )
         else:
             rubin_det = build_detection_image(rubin_cube, detect_bands, clip_sigma=detect_clip_sigma)
@@ -411,35 +523,35 @@ def build_patch_samples(
                 min_dist=vis_min_dist,
                 max_sources=max_sources_vis,
             )
-        matched = match_sources_wcs(
-            rx,
-            ry,
-            vx,
-            vy,
-            rwcs,
-            vwcs,
-            max_sep_arcsec=max_sep_arcsec,
-            clip_sigma=clip_sigma,
-            max_matches=max_matches,
-        )
-        if matched['vis_xy'].shape[0] == 0:
-            continue
+            matched = match_sources_wcs(
+                rx,
+                ry,
+                vx,
+                vy,
+                rwcs,
+                vwcs,
+                max_sep_arcsec=max_sep_arcsec,
+                clip_sigma=clip_sigma,
+                max_matches=max_matches,
+            )
+            if matched['vis_xy'].shape[0] == 0:
+                continue
 
-        rubin_xy_target = refine_centroids_in_band(
-            rubin_target,
-            matched['rubin_xy'],
-            radius=refine_radius,
-            flux_floor_sigma=refine_flux_floor_sigma,
-        )
+            rubin_xy_target = refine_centroids_in_band(
+                rubin_target,
+                matched['rubin_xy'],
+                radius=refine_radius,
+                flux_floor_sigma=refine_flux_floor_sigma,
+            )
+            vis_xy = matched['vis_xy'].astype(np.float32)
+            if vis_xy.shape[0] < int(min_matches):
+                continue
+
         r_ra, r_dec = rwcs.wcs_pix2world(rubin_xy_target[:, 0], rubin_xy_target[:, 1], 0)
-        v_ra, v_dec = vwcs.wcs_pix2world(matched['vis_xy'][:, 0], matched['vis_xy'][:, 1], 0)
+        v_ra, v_dec = vwcs.wcs_pix2world(vis_xy[:, 0], vis_xy[:, 1], 0)
         dra = (v_ra - r_ra) * np.cos(np.deg2rad(v_dec)) * 3600.0
         ddec = (v_dec - r_dec) * 3600.0
         offsets = np.stack([dra, ddec], axis=1).astype(np.float32)
-        vis_xy = matched['vis_xy'].astype(np.float32)
-
-        if vis_xy.shape[0] < int(min_matches):
-            continue
 
         keep = np.arange(vis_xy.shape[0])
         if keep.size > int(max_patches_per_tile):
@@ -594,7 +706,9 @@ def build_patch_samples_multiband(
             rdata = np.load(rubin_path, allow_pickle=True)
             edata = np.load(euclid_path, allow_pickle=True)
             rubin_cube = rdata['img']
+            rubin_var = rdata['var'] if 'var' in rdata else None
             vis_img = np.nan_to_num(_to_float32(edata['img_VIS']), nan=0.0)
+            vis_var = _to_float32(edata['var_VIS']) if 'var_VIS' in edata else None
             rwcs = WCS(rdata['wcs_hdr'].item())
             vhdr = safe_header_from_card_string(edata['wcs_VIS'].item())
             vwcs = WCS(vhdr)
@@ -612,44 +726,55 @@ def build_patch_samples_multiband(
 
         # Source detection (DETR or classical).
         if detr_detector is not None:
-            rubin_bands_list = [f'rubin_{b}' for b in RUBIN_BAND_ORDER]
-            tile_images = {}
-            tile_rms_d = {}
-            for i, band in enumerate(rubin_bands_list):
-                if i < rubin_cube.shape[0]:
-                    img_np = np.nan_to_num(_to_float32(rubin_cube[i]), nan=0.0)
-                    tile_images[band] = img_np
-                    med = float(np.median(img_np))
-                    sig = float(1.4826 * np.median(np.abs(img_np - med)))
-                    tile_rms_d[band] = np.full_like(img_np, max(sig, 1e-10))
-            H_r, W_r = rubin_cube.shape[1], rubin_cube.shape[2]
-            rx, ry = detect_sources_detr(
-                tile_images, tile_rms_d, detr_detector, detr_device,
-                conf_threshold=detr_conf_threshold, tile_hw=(H_r, W_r),
+            ax, ay = detect_sources_multiband(
+                edata,
+                rubin_cube,
+                detr_detector,
+                detr_device,
+                conf_threshold=detr_conf_threshold,
             )
+            if ax.size == 0:
+                continue
+            vis_seed_xy = np.stack([ax, ay], axis=1).astype(np.float32)
+            vis_keep = signal_mask_in_band(
+                vis_img,
+                vis_seed_xy,
+                radius=refine_radius,
+                flux_floor_sigma=refine_flux_floor_sigma,
+            )
+            if not vis_keep.any():
+                continue
+            vis_xy = refine_centroids_in_band(
+                vis_img,
+                vis_seed_xy[vis_keep],
+                radius=refine_radius,
+                flux_floor_sigma=refine_flux_floor_sigma,
+            ).astype(np.float32)
+            rubin_xy_seed_default = project_vis_to_band_xy(vis_xy, vwcs, rwcs)
         else:
             rubin_det = build_detection_image(rubin_cube, detect_bands_norm, clip_sigma=detect_clip_sigma)
             rx, ry = detect_sources(
                 rubin_det, nsig=rubin_nsig, smooth_sigma=rubin_smooth,
                 min_dist=rubin_min_dist, max_sources=max_sources_rubin,
             )
-        vx, vy = detect_sources(
-            vis_img, nsig=vis_nsig, smooth_sigma=vis_smooth,
-            min_dist=vis_min_dist, max_sources=max_sources_vis,
-        )
-        matched = match_sources_wcs(
-            rx, ry, vx, vy, rwcs, vwcs,
-            max_sep_arcsec=max_sep_arcsec,
-            clip_sigma=clip_sigma,
-            max_matches=max_matches,
-        )
-        if matched['vis_xy'].shape[0] < int(min_matches):
-            continue
-
-        vis_xy = matched['vis_xy'].astype(np.float32)
+            vx, vy = detect_sources(
+                vis_img, nsig=vis_nsig, smooth_sigma=vis_smooth,
+                min_dist=vis_min_dist, max_sources=max_sources_vis,
+            )
+            matched = match_sources_wcs(
+                rx, ry, vx, vy, rwcs, vwcs,
+                max_sep_arcsec=max_sep_arcsec,
+                clip_sigma=clip_sigma,
+                max_matches=max_matches,
+            )
+            if matched['vis_xy'].shape[0] < int(min_matches):
+                continue
+            vis_xy = matched['vis_xy'].astype(np.float32)
+            rubin_xy_seed_default = matched['rubin_xy'].astype(np.float32)
 
         # Pre-compute per-band refined centroids and offsets.
         per_band_offsets = {}  # band_name -> (N, 2) arcsec
+        per_band_valid = {}    # band_name -> (N,) bool
 
         # Rubin target bands.
         for tband in rubin_targets:
@@ -658,15 +783,27 @@ def build_patch_samples_multiband(
             if bidx >= rubin_cube.shape[0]:
                 continue
             rubin_band_img = np.nan_to_num(_to_float32(rubin_cube[bidx]), nan=0.0)
+            rubin_xy_seed = rubin_xy_seed_default
+            valid = signal_mask_in_band(
+                rubin_band_img,
+                rubin_xy_seed,
+                radius=refine_radius,
+                flux_floor_sigma=refine_flux_floor_sigma,
+            )
+            per_band_valid[tband] = valid
+            if not valid.any():
+                continue
             rubin_xy_refined = refine_centroids_in_band(
-                rubin_band_img, matched['rubin_xy'],
+                rubin_band_img, rubin_xy_seed,
                 radius=refine_radius, flux_floor_sigma=refine_flux_floor_sigma,
             )
-            r_ra, r_dec = rwcs.wcs_pix2world(rubin_xy_refined[:, 0], rubin_xy_refined[:, 1], 0)
-            v_ra, v_dec = vwcs.wcs_pix2world(vis_xy[:, 0], vis_xy[:, 1], 0)
+            r_ra, r_dec = rwcs.wcs_pix2world(rubin_xy_refined[valid, 0], rubin_xy_refined[valid, 1], 0)
+            v_ra, v_dec = vwcs.wcs_pix2world(vis_xy[valid, 0], vis_xy[valid, 1], 0)
             dra = (v_ra - r_ra) * np.cos(np.deg2rad(v_dec)) * 3600.0
             ddec = (v_dec - r_dec) * 3600.0
-            per_band_offsets[tband] = np.stack([dra, ddec], axis=1).astype(np.float32)
+            offsets = np.zeros((vis_xy.shape[0], 2), dtype=np.float32)
+            offsets[valid] = np.stack([dra, ddec], axis=1).astype(np.float32)
+            per_band_offsets[tband] = offsets
 
         # NISP target bands: offset = VIS position - NISP position.
         # NISP sources are detected independently and matched to VIS.
@@ -677,37 +814,58 @@ def build_patch_samples_multiband(
             if nb not in nisp_data:
                 continue
             nisp_img, nwcs = nisp_data[nb]
-            # Refine NISP centroids: project VIS positions into NISP pixel coords.
-            nisp_x, nisp_y = nwcs.wcs_world2pix(
-                *vwcs.wcs_pix2world(vis_xy[:, 0], vis_xy[:, 1], 0), 0)
-            nisp_xy_init = np.stack([nisp_x, nisp_y], axis=1).astype(np.float32)
-            nisp_xy_refined = refine_centroids_in_band(
-                nisp_img, nisp_xy_init,
-                radius=max(1, refine_radius // 3),  # NISP pixels are 3x coarser
+            nisp_xy_init = project_vis_to_band_xy(vis_xy, vwcs, nwcs)
+            nisp_radius = max(1, refine_radius // 3)
+            valid = signal_mask_in_band(
+                nisp_img,
+                nisp_xy_init,
+                radius=nisp_radius,
                 flux_floor_sigma=refine_flux_floor_sigma,
             )
-            n_ra, n_dec = nwcs.wcs_pix2world(nisp_xy_refined[:, 0], nisp_xy_refined[:, 1], 0)
-            v_ra, v_dec = vwcs.wcs_pix2world(vis_xy[:, 0], vis_xy[:, 1], 0)
+            per_band_valid[tband] = valid
+            if not valid.any():
+                continue
+            nisp_xy_refined = refine_centroids_in_band(
+                nisp_img, nisp_xy_init,
+                radius=nisp_radius,  # NISP pixels are 3x coarser
+                flux_floor_sigma=refine_flux_floor_sigma,
+            )
+            n_ra, n_dec = nwcs.wcs_pix2world(nisp_xy_refined[valid, 0], nisp_xy_refined[valid, 1], 0)
+            v_ra, v_dec = vwcs.wcs_pix2world(vis_xy[valid, 0], vis_xy[valid, 1], 0)
             dra = (v_ra - n_ra) * np.cos(np.deg2rad(v_dec)) * 3600.0
             ddec = (v_dec - n_dec) * 3600.0
-            per_band_offsets[tband] = np.stack([dra, ddec], axis=1).astype(np.float32)
+            offsets = np.zeros((vis_xy.shape[0], 2), dtype=np.float32)
+            offsets[valid] = np.stack([dra, ddec], axis=1).astype(np.float32)
+            per_band_offsets[tband] = offsets
 
         if not per_band_offsets:
             continue
 
+        valid_any = np.zeros((vis_xy.shape[0],), dtype=bool)
+        for valid in per_band_valid.values():
+            valid_any |= valid
+        if int(valid_any.sum()) < int(min_matches):
+            continue
+
         # Subsample sources.
-        keep = np.arange(vis_xy.shape[0])
+        keep = np.where(valid_any)[0]
         if keep.size > int(max_patches_per_tile):
             keep = rng.choice(keep, int(max_patches_per_tile), replace=False)
             keep.sort()
 
         tile_samples = []
+        # Pre-compute per-band RMS images (sqrt of variance, clamped).
+        has_rms = rubin_var is not None and vis_var is not None
+        if has_rms:
+            vis_rms = np.sqrt(np.maximum(np.nan_to_num(vis_var, nan=0.0), 1e-20)).astype(np.float32)
+
         for src_idx in keep:
             anchor_xy = vis_xy[src_idx]
             vis_patch = extract_vis_patch(vis_img, anchor_xy, patch_size)
 
             # Build full multi-instrument input stamp.
             input_patches = []
+            rms_patches = [] if has_rms else None
 
             # Rubin channels.
             for band in rubin_input_bands:
@@ -715,11 +873,20 @@ def build_patch_samples_multiband(
                 bidx = RUBIN_BAND_ORDER.index(short)
                 if bidx >= rubin_cube.shape[0]:
                     input_patches.append(np.zeros((patch_size, patch_size), dtype=np.float32))
+                    if rms_patches is not None:
+                        rms_patches.append(np.ones((patch_size, patch_size), dtype=np.float32))
                 else:
                     rubin_band_img = np.nan_to_num(_to_float32(rubin_cube[bidx]), nan=0.0)
                     input_patches.append(
                         reproject_rubin_patch_to_vis(rubin_band_img, rwcs, vwcs, anchor_xy, patch_size)
                     )
+                    if rms_patches is not None:
+                        band_rms = np.sqrt(np.maximum(
+                            np.nan_to_num(_to_float32(rubin_var[bidx]), nan=0.0), 1e-20,
+                        )).astype(np.float32)
+                        rms_patches.append(
+                            reproject_rubin_patch_to_vis(band_rms, rwcs, vwcs, anchor_xy, patch_size)
+                        )
 
             # NISP channels (if included as input).
             for band in nisp_input_bands:
@@ -729,23 +896,46 @@ def build_patch_samples_multiband(
                     input_patches.append(
                         reproject_nisp_patch_to_vis(nisp_img, nwcs, vwcs, anchor_xy, patch_size)
                     )
+                    if rms_patches is not None:
+                        var_key = f'var_{nb}'
+                        if var_key in edata:
+                            nisp_rms = np.sqrt(np.maximum(
+                                np.nan_to_num(_to_float32(edata[var_key]), nan=0.0), 1e-20,
+                            )).astype(np.float32)
+                            rms_patches.append(
+                                reproject_nisp_patch_to_vis(nisp_rms, nwcs, vwcs, anchor_xy, patch_size)
+                            )
+                        else:
+                            rms_patches.append(np.ones((patch_size, patch_size), dtype=np.float32))
                 else:
                     input_patches.append(np.zeros((patch_size, patch_size), dtype=np.float32))
+                    if rms_patches is not None:
+                        rms_patches.append(np.ones((patch_size, patch_size), dtype=np.float32))
 
             input_stamp = np.stack(input_patches, axis=0).astype(np.float32)  # [n_channels, H, W]
             vis_stamp = vis_patch[None].astype(np.float32)                     # [1, H, W]
             pix2sky = local_vis_pixel_to_sky_matrix(vwcs, anchor_xy)
 
+            sample_base = {
+                'tile_id': tile_id,
+                'anchor_xy': anchor_xy.astype(np.float32),
+                'rubin_patch': input_stamp,  # name kept for compat, but now multi-instrument
+                'vis_patch': vis_stamp,
+                'pixel_to_sky': pix2sky.astype(np.float32),
+                'input_bands': list(all_input_bands),
+            }
+            if has_rms:
+                sample_base['rubin_rms_patch'] = np.stack(rms_patches, axis=0).astype(np.float32)
+                vis_rms_patch = extract_vis_patch(vis_rms, anchor_xy, patch_size)
+                sample_base['vis_rms_patch'] = vis_rms_patch[None].astype(np.float32)
+
             # One sample per target band.
             for tband, offsets in per_band_offsets.items():
+                if not per_band_valid.get(tband, np.zeros((vis_xy.shape[0],), dtype=bool))[src_idx]:
+                    continue
                 tile_samples.append({
-                    'tile_id': tile_id,
-                    'anchor_xy': anchor_xy.astype(np.float32),
-                    'rubin_patch': input_stamp,  # name kept for compat, but now multi-instrument
-                    'vis_patch': vis_stamp,
+                    **sample_base,
                     'target_offset_arcsec': offsets[src_idx].astype(np.float32),
-                    'pixel_to_sky': pix2sky.astype(np.float32),
-                    'input_bands': list(all_input_bands),
                     'target_band': tband,
                     'band_idx': BAND_TO_IDX[tband],
                 })
@@ -786,31 +976,62 @@ class MatchedPatchDataset(torch.utils.data.Dataset):
     def __len__(self) -> int:
         return len(self.samples)
 
+    def _augment_spatial(self, *arrays, pix2sky):
+        """Apply the same random spatial augmentation to all arrays and the Jacobian."""
+        pix2sky = pix2sky.copy()
+
+        # Random 90-degree rotation (k=0,1,2,3 for 0°,90°,180°,270° CCW).
+        k = np.random.randint(4)
+        if k > 0:
+            arrays = tuple(np.rot90(a, k=k, axes=(1, 2)).copy() for a in arrays)
+            if k == 1:
+                pix2sky = np.stack([pix2sky[:, 1], -pix2sky[:, 0]], axis=1)
+            elif k == 2:
+                pix2sky = np.stack([-pix2sky[:, 0], -pix2sky[:, 1]], axis=1)
+            elif k == 3:
+                pix2sky = np.stack([-pix2sky[:, 1], pix2sky[:, 0]], axis=1)
+
+        # Random horizontal flip.
+        if np.random.rand() > 0.5:
+            arrays = tuple(a[:, :, ::-1].copy() for a in arrays)
+            pix2sky = pix2sky.copy()
+            pix2sky[:, 0] = -pix2sky[:, 0]
+
+        # Random vertical flip.
+        if np.random.rand() > 0.5:
+            arrays = tuple(a[:, ::-1, :].copy() for a in arrays)
+            pix2sky = pix2sky.copy()
+            pix2sky[:, 1] = -pix2sky[:, 1]
+
+        return arrays, pix2sky
+
     def __getitem__(self, idx: int) -> Dict:
         s = self.samples[idx]
         rubin_patch = s['rubin_patch'].copy()           # [C, H, W]
         vis_patch = s['vis_patch'].copy()               # [1, H, W]
         pix2sky = s['pixel_to_sky'].copy()              # [2, 2]
+        has_rms = 'rubin_rms_patch' in s and 'vis_rms_patch' in s
+
+        if has_rms:
+            rubin_rms = s['rubin_rms_patch'].copy()
+            vis_rms = s['vis_rms_patch'].copy()
 
         if self.augment:
-            if np.random.rand() > 0.5:
-                rubin_patch = rubin_patch[:, :, ::-1].copy()
-                vis_patch = vis_patch[:, :, ::-1].copy()
-                pix2sky = pix2sky.copy()
-                pix2sky[:, 0] = -pix2sky[:, 0]
+            if has_rms:
+                (rubin_patch, vis_patch, rubin_rms, vis_rms), pix2sky = \
+                    self._augment_spatial(rubin_patch, vis_patch, rubin_rms, vis_rms, pix2sky=pix2sky)
+            else:
+                (rubin_patch, vis_patch), pix2sky = \
+                    self._augment_spatial(rubin_patch, vis_patch, pix2sky=pix2sky)
 
-            if np.random.rand() > 0.5:
-                rubin_patch = rubin_patch[:, ::-1, :].copy()
-                vis_patch = vis_patch[:, ::-1, :].copy()
-                pix2sky = pix2sky.copy()
-                pix2sky[:, 1] = -pix2sky[:, 1]
-
-        rubin_patch = np.stack(
-            [_normalize_patch(rubin_patch[c]) for c in range(rubin_patch.shape[0])], axis=0
-        )
-        vis_patch = np.stack(
-            [_normalize_patch(vis_patch[c]) for c in range(vis_patch.shape[0])], axis=0
-        )
+        if not has_rms:
+            # Legacy path: scalar MAD normalization per channel.
+            rubin_patch = np.stack(
+                [_normalize_patch(rubin_patch[c]) for c in range(rubin_patch.shape[0])], axis=0
+            )
+            vis_patch = np.stack(
+                [_normalize_patch(vis_patch[c]) for c in range(vis_patch.shape[0])], axis=0
+            )
 
         out = {
             'tile_id': s['tile_id'],
@@ -822,7 +1043,9 @@ class MatchedPatchDataset(torch.utils.data.Dataset):
             'input_bands': list(s['input_bands']),
             'target_band': s['target_band'],
         }
-        # Include band_idx if present (multi-band mode).
+        if has_rms:
+            out['rubin_rms_patch'] = torch.from_numpy(rubin_rms)
+            out['vis_rms_patch'] = torch.from_numpy(vis_rms)
         if 'band_idx' in s:
             out['band_idx'] = int(s['band_idx'])
         return out
@@ -839,9 +1062,11 @@ def collate_matched_patches(batch: List[Dict]) -> Dict:
         'input_bands': [b['input_bands'] for b in batch],
         'target_band': [b['target_band'] for b in batch],
     }
-    # Collate band_idx if present.
     if 'band_idx' in batch[0]:
         out['band_idx'] = torch.tensor([b['band_idx'] for b in batch], dtype=torch.long)
+    if 'rubin_rms_patch' in batch[0]:
+        out['rubin_rms_patch'] = torch.stack([b['rubin_rms_patch'] for b in batch], dim=0)
+        out['vis_rms_patch'] = torch.stack([b['vis_rms_patch'] for b in batch], dim=0)
     return out
 
 

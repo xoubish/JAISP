@@ -14,10 +14,14 @@ import torch
 
 import sys
 SCRIPT_DIR = Path(__file__).resolve().parent
-if str(SCRIPT_DIR) not in sys.path:
-    sys.path.insert(0, str(SCRIPT_DIR))
+MODELS_DIR = SCRIPT_DIR.parent
+for p in (MODELS_DIR, SCRIPT_DIR):
+    sp = str(p)
+    if sp in sys.path:
+        sys.path.remove(sp)
+    sys.path.insert(0, sp)
 
-from dataset import (
+from astrometry2.dataset import (
     ALL_BAND_ORDER,
     MatchedPatchDataset,
     build_patch_samples,
@@ -28,9 +32,9 @@ from dataset import (
     normalize_rubin_bands,
     split_tile_pairs,
 )
-from infer_concordance import predict_tile
-from matcher import LocalAstrometryMatcher
-from viz import make_tile_diagnostic_figure
+from astrometry2.infer_concordance import predict_tile
+from older_architectures.matcher import LocalAstrometryMatcher
+from astrometry2.viz import make_tile_diagnostic_figure
 
 try:
     import wandb
@@ -291,18 +295,39 @@ def make_field_preview(
         auto_grid=True,  # always use adaptive grid + anchor for previews
         dstep=args.preview_dstep,
     )
+    if hasattr(args, 'detector_conf_threshold'):
+        preview_args.detector_conf_threshold = getattr(args, 'detector_conf_threshold')
+    if hasattr(args, '_detr_detector'):
+        preview_args._detr_detector = getattr(args, '_detr_detector')
     out: Dict[str, object] = {}
+    max_preview_tiles = int(getattr(args, 'preview_max_tiles', 8))
     for target_band in target_bands:
-        for tile_id, rubin_path, euclid_path in preview_pairs:
-            item = predict_tile(model, device, rubin_path, euclid_path, target_band, input_bands, detect_bands, preview_args)
+        best = None
+        best_matches = -1
+        for tile_id, rubin_path, euclid_path in preview_pairs[:max_preview_tiles]:
+            try:
+                item = predict_tile(model, device, rubin_path, euclid_path, target_band, input_bands, detect_bands, preview_args)
+            except Exception as exc:
+                print(f'[preview] skip {tile_id} {target_band}: {exc}')
+                continue
             if item is None:
                 continue
-            fig = make_tile_diagnostic_figure(item, tile_id, target_band, input_bands)
-            fig.suptitle(f"Epoch {epoch} | {split_name} fixed tile | {target_band}", y=0.99)
-            out[f'preview/fixed_tile/{target_band}'] = wandb.Image(fig)
-            import matplotlib.pyplot as plt
-            plt.close(fig)
-            break
+            n_matches = int(item.get('summary', {}).get('matches', 0))
+            if n_matches > best_matches:
+                best = (tile_id, item)
+                best_matches = n_matches
+        if best is None:
+            continue
+        tile_id, item = best
+        fig = make_tile_diagnostic_figure(item, tile_id, target_band, input_bands)
+        fig.suptitle(
+            f"Epoch {epoch} | {split_name} representative tile | {target_band} "
+            f"(best of {min(len(preview_pairs), max_preview_tiles)})",
+            y=0.99,
+        )
+        out[f'preview/fixed_tile/{target_band}'] = wandb.Image(fig)
+        import matplotlib.pyplot as plt
+        plt.close(fig)
     return out
 
 
@@ -326,8 +351,14 @@ def run_epoch(split_name, loader, model, optimizer, device, grad_clip: float, pi
         if band_idx is not None:
             band_idx = band_idx.to(device)
 
+        # Per-pixel RMS (available when dataset extracted variance maps).
+        rms_kwargs = {}
+        if 'rubin_rms_patch' in batch:
+            rms_kwargs['rubin_rms'] = batch['rubin_rms_patch'].float().to(device)
+            rms_kwargs['vis_rms'] = batch['vis_rms_patch'].float().to(device)
+
         with torch.set_grad_enabled(is_train):
-            out = model(rubin, vis, pix2sky, band_idx=band_idx)
+            out = model(rubin, vis, pix2sky, band_idx=band_idx, **rms_kwargs)
             losses = compute_loss(out, target, pix2sky, pixel_loss_weight=pixel_loss_weight)
             loss = losses['loss_total']
             if is_train:
@@ -411,6 +442,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--preview-grid-w', type=int, default=12)
     p.add_argument('--preview-smooth-lambda', type=float, default=1e-2)
     p.add_argument('--preview-dstep', type=int, default=4)
+    p.add_argument('--preview-max-tiles', type=int, default=8,
+                   help='Preview chooser: search this many val tiles and show the one with the most matches.')
 
     p.add_argument('--wandb-project', type=str, default='JAISP-Astrometry2')
     p.add_argument('--wandb-run-name', type=str, default='')

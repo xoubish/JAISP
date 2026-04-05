@@ -41,12 +41,14 @@ import torch
 # Ensure this directory is on sys.path for local imports
 _SCRIPT_DIR = Path(__file__).resolve().parent
 _MODELS_DIR  = _SCRIPT_DIR.parent
-for _p in (_SCRIPT_DIR, _MODELS_DIR):
-    if str(_p) not in sys.path:
-        sys.path.insert(0, str(_p))
+for _p in (_MODELS_DIR, _SCRIPT_DIR):
+    _sp = str(_p)
+    if _sp in sys.path:
+        sys.path.remove(_sp)
+    sys.path.insert(0, _sp)
 
 # ---- Import ALL infrastructure from the existing training script -----------
-from train_local_matcher import (
+from astrometry2.train_local_matcher import (
     build_parser,
     compute_loss,
     compute_metrics,
@@ -54,7 +56,7 @@ from train_local_matcher import (
     make_field_preview,
     run_epoch,
 )
-from dataset import (
+from astrometry2.dataset import (
     ALL_BAND_ORDER,
     MatchedPatchDataset,
     build_patch_samples,
@@ -65,7 +67,7 @@ from dataset import (
     normalize_rubin_bands,
     split_tile_pairs,
 )
-from matcher_v6 import load_v6_matcher
+from astrometry2.matcher_v6 import load_v6_matcher
 
 try:
     import wandb
