@@ -71,10 +71,11 @@ the heatmap target. The loss combines:
 
 ### Data
 
-- 130 training tiles, 14 validation tiles (90/10 split, seed=42)
+- Current primary dataset: `data/rubin_tiles_all` + `data/euclid_tiles_all`
+- About 790 matched Rubin+Euclid tiles, with a 90/10 train/val tile split
 - Augmentation: random 90-degree rotations + horizontal/vertical flips
-- All 10 bands loaded when `--euclid_dir` is provided
-- Default batch size: 2 (Euclid VIS at 1050x1050 is memory-heavy)
+- Recommended first cached-feature batch size: 4
+- Recommended first experiment: single-round training before self-training round 2
 
 ## Training Pipeline
 
@@ -88,15 +89,18 @@ needs to run once. Multiple augmentation variants are cached per tile.
 
 ```bash
 python models/detection/precompute_features.py \
-    --rubin_dir    data/rubin_tiles_ecdfs \
-    --euclid_dir   data/euclid_tiles_ecdfs \
-    --encoder_ckpt checkpoints/jaisp_v7_baseline/checkpoint_best.pt \
-    --out_dir      data/cached_features_v7
+    --rubin_dir    data/rubin_tiles_all \
+    --euclid_dir   data/euclid_tiles_all \
+    --encoder_ckpt checkpoints/jaisp_v7_tiles_all_ddp_online/checkpoint_best.pt \
+    --out_dir      data/cached_features_v7_tiles_all \
+    --n_augments   4 \
+    --device       cuda
 ```
 
 ### Step 2: Self-training
 
-The self-training script runs two rounds automatically:
+The self-training script can run multiple rounds, but the recommended first
+comparison against the classical baseline is just round 1:
 
 - **Round 1**: Train CenterNet on VIS pseudo-labels (classical detection at
   0.1"/px, the sharpest available). The model learns what sources look like
@@ -110,14 +114,18 @@ The self-training script runs two rounds automatically:
 
 ```bash
 python models/detection/self_train.py \
-    --feature_dir  data/cached_features_v7 \
-    --rubin_dir    data/rubin_tiles_ecdfs \
-    --euclid_dir   data/euclid_tiles_ecdfs \
-    --out_dir      models/checkpoints/centernet_v7_selftrain \
-    --rounds 2 \
-    --epochs 100 \
+    --feature_dir  data/cached_features_v7_tiles_all \
+    --rubin_dir    data/rubin_tiles_all \
+    --euclid_dir   data/euclid_tiles_all \
+    --out_dir      checkpoints/centernet_v7_tiles_all_round1 \
+    --rounds 1 \
+    --epochs 60 \
+    --batch_size 4 \
     --wandb_project jaisp-detection
 ```
+
+If round 1 looks good and you want to test whether the 10-band model can
+promote real sources beyond the VIS pseudo-labels, rerun with `--rounds 2`.
 
 ### Alternative: Direct training (slower, no precompute)
 
@@ -125,13 +133,16 @@ If you prefer to skip precomputation and run the encoder live each step:
 
 ```bash
 python models/detection/train_centernet.py \
-    --rubin_dir    data/rubin_tiles_ecdfs \
-    --euclid_dir   data/euclid_tiles_ecdfs \
-    --encoder_ckpt checkpoints/jaisp_v7_baseline/checkpoint_best.pt \
-    --out          models/checkpoints/centernet_v7.pt \
-    --epochs 100 \
+    --rubin_dir    data/rubin_tiles_all \
+    --euclid_dir   data/euclid_tiles_all \
+    --encoder_ckpt checkpoints/jaisp_v7_tiles_all_ddp_online/checkpoint_best.pt \
+    --out          checkpoints/centernet_v7_tiles_all_live.pt \
+    --epochs 60 \
+    --batch_size 1 \
     --wandb_project jaisp-detection
 ```
+
+This live path works, but the cached-feature path above is strongly preferred.
 
 ## Inference
 
@@ -147,7 +158,7 @@ from detection.centernet_detector import CenterNetDetector
 from detection.detector import JAISPEncoderWrapper
 
 # Load foundation model
-ckpt = torch.load('checkpoints/jaisp_v7_baseline/checkpoint_best.pt',
+ckpt = torch.load('checkpoints/jaisp_v7_tiles_all_ddp_online/checkpoint_best.pt',
                    map_location='cpu')
 cfg = ckpt.get('config', {})
 foundation = JAISPFoundationV7(
@@ -158,7 +169,7 @@ foundation.load_state_dict(ckpt['model'], strict=False)
 
 # Load CenterNet detector
 encoder = JAISPEncoderWrapper(foundation, freeze=True)
-detector = CenterNetDetector.load('models/checkpoints/centernet_v7.pt',
+detector = CenterNetDetector.load('checkpoints/centernet_v7_tiles_all_round1/centernet_best.pt',
                                    encoder=encoder, device='cuda')
 detector.eval()
 
@@ -189,3 +200,10 @@ the astrometry pipeline without code changes.
 | `detector.py` | `JaispDetector` DETR model (archived) |
 | `matcher.py` | Hungarian matcher + DETR loss (archived) |
 | `train_detection.py` | DETR training loop (archived) |
+
+## Caveats
+
+- `log_flux` is not scientifically ready yet: the current training path does
+  not provide flux targets, so the flux head is effectively unsupervised.
+- `--predict_profile` is intentionally blocked in the trainer for now because
+  there is no profile supervision in the loss yet.

@@ -7,11 +7,11 @@ then loads these cached features directly — no encoder forward pass needed.
 Usage
 -----
     python detection/precompute_features.py \
-        --rubin_dir    ../data/rubin_tiles_ecdfs \
-        --euclid_dir   ../data/euclid_tiles_ecdfs \
-        --encoder_ckpt ../checkpoints/jaisp_v7_baseline/checkpoint_best.pt \
-        --out_dir      ../data/cached_features_v7 \
-        --n_augments 8
+        --rubin_dir    ../data/rubin_tiles_all \
+        --euclid_dir   ../data/euclid_tiles_all \
+        --encoder_ckpt ../checkpoints/jaisp_v7_tiles_all_ddp_online/checkpoint_best.pt \
+        --out_dir      ../data/cached_features_v7_tiles_all \
+        --n_augments   4
 """
 
 import argparse

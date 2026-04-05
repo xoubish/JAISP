@@ -15,17 +15,19 @@ Usage
 -----
     # Step 1: Precompute features (run once)
     python detection/precompute_features.py \
-        --rubin_dir ../data/rubin_tiles_ecdfs \
-        --euclid_dir ../data/euclid_tiles_ecdfs \
-        --encoder_ckpt ../checkpoints/jaisp_v7_baseline/checkpoint_best.pt \
-        --out_dir ../data/cached_features_v7
+        --rubin_dir ../data/rubin_tiles_all \
+        --euclid_dir ../data/euclid_tiles_all \
+        --encoder_ckpt ../checkpoints/jaisp_v7_tiles_all_ddp_online/checkpoint_best.pt \
+        --out_dir ../data/cached_features_v7_tiles_all
 
-    # Step 2: Self-training (runs round 1 + round 2 automatically)
+    # Step 2: Start with round 1 only for the first comparison
     python detection/self_train.py \
-        --feature_dir  ../data/cached_features_v7 \
-        --rubin_dir    ../data/rubin_tiles_ecdfs \
-        --euclid_dir   ../data/euclid_tiles_ecdfs \
-        --out_dir      ../checkpoints/centernet_v7_selftrain \
+        --feature_dir  ../data/cached_features_v7_tiles_all \
+        --rubin_dir    ../data/rubin_tiles_all \
+        --euclid_dir   ../data/euclid_tiles_all \
+        --out_dir      ../checkpoints/centernet_v7_tiles_all_round1 \
+        --rounds 1 \
+        --batch_size 4 \
         --wandb_project jaisp-detection
 """
 
@@ -51,6 +53,7 @@ def _run_training_round(
     euclid_dir: str,
     out_path: str,
     extra_labels: str = None,
+    init_checkpoint: str = None,
     epochs: int = 100,
     batch_size: int = 8,
     lr: float = 1e-4,
@@ -77,6 +80,8 @@ def _run_training_round(
         cmd += ['--euclid_dir', euclid_dir]
     if extra_labels:
         cmd += ['--extra_labels', extra_labels]
+    if init_checkpoint:
+        cmd += ['--init_checkpoint', init_checkpoint]
     if wandb_project:
         cmd += ['--wandb_project', wandb_project]
     if wandb_name:
@@ -244,6 +249,8 @@ def main():
     p.add_argument('--euclid_dir',  default=None)
     p.add_argument('--out_dir',     required=True, help='Output directory for checkpoints + labels')
     p.add_argument('--rounds',      type=int, default=2, help='Number of self-training rounds')
+    p.add_argument('--start_round', type=int, default=1,
+                   help='Round number to start from (default 1; use 2 to continue from an existing round-1 checkpoint)')
     p.add_argument('--epochs',      type=int, default=100, help='Epochs per round')
     p.add_argument('--batch_size',  type=int, default=8)
     p.add_argument('--lr',          type=float, default=1e-4)
@@ -256,6 +263,8 @@ def main():
                         '(model says "this is not a real source in 10-band space")')
     p.add_argument('--match_radius', type=float, default=0.01,
                    help='Normalized distance below which a prediction matches an existing label')
+    p.add_argument('--init_checkpoint', default=None,
+                   help='Existing detector checkpoint to bootstrap from when start_round > 1')
     p.add_argument('--wandb_project', default=None)
     args = p.parse_args()
 
@@ -264,8 +273,33 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
 
     extra_labels_path = None
+    init_checkpoint = args.init_checkpoint
 
-    for round_num in range(1, args.rounds + 1):
+    if args.start_round < 1 or args.start_round > args.rounds:
+        raise ValueError(f'--start_round must be between 1 and --rounds ({args.rounds})')
+
+    if args.start_round > 1 and not init_checkpoint:
+        raise ValueError('--init_checkpoint is required when --start_round > 1')
+
+    if args.start_round > 1:
+        prior_round = args.start_round - 1
+        print(f'\n--- Bootstrapping round {args.start_round} from {init_checkpoint} ---')
+        promoted, demoted_labels = _refine_labels(
+            feature_dir=args.feature_dir,
+            checkpoint=init_checkpoint,
+            rubin_dir=args.rubin_dir,
+            euclid_dir=args.euclid_dir,
+            nsig=args.nsig,
+            promote_conf=args.promote_conf,
+            demote_conf=args.demote_conf,
+            match_radius=args.match_radius,
+            device=device,
+        )
+        extra_labels_path = str(out_dir / f'refined_labels_round{prior_round}.pt')
+        torch.save({'promoted': promoted, 'demoted': demoted_labels}, extra_labels_path)
+        print(f'Saved refined labels to {extra_labels_path}')
+
+    for round_num in range(args.start_round, args.rounds + 1):
         print(f'\n{"#"*60}')
         print(f'# SELF-TRAINING ROUND {round_num}/{args.rounds}')
         print(f'{"#"*60}')
@@ -278,6 +312,7 @@ def main():
             euclid_dir=args.euclid_dir,
             out_path=ckpt_path,
             extra_labels=extra_labels_path,
+            init_checkpoint=init_checkpoint,
             epochs=args.epochs,
             batch_size=args.batch_size,
             lr=args.lr,
@@ -287,6 +322,7 @@ def main():
             wandb_project=args.wandb_project,
             wandb_name=f'round{round_num}',
         )
+        init_checkpoint = None
 
         # Refine labels for next round: promote novel + demote artifacts
         if round_num < args.rounds:

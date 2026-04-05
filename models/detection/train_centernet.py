@@ -3,11 +3,11 @@
 Usage
 -----
     python detection/train_centernet.py \
-        --rubin_dir    ../data/rubin_tiles_ecdfs \
-        --euclid_dir   ../data/euclid_tiles_ecdfs \
-        --encoder_ckpt ../checkpoints/jaisp_v7_baseline/checkpoint_best.pt \
-        --out          ../checkpoints/centernet_v7.pt \
-        --epochs 100 --wandb_project jaisp-detection
+        --rubin_dir    ../data/rubin_tiles_all \
+        --euclid_dir   ../data/euclid_tiles_all \
+        --encoder_ckpt ../checkpoints/jaisp_v7_tiles_all_ddp_online/checkpoint_best.pt \
+        --out          ../checkpoints/centernet_v7_tiles_all_live.pt \
+        --epochs 60 --wandb_project jaisp-detection
 """
 
 import argparse
@@ -280,6 +280,16 @@ def train(args):
             predict_profile=args.predict_profile,
         ).to(device)
 
+    if args.init_checkpoint:
+        ckpt = torch.load(args.init_checkpoint, map_location='cpu', weights_only=True)
+        missing, unexpected = model.load_state_dict(ckpt['state_dict'], strict=False)
+        missing_non_encoder = [k for k in missing if not k.startswith('encoder.')]
+        if missing_non_encoder:
+            print(f'  [warn] Missing init-checkpoint keys: {missing_non_encoder}')
+        if unexpected:
+            print(f'  [warn] Unexpected init-checkpoint keys: {unexpected}')
+        print(f'  Initialized detector weights from {args.init_checkpoint}')
+
     n_train = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f'Trainable parameters: {n_train / 1e6:.2f}M')
 
@@ -419,6 +429,8 @@ if __name__ == '__main__':
                         'If provided, skips encoder and trains on cached features (fast).')
     p.add_argument('--extra_labels',    default=None,
                    help='Extra pseudo-labels .pt from self-training round')
+    p.add_argument('--init_checkpoint', default=None,
+                   help='Optional detector checkpoint to initialize from before training')
     p.add_argument('--out',              default='../checkpoints/centernet_v7.pt')
     p.add_argument('--epochs',           type=int,   default=100)
     p.add_argument('--batch_size',       type=int,   default=8,

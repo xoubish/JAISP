@@ -3,6 +3,7 @@
 import argparse
 import contextlib
 import copy
+from datetime import timedelta
 import os
 import random
 from collections import defaultdict
@@ -93,12 +94,16 @@ class JAISPTrainerV7:
         wandb_project: str = "JAISP-Foundation-v7",
         wandb_name: str = None,
         seed: int = 42,
+        ddp_timeout_minutes: int = 120,
+        checkpoint_every_n_epochs: int = 2,
+        persistent_workers: bool = False,
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
     ):
         self.rank = int(os.environ.get("RANK", "0"))
         self.local_rank = int(os.environ.get("LOCAL_RANK", "0"))
         self.world_size = int(os.environ.get("WORLD_SIZE", "1"))
         self.distributed = self.world_size > 1
+        self.ddp_timeout_minutes = int(ddp_timeout_minutes)
 
         requested_device = torch.device(device)
         if self.distributed and not dist.is_initialized():
@@ -110,9 +115,13 @@ class JAISPTrainerV7:
                     init_method=init_method,
                     rank=self.rank,
                     world_size=self.world_size,
+                    timeout=timedelta(minutes=self.ddp_timeout_minutes),
                 )
             else:
-                dist.init_process_group(backend=backend)
+                dist.init_process_group(
+                    backend=backend,
+                    timeout=timedelta(minutes=self.ddp_timeout_minutes),
+                )
 
         if requested_device.type == "cuda" and torch.cuda.is_available():
             if self.distributed:
@@ -138,6 +147,8 @@ class JAISPTrainerV7:
         self.batch_size = int(batch_size)
         self.num_workers = int(num_workers)
         self.seed = int(seed)
+        self.checkpoint_every_n_epochs = int(checkpoint_every_n_epochs)
+        self.persistent_workers = bool(persistent_workers)
 
         random.seed(self.seed)
         np.random.seed(self.seed)
@@ -302,7 +313,7 @@ class JAISPTrainerV7:
             shuffle=(shuffle and sampler is None),
             num_workers=self.num_workers,
             pin_memory=(self.device.type == "cuda"),
-            persistent_workers=(self.num_workers > 0),
+            persistent_workers=(self.num_workers > 0 and self.persistent_workers),
             drop_last=False,
             collate_fn=collate_v6,
             generator=generator,
@@ -693,11 +704,9 @@ class JAISPTrainerV7:
         }
         torch.save(ckpt, self.output_dir / f"checkpoint_{tag}.pt")
 
-    def load_checkpoint(self, path: str) -> int:
-        ckpt = torch.load(path, map_location=self.device)
+    def load_checkpoint(self, path: str, weights_only: bool = False) -> int:
+        ckpt = torch.load(path, map_location=self.device, weights_only=False)
         self._raw_model().load_state_dict(ckpt["model"])
-        self.optimizer.load_state_dict(ckpt["optimizer"])
-        self.scheduler.load_state_dict(ckpt["scheduler"])
         self.best_val_loss = ckpt.get("best_val_loss", float("inf"))
         self.global_step = ckpt.get("global_step", 0)
         if "train_indices" in ckpt and "val_indices" in ckpt:
@@ -710,22 +719,34 @@ class JAISPTrainerV7:
                 generator_seed=self.seed,
             )
             self.val_loader = self._make_subset_loader(self.val_dataset, self.val_indices, shuffle=False)
+        if not weights_only:
+            self.optimizer.load_state_dict(ckpt["optimizer"])
+            self.scheduler.load_state_dict(ckpt["scheduler"])
         if "rng_state" in ckpt:
-            self.rng.set_state(ckpt["rng_state"])
+            if not weights_only:
+                self.rng.set_state(ckpt["rng_state"])
         if "python_random_state" in ckpt:
-            random.setstate(ckpt["python_random_state"])
+            if not weights_only:
+                random.setstate(ckpt["python_random_state"])
         if "torch_rng_state" in ckpt:
-            torch.set_rng_state(ckpt["torch_rng_state"])
+            if not weights_only:
+                torch.set_rng_state(ckpt["torch_rng_state"])
         if torch.cuda.is_available() and ckpt.get("cuda_rng_state_all") is not None:
-            torch.cuda.set_rng_state_all(ckpt["cuda_rng_state_all"])
+            if not weights_only:
+                torch.cuda.set_rng_state_all(ckpt["cuda_rng_state_all"])
+        if weights_only:
+            resume_epoch = int(ckpt["epoch"])
+            for _ in range(resume_epoch + 1):
+                self.scheduler.step()
         return int(ckpt["epoch"])
 
-    def train(self, resume_from: str = None) -> None:
+    def train(self, resume_from: str = None, resume_weights_only: bool = False) -> None:
         start_epoch = 0
         if resume_from:
-            start_epoch = self.load_checkpoint(resume_from) + 1
+            start_epoch = self.load_checkpoint(resume_from, weights_only=resume_weights_only) + 1
             if self.is_main_process:
-                print(f"Resumed from {resume_from} (epoch {start_epoch})")
+                mode = "weights-only" if resume_weights_only else "full-state"
+                print(f"Resumed from {resume_from} (epoch {start_epoch}, mode={mode})")
 
         for epoch in range(start_epoch, self.epochs):
             train_metrics = self._train_epoch(epoch)
@@ -757,7 +778,7 @@ class JAISPTrainerV7:
                     f"val {val_loss:.4f}{'*' if is_best else ''}"
                 )
 
-                if (epoch + 1) % 10 == 0:
+                if self.checkpoint_every_n_epochs > 0 and (epoch + 1) % self.checkpoint_every_n_epochs == 0:
                     self._save_checkpoint(epoch, "latest")
                 if (epoch + 1) % self.vis_every == 0 or epoch == 0:
                     self._visualize(epoch)
@@ -782,6 +803,11 @@ def build_argparser() -> argparse.ArgumentParser:
     p.add_argument("--euclid_dir", required=True)
     p.add_argument("--output_dir", default="./checkpoints/jaisp_v7")
     p.add_argument("--resume", default=None)
+    p.add_argument(
+        "--resume_weights_only",
+        action="store_true",
+        help="Resume model weights and split metadata, but reinitialize optimizer/scheduler/RNG state",
+    )
     p.add_argument("--stem_ch", type=int, default=64)
     p.add_argument("--hidden_ch", type=int, default=256)
     p.add_argument("--blocks_per_stage", type=int, default=2)
@@ -803,6 +829,13 @@ def build_argparser() -> argparse.ArgumentParser:
     p.add_argument("--wandb_project", default="JAISP-Foundation-v7")
     p.add_argument("--wandb_name", default=None)
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--ddp_timeout_minutes", type=int, default=120)
+    p.add_argument("--checkpoint_every_n_epochs", type=int, default=2)
+    p.add_argument(
+        "--persistent_workers",
+        action="store_true",
+        help="Keep DataLoader workers alive across epochs (faster, but sometimes less stable on shared filesystems)",
+    )
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     return p
 
@@ -811,5 +844,6 @@ if __name__ == "__main__":
     args = build_argparser().parse_args()
     trainer_kwargs = vars(args).copy()
     trainer_kwargs.pop("resume", None)
+    resume_weights_only = trainer_kwargs.pop("resume_weights_only", False)
     trainer = JAISPTrainerV7(**trainer_kwargs)
-    trainer.train(resume_from=args.resume)
+    trainer.train(resume_from=args.resume, resume_weights_only=resume_weights_only)
