@@ -60,6 +60,15 @@ The repo currently contains two compatible tile products:
 
 Both products use the same NPZ schemas. In the flat set, filenames encode tract/patch metadata directly, for example `tile_x02816_y00512_tract5063_patch_14.npz` and `tile_x02816_y00512_tract5063_patch_14_euclid.npz`.
 
+![Tile coverage map](docs/figures/downloaded_patches.png)
+*Left: Spatial distribution of Rubin tile centers by patch, covering the ECDFS field. Right: Tile counts per patch showing matched Rubin+Euclid pair availability.*
+
+![10-band science tile](docs/figures/random_10bandtile.png)
+*All 10 bands for a sample matched tile. Top row: Rubin u/g/r/i/z/y (512x512, 0.2"/px). Bottom row: Euclid VIS (1050x1050, 0.1"/px) and NISP Y/J/H (350x350, 0.3"/px). Note the sharper VIS resolution and the different noise properties across bands.*
+
+![10-band RMS tile](docs/figures/random_10bandtile_rms.png)
+*Per-pixel RMS (noise) maps for the same tile, derived from the variance arrays in the NPZ files. Rubin RMS shows chip-edge effects and depth variations. Euclid NISP RMS reveals satellite trails and detector artifacts. These maps are used for per-pixel noise normalization in the foundation model BandStems and in the astrometry matcher.*
+
 ### Tiling and Overlap
 
 Tiles are laid out on a regular grid with 256-pixel stride in both x and y, but each Rubin tile is 512x512 pixels. This means adjacent tiles overlap by **256 pixels (50%)** in each direction. A given point on the sky appears in up to 4 overlapping tiles.
