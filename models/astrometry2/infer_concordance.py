@@ -85,7 +85,7 @@ def load_model(checkpoint_path: str, device: torch.device,
     Elif v6_checkpoint is provided, loads a V6AstrometryMatcher.
     Otherwise loads a baseline LocalAstrometryMatcher.
     """
-    ckpt = torch.load(checkpoint_path, map_location=device)
+    ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
 
     if v7_checkpoint:
         if not _V7_AVAILABLE:

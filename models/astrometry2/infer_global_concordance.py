@@ -30,6 +30,7 @@ Usage
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Optional
@@ -312,12 +313,15 @@ def solve_global_field(
 # FITS output
 # ============================================================
 
-def write_global_fits(
+def _build_band_hdus(
     result: dict,
-    output_path: str,
     target_band: str,
-) -> None:
-    """Write the global concordance field to a FITS file."""
+) -> list:
+    """Build FITS HDUs for one band's global concordance field.
+
+    Returns a list of ImageHDUs (DRA, DDE, optionally COV) with a band prefix
+    in the extension name so multiple bands coexist in one FITS file.
+    """
     mesh      = result['mesh']
     ra_grid   = result['ra_grid']
     dec_grid  = result['dec_grid']
@@ -325,8 +329,6 @@ def write_global_fits(
     dec_ref   = result['dec_ref']
     dstep     = result['dstep_arcsec']
 
-    # Build a WCS so downstream code can locate the mesh on the sky
-    # Axes: axis 1 = RA (mesh columns), axis 2 = Dec (mesh rows)
     w = WCS(naxis=2)
     w.wcs.crpix  = [1.0, 1.0]
     w.wcs.crval  = [float(ra_grid[0]), float(dec_grid[0])]
@@ -335,14 +337,21 @@ def write_global_fits(
     w.wcs.ctype  = ['RA---TAN', 'DEC--TAN']
     wcs_header   = w.to_header()
 
-    def _make_hdu(data, name, comment):
+    # Band key for extension names: e.g. "r", "nisp_Y"
+    if target_band.startswith('rubin_'):
+        band_key = target_band.split('_', 1)[1]
+    else:
+        band_key = target_band  # nisp_Y etc.
+
+    def _make_hdu(data, suffix, comment):
+        name = f'{band_key}.{suffix}'
         hdu = fits.ImageHDU(data=data.astype(np.float32), name=name)
         hdu.header.update(wcs_header)
         hdu.header['DSTEP']    = (float(dstep),   'Mesh step size in arcsec')
         hdu.header['DUNIT']    = ('arcsec',        'Unit of offset values')
         hdu.header['INTERP']   = ('bilinear',      'Recommended interpolation method')
         hdu.header['CONCRDNC'] = (True,            'Global concordance field')
-        hdu.header['RBNBAND']  = (target_band,     'Rubin band')
+        hdu.header['TGTBAND']  = (target_band,     'Target band')
         hdu.header['REFFRAME'] = ('euclid_VIS',    'Reference astrometric frame')
         hdu.header['SOLVETYP'] = ('global_sky',    'Global sky-coord field solve')
         hdu.header['RA_REF']   = (float(ra_ref),   'Field centroid RA (deg)')
@@ -353,23 +362,35 @@ def write_global_fits(
         hdu.header['COMMENT']  = comment
         return hdu
 
-    hdus = [fits.PrimaryHDU()]
-    hdus[0].header['CONCRDNC'] = (True, 'JAISP global sky-coord concordance product')
-    hdus[0].header['SOLVETYP'] = ('global_sky', 'Single field fitted over full mosaic')
-    hdus[0].header['RBNBAND']  = (target_band,  'Rubin band')
-    hdus[0].header['NSRC']     = (result['n_sources'], 'Total sources in solve')
-
-    hdus.append(_make_hdu(mesh['dra'],  'GLOBAL.DRA', 'DeltaRA* offset field (arcsec)'))
-    hdus.append(_make_hdu(mesh['ddec'], 'GLOBAL.DDE', 'DeltaDec offset field (arcsec)'))
+    hdus = []
+    hdus.append(_make_hdu(mesh['dra'],  'DRA', f'DeltaRA* offset field ({target_band}, arcsec)'))
+    hdus.append(_make_hdu(mesh['ddec'], 'DDE', f'DeltaDec offset field ({target_band}, arcsec)'))
     if 'coverage' in mesh and mesh['coverage'] is not None:
-        hdus.append(_make_hdu(mesh['coverage'], 'GLOBAL.COV',
-                              'Min distance to nearest source (arcsec)'))
+        hdus.append(_make_hdu(mesh['coverage'], 'COV',
+                              f'Min distance to nearest source ({target_band}, arcsec)'))
+    return hdus
 
-    fits.HDUList(hdus).writeto(output_path, overwrite=True)
-    print(f'Wrote global concordance: {output_path}')
-    print(f'  Mesh shape: {mesh["dra"].shape}  ({dstep}" per pixel)')
-    print(f'  Sources:    {result["n_sources"]}')
-    print(f'  Grid:       {result["grid_shape"][0]}×{result["grid_shape"][1]}')
+
+def write_global_fits(
+    band_hdus: list,
+    output_path: str,
+    target_bands: list,
+    n_sources_total: int = 0,
+) -> None:
+    """Write the combined multi-band global concordance FITS."""
+    primary = fits.PrimaryHDU()
+    primary.header['CONCRDNC'] = (True, 'JAISP global sky-coord concordance product')
+    primary.header['SOLVETYP'] = ('global_sky', 'Single field fitted over full mosaic')
+    primary.header['NBANDS']   = (len(target_bands), 'Number of target bands')
+    primary.header['NSRCTOT']  = (n_sources_total, 'Total sources across all bands')
+    for i, b in enumerate(target_bands):
+        primary.header[f'BAND{i}'] = (b, f'Target band {i}')
+
+    all_hdus = [primary] + band_hdus
+    fits.HDUList(all_hdus).writeto(output_path, overwrite=True)
+    print(f'\nWrote global concordance: {output_path}')
+    print(f'  Bands: {target_bands}')
+    print(f'  Extensions: {len(band_hdus)} ({len(band_hdus)//3} bands x DRA/DDE/COV)')
 
 
 # ============================================================
@@ -493,18 +514,47 @@ def main():
     device = torch.device(args.device if args.device else ('cuda' if torch.cuda.is_available() else 'cpu'))
 
     v6_ckpt = getattr(args, 'v6_checkpoint', '') or ''
-    model, ckpt = load_model(args.checkpoint, device, v6_checkpoint=v6_ckpt)
+    v7_ckpt = getattr(args, 'v7_checkpoint', '') or ''
+    model, ckpt = load_model(args.checkpoint, device,
+                             v6_checkpoint=v6_ckpt, v7_checkpoint=v7_ckpt)
 
-    target_band = _normalize_any_band(
-        str(ckpt.get('target_band', ckpt.get('args', {}).get('rubin_band', 'r')))
-    )
-    if target_band == 'multiband':
-        target_band = 'rubin_r'
+    # Optional neural detector for source detection
+    detr_ckpt = getattr(args, 'detector_checkpoint', '') or ''
+    if detr_ckpt and v7_ckpt:
+        from train_astro_v7 import _load_detector
+        args._detr_detector = _load_detector(detr_ckpt, v7_ckpt, device)
+    else:
+        args._detr_detector = None
 
-    input_bands_raw = [str(x) for x in ckpt.get('input_bands', [target_band])]
+    # Determine target bands to process
+    target_band_raw = str(ckpt.get('target_band', ckpt.get('args', {}).get('rubin_band', 'r')))
+    is_multiband = target_band_raw == 'multiband'
+
+    if is_multiband and getattr(args, 'all_bands', False):
+        ckpt_target_bands = [str(b) for b in ckpt.get('target_bands', []) if str(b).strip()]
+        if ckpt_target_bands:
+            target_bands_to_process = []
+            for b in ckpt_target_bands:
+                try:
+                    target_bands_to_process.append(_normalize_any_band(b))
+                except Exception:
+                    pass
+        else:
+            target_bands_to_process = ['rubin_r']
+        print(f'Processing all {len(target_bands_to_process)} bands: {target_bands_to_process}')
+    else:
+        if is_multiband:
+            target_bands_to_process = ['rubin_r']
+        else:
+            target_bands_to_process = [_normalize_any_band(target_band_raw)]
+
+    input_bands_raw = [str(x) for x in ckpt.get('input_bands', target_bands_to_process[:1])]
     input_bands = []
     for b in input_bands_raw:
-        nb = _normalize_any_band(b)
+        try:
+            nb = _normalize_any_band(b)
+        except Exception:
+            continue
         if nb not in input_bands:
             input_bands.append(nb)
     detect_bands = normalize_rubin_bands(args.detect_bands) or [f'rubin_{b}' for b in ('g','r','i','z')]
@@ -513,59 +563,87 @@ def main():
     if args.tile_id:
         pairs = [(t, r, e) for t, r, e in pairs if t == args.tile_id]
 
-    print(f'Collecting predictions from {len(pairs)} tiles...')
-    sources = collect_all_predictions(
-        model, device, pairs, target_band, input_bands, detect_bands, args,
-    )
-    print(f'Total sources: {sources["n_sources"] if "n_sources" in sources else len(sources["ra"])}')
+    all_summaries = []
+    all_band_hdus = []
+    completed_bands = []
+    n_sources_total = 0
 
-    print('\nFitting global field...')
-    result = solve_global_field(
-        sources,
-        dstep_arcsec    = args.dstep_arcsec,
-        grid_h          = getattr(args, 'grid_h_global', 32),
-        grid_w          = getattr(args, 'grid_w_global', 32),
-        smooth_lambda   = args.smooth_lambda,
-        anchor_lambda   = args.anchor_lambda,
-        auto_grid       = getattr(args, 'auto_grid', False),
-        clip_arcsec     = getattr(args, 'clip_arcsec', 0.3),
-        solver          = getattr(args, 'solver', 'grid'),
-        nn_hidden_dim   = getattr(args, 'nn_hidden_dim', 64),
-        nn_layers       = getattr(args, 'nn_layers', 4),
-        nn_steps        = getattr(args, 'nn_steps', 2000),
-        nn_lr           = getattr(args, 'nn_lr', 1e-3),
-        nn_weight_decay = getattr(args, 'nn_weight_decay', 1e-4),
-    )
+    for band_i, target_band in enumerate(target_bands_to_process):
+        print(f'\n{"="*60}')
+        print(f'[{band_i+1}/{len(target_bands_to_process)}] Target band: {target_band}')
+        print(f'{"="*60}')
 
-    # Summary stats
-    pred = sources['pred_offsets']
-    raw  = sources['raw_offsets']
-    pred_mag = np.hypot(pred[:, 0], pred[:, 1]) * 1000.0
-    raw_mag  = np.hypot(raw[:,  0], raw[:,  1]) * 1000.0
-    print(f'\nRaw WCS  median: {np.median(raw_mag):.1f} mas')
-    print(f'NN pred  median: {np.median(pred_mag):.1f} mas')
-    print(f'Field footprint: {result["field_shape_arcsec"][1]:.0f}" × {result["field_shape_arcsec"][0]:.0f}"')
+        print(f'Collecting predictions from {len(pairs)} tiles...')
+        sources = collect_all_predictions(
+            model, device, pairs, target_band, input_bands, detect_bands, args,
+        )
+        n_src = sources.get('n_sources', len(sources['ra']))
+        print(f'Total sources: {n_src}')
 
-    write_global_fits(result, args.output, target_band)
+        if n_src < 10:
+            print(f'  Skipping {target_band}: too few sources ({n_src})')
+            continue
 
-    if getattr(args, 'plot', ''):
-        from viz import plot_global_concordance
-        plot_global_concordance(result, sources, args.plot, target_band=target_band)
+        print(f'Fitting global field for {target_band}...')
+        result = solve_global_field(
+            sources,
+            dstep_arcsec    = args.dstep_arcsec,
+            grid_h          = getattr(args, 'grid_h_global', 32),
+            grid_w          = getattr(args, 'grid_w_global', 32),
+            smooth_lambda   = args.smooth_lambda,
+            anchor_lambda   = args.anchor_lambda,
+            auto_grid       = getattr(args, 'auto_grid', False),
+            clip_arcsec     = getattr(args, 'clip_arcsec', 0.3),
+            solver          = getattr(args, 'solver', 'grid'),
+            nn_hidden_dim   = getattr(args, 'nn_hidden_dim', 64),
+            nn_layers       = getattr(args, 'nn_layers', 4),
+            nn_steps        = getattr(args, 'nn_steps', 2000),
+            nn_lr           = getattr(args, 'nn_lr', 1e-3),
+            nn_weight_decay = getattr(args, 'nn_weight_decay', 1e-4),
+        )
 
-    if args.summary_json:
-        summary = {
-            'n_sources':    int(len(sources['ra'])),
-            'solver':       result['solver'],
-            'grid_shape':   list(result['grid_shape']),
-            'dstep_arcsec': result['dstep_arcsec'],
+        pred = sources['pred_offsets']
+        raw  = sources['raw_offsets']
+        pred_mag = np.hypot(pred[:, 0], pred[:, 1]) * 1000.0
+        raw_mag  = np.hypot(raw[:,  0], raw[:,  1]) * 1000.0
+        print(f'  Raw WCS  median: {np.median(raw_mag):.1f} mas')
+        print(f'  NN pred  median: {np.median(pred_mag):.1f} mas')
+        print(f'  Field footprint: {result["field_shape_arcsec"][1]:.0f}" x {result["field_shape_arcsec"][0]:.0f}"')
+
+        # Accumulate HDUs for combined FITS
+        band_hdus = _build_band_hdus(result, target_band)
+        all_band_hdus.extend(band_hdus)
+        completed_bands.append(target_band)
+        n_sources_total += n_src
+        print(f'  Mesh shape: {result["mesh"]["dra"].shape}  ({result["dstep_arcsec"]}" per pixel)')
+
+        if getattr(args, 'plot', ''):
+            from viz import plot_global_concordance
+            band_suffix = target_band.replace('rubin_', '').replace('nisp_', 'nisp_')
+            plot_base, plot_ext = os.path.splitext(args.plot)
+            plot_path = f'{plot_base}_{band_suffix}{plot_ext}' if len(target_bands_to_process) > 1 else args.plot
+            plot_global_concordance(result, sources, plot_path, target_band=target_band)
+
+        all_summaries.append({
+            'target_band':     target_band,
+            'n_sources':       int(n_src),
+            'solver':          result['solver'],
+            'grid_shape':      list(result['grid_shape']),
+            'dstep_arcsec':    result['dstep_arcsec'],
             'raw_median_mas':  float(np.median(raw_mag)),
             'pred_median_mas': float(np.median(pred_mag)),
-            'ra_ref':  result['ra_ref'],
-            'dec_ref': result['dec_ref'],
+            'ra_ref':          result['ra_ref'],
+            'dec_ref':         result['dec_ref'],
             'field_shape_arcsec': list(result['field_shape_arcsec']),
-        }
+        })
+
+    # Write single combined FITS with all bands
+    if all_band_hdus:
+        write_global_fits(all_band_hdus, args.output, completed_bands, n_sources_total)
+
+    if args.summary_json and all_summaries:
         with open(args.summary_json, 'w') as f:
-            json.dump(summary, f, indent=2)
+            json.dump(all_summaries, f, indent=2)
         print(f'Summary: {args.summary_json}')
 
 
