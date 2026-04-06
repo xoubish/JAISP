@@ -18,6 +18,12 @@ from typing import Dict, Optional, Tuple
 
 import numpy as np
 
+try:
+    import torch as _torch
+    _HAS_TORCH = True
+except ImportError:
+    _HAS_TORCH = False
+
 
 # ---------------------------------------------------------------------------
 # Grid node coordinates
@@ -273,26 +279,25 @@ def solve_control_grid_field(
     parts.append(anchor)
     design = np.concatenate(parts, axis=0)
 
-    coeffs = []
-    _warned_cond = False
-    for k in range(2):
-        yw = offsets_arcsec[:, k:k+1] * sqrt_w
-        rhs = yw[:, 0]
-        if d.size:
-            rhs = np.concatenate([rhs, np.zeros((d.shape[0],), dtype=np.float64)], axis=0)
-        rhs = np.concatenate([rhs, np.zeros(n_nodes, dtype=np.float64)], axis=0)
-        sol, _, rank, sv = np.linalg.lstsq(design, rhs, rcond=None)
-        if not _warned_cond and sv is not None and len(sv) > 1 and sv[-1] > 0:
-            cond = sv[0] / sv[-1]
-            if cond > 1e8:
-                print(
-                    f'[field_solver] WARNING: design matrix is ill-conditioned '
-                    f'(cond={cond:.1e}, rank={rank}/{n_nodes}). '
-                    f'Field may be unreliable — consider raising anchor_lambda or '
-                    f'using --auto-grid to reduce grid resolution.'
-                )
-                _warned_cond = True
-        coeffs.append(sol.reshape(grid_shape))
+    # Build RHS for both axes at once: [M, 2]
+    rhs_data = offsets_arcsec * sqrt_w  # [N, 2]
+    pad_smooth = np.zeros((d.shape[0], 2), dtype=np.float64) if d.size else np.zeros((0, 2), dtype=np.float64)
+    pad_anchor = np.zeros((n_nodes, 2), dtype=np.float64)
+    rhs = np.concatenate([rhs_data, pad_smooth, pad_anchor], axis=0)  # [M, 2]
+
+    # Solve via GPU (fast) or CPU fallback.
+    use_gpu = _HAS_TORCH and _torch.cuda.is_available() and design.shape[0] > 10000
+    if use_gpu:
+        design_t = _torch.from_numpy(design).float().cuda()
+        rhs_t = _torch.from_numpy(rhs).float().cuda()
+        sol_t = _torch.linalg.lstsq(design_t, rhs_t).solution
+        sol = sol_t.cpu().numpy().astype(np.float64)
+        del design_t, rhs_t, sol_t
+        _torch.cuda.empty_cache()
+    else:
+        sol, _, _, _ = np.linalg.lstsq(design, rhs, rcond=None)
+
+    coeffs = [sol[:, k].reshape(grid_shape) for k in range(2)]
 
     return {
         'x_nodes': x_nodes.astype(np.float32),

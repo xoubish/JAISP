@@ -58,14 +58,32 @@ from astrometry2.infer_concordance import (
     predict_tile,
 )
 from astrometry2.dataset import (
+    BAND_TO_IDX,
+    NISP_BAND_ORDER,
     discover_tile_pairs,
     normalize_rubin_bands,
+    extract_vis_patch,
+    local_vis_pixel_to_sky_matrix,
+    reproject_rubin_patch_to_vis,
+    reproject_nisp_patch_to_vis,
+    signal_mask_in_band,
+    project_vis_to_band_xy,
+    _normalize_patch,
+)
+from astrometry2.source_matching import (
+    RUBIN_BAND_ORDER,
+    _to_float32,
+    build_detection_image,
+    detect_sources,
+    match_sources_wcs,
+    refine_centroids_in_band,
+    safe_header_from_card_string,
 )
 from astrometry2.field_solver import auto_grid_shape, evaluate_control_grid_mesh, solve_control_grid_field
 
 
 # ============================================================
-# Global collection
+# Global collection (legacy single-band, kept for compatibility)
 # ============================================================
 
 def collect_all_predictions(
@@ -77,19 +95,7 @@ def collect_all_predictions(
     detect_bands: list,
     args,
 ) -> dict:
-    """
-    Run the NN on every tile and return all source predictions in a single
-    sky-coordinate frame.
-
-    Returns
-    -------
-    dict with:
-      ra, dec         : [N] source sky positions (degrees)
-      pred_offsets    : [N, 2] predicted (dRA*, dDec) in arcsec
-      raw_offsets     : [N, 2] raw WCS offsets in arcsec
-      sigma           : [N] predicted uncertainty in arcsec
-      tile_ids        : [N] which tile each source came from
-    """
+    """Single-band collection: runs predict_tile per tile. Kept for single-band use."""
     all_ra, all_dec = [], []
     all_pred, all_raw, all_sigma = [], [], []
     all_tile = []
@@ -102,16 +108,12 @@ def collect_all_predictions(
         if item is None:
             continue
 
-        vis_xy       = item['vis_xy']           # [M, 2] VIS pixel positions
-        pred_offsets = item['pred_offsets']      # [M, 2] arcsec
-        raw_offsets  = item['raw_offsets']       # [M, 2] arcsec
-        sigma        = item['sigma_arcsec']      # [M]
+        vis_xy       = item['vis_xy']
+        pred_offsets = item['pred_offsets']
+        raw_offsets  = item['raw_offsets']
+        sigma        = item['sigma_arcsec']
 
-        # Convert VIS pixel positions → sky coordinates using the VIS WCS
         try:
-            from astropy.wcs import WCS
-            from source_matching import safe_header_from_card_string
-            import numpy as np
             edata = np.load(euclid_path, allow_pickle=True)
             vwcs  = WCS(safe_header_from_card_string(edata['wcs_VIS'].item()))
             ra, dec = vwcs.wcs_pix2world(vis_xy[:, 0], vis_xy[:, 1], 0)
@@ -138,6 +140,285 @@ def collect_all_predictions(
         'sigma':        np.concatenate(all_sigma),
         'tile_ids':     all_tile,
     }
+
+
+# ============================================================
+# Multi-band collection: detect once, predict all bands
+# ============================================================
+
+def _load_nisp_data_local(edata) -> dict:
+    nisp_data = {}
+    for nb in NISP_BAND_ORDER:
+        img_key, wcs_key = f'img_{nb}', f'wcs_{nb}'
+        if img_key not in edata or wcs_key not in edata:
+            continue
+        try:
+            img = np.nan_to_num(_to_float32(edata[img_key]), nan=0.0)
+            wcs = WCS(safe_header_from_card_string(edata[wcs_key].item()))
+            nisp_data[nb] = (img, wcs)
+        except Exception:
+            continue
+    return nisp_data
+
+
+@torch.no_grad()
+def collect_all_predictions_multiband(
+    model,
+    device: torch.device,
+    pairs: list,
+    target_bands: list,
+    input_bands: list,
+    detect_bands: list,
+    args,
+) -> dict:
+    """Detect once per tile, predict all target bands from cached features.
+
+    Returns dict: target_band -> {ra, dec, pred_offsets, raw_offsets, sigma, tile_ids}
+    """
+    from astrometry2.dataset import detect_sources_multiband
+
+    batch_size = int(getattr(args, 'batch_size', 128))
+    patch_size = int(getattr(args, 'patch_size', 33))
+    model_n_target_bands = int(getattr(model, 'n_target_bands', 1))
+    use_band_idx = model_n_target_bands > 1
+
+    # Pre-validate band indices
+    band_idx_map = {}
+    for tb in target_bands:
+        bidx = BAND_TO_IDX.get(tb)
+        if use_band_idx and (bidx is None or bidx >= model_n_target_bands):
+            print(f'[warn] Skipping target band {tb}: band_idx={bidx} out of range')
+            continue
+        band_idx_map[tb] = bidx
+
+    # Accumulators per band
+    results = {tb: {'ra': [], 'dec': [], 'pred': [], 'raw': [], 'sigma': [], 'tiles': []}
+               for tb in band_idx_map}
+
+    _detr = getattr(args, '_detr_detector', None)
+
+    for ti, (tile_id, rubin_path, euclid_path) in enumerate(pairs):
+        try:
+            rdata = np.load(rubin_path, allow_pickle=True)
+            edata = np.load(euclid_path, allow_pickle=True)
+            rubin_cube = rdata['img']
+            vis_img = np.nan_to_num(_to_float32(edata['img_VIS']), nan=0.0)
+            rwcs = WCS(rdata['wcs_hdr'].item())
+            vhdr = safe_header_from_card_string(edata['wcs_VIS'].item())
+            vwcs = WCS(vhdr)
+        except Exception as exc:
+            continue
+
+        nisp_data = _load_nisp_data_local(edata)
+
+        # ---- DETECT ONCE ----
+        if _detr is not None:
+            ax, ay = detect_sources_multiband(
+                edata, rubin_cube, _detr, device,
+                conf_threshold=getattr(args, 'detector_conf_threshold', 0.3),
+            )
+            if ax.size == 0:
+                continue
+            vis_seed_xy = np.stack([ax, ay], axis=1).astype(np.float32)
+            vis_keep = signal_mask_in_band(
+                vis_img, vis_seed_xy,
+                radius=getattr(args, 'refine_radius', 3),
+                flux_floor_sigma=getattr(args, 'refine_flux_floor_sigma', 1.5),
+            )
+            if not vis_keep.any():
+                continue
+            vis_xy_base = refine_centroids_in_band(
+                vis_img, vis_seed_xy[vis_keep],
+                radius=getattr(args, 'refine_radius', 3),
+                flux_floor_sigma=getattr(args, 'refine_flux_floor_sigma', 1.5),
+            ).astype(np.float32)
+        else:
+            detect_bands_norm = [f'rubin_{b}' if not b.startswith('rubin_') else b for b in detect_bands]
+            rubin_det = build_detection_image(rubin_cube, detect_bands_norm,
+                                              clip_sigma=getattr(args, 'detect_clip_sigma', 8.0))
+            rx, ry = detect_sources(rubin_det,
+                                    nsig=getattr(args, 'rubin_nsig', 4.5),
+                                    smooth_sigma=getattr(args, 'rubin_smooth', 1.0),
+                                    min_dist=getattr(args, 'rubin_min_dist', 7),
+                                    max_sources=getattr(args, 'max_sources_rubin', 600))
+            vx, vy = detect_sources(vis_img,
+                                    nsig=getattr(args, 'vis_nsig', 4.0),
+                                    smooth_sigma=getattr(args, 'vis_smooth', 1.2),
+                                    min_dist=getattr(args, 'vis_min_dist', 9),
+                                    max_sources=getattr(args, 'max_sources_vis', 800))
+            matched = match_sources_wcs(
+                rx, ry, vx, vy, rwcs, vwcs,
+                max_sep_arcsec=getattr(args, 'max_sep_arcsec', 0.12),
+                clip_sigma=getattr(args, 'clip_sigma', 3.5),
+                max_matches=getattr(args, 'max_matches', 256),
+            )
+            if matched['vis_xy'].shape[0] < int(getattr(args, 'min_matches', 20)):
+                continue
+            vis_xy_base = matched['vis_xy'].astype(np.float32)
+
+        # ---- EXTRACT PATCHES ONCE (shared across all bands) ----
+        input_bands_norm = []
+        for b in input_bands:
+            nb = _normalize_any_band(b)
+            if nb not in input_bands_norm:
+                input_bands_norm.append(nb)
+
+        all_rubin_patches = []
+        all_vis_patches = []
+        all_pix2sky = []
+        for anchor_xy in vis_xy_base:
+            vis_patch = extract_vis_patch(vis_img, anchor_xy, patch_size)
+            band_patches = []
+            for band in input_bands_norm:
+                if band.startswith('rubin_'):
+                    idx = RUBIN_BAND_ORDER.index(band.split('_', 1)[1])
+                    if idx < rubin_cube.shape[0]:
+                        rubin_img = np.nan_to_num(_to_float32(rubin_cube[idx]), nan=0.0)
+                        band_patches.append(reproject_rubin_patch_to_vis(rubin_img, rwcs, vwcs, anchor_xy, patch_size))
+                    else:
+                        band_patches.append(np.zeros((patch_size, patch_size), dtype=np.float32))
+                else:
+                    nb = band.split('_', 1)[1]
+                    if nb in nisp_data:
+                        nisp_img, nwcs = nisp_data[nb]
+                        band_patches.append(reproject_nisp_patch_to_vis(nisp_img, nwcs, vwcs, anchor_xy, patch_size))
+                    else:
+                        band_patches.append(np.zeros((patch_size, patch_size), dtype=np.float32))
+            all_rubin_patches.append(np.stack(band_patches, axis=0))
+            all_vis_patches.append(vis_patch[None])
+            all_pix2sky.append(local_vis_pixel_to_sky_matrix(vwcs, anchor_xy))
+
+        if not all_rubin_patches:
+            continue
+
+        # Normalize patches
+        rubin_arr = np.stack(all_rubin_patches, axis=0)  # [N, C, H, W]
+        vis_arr = np.stack(all_vis_patches, axis=0)       # [N, 1, H, W]
+        for i in range(rubin_arr.shape[0]):
+            for c in range(rubin_arr.shape[1]):
+                rubin_arr[i, c] = _normalize_patch(rubin_arr[i, c])
+            vis_arr[i, 0] = _normalize_patch(vis_arr[i, 0])
+
+        rubin_t = torch.from_numpy(rubin_arr).float().to(device)
+        vis_t = torch.from_numpy(vis_arr).float().to(device)
+        pix2sky_t = torch.from_numpy(np.stack(all_pix2sky, axis=0)).float().to(device)
+
+        # ---- ENCODE ONCE ----
+        # Run encoder in batches, cache the encoded features
+        all_enc = {}
+        for i in range(0, rubin_t.shape[0], batch_size):
+            br = rubin_t[i:i+batch_size]
+            bv = vis_t[i:i+batch_size]
+            enc = model._encode(br, bv)
+            for key, val in enc.items():
+                if key not in all_enc:
+                    all_enc[key] = []
+                all_enc[key].append(val.cpu() if isinstance(val, torch.Tensor) else val)
+        # Concatenate
+        for key in all_enc:
+            if isinstance(all_enc[key][0], torch.Tensor):
+                all_enc[key] = torch.cat(all_enc[key], dim=0).to(device)
+
+        # VIS sky coordinates (shared)
+        vis_ra, vis_dec = vwcs.wcs_pix2world(vis_xy_base[:, 0], vis_xy_base[:, 1], 0)
+
+        # ---- PER-BAND: only MLP head + raw offset computation ----
+        refine_radius = int(getattr(args, 'refine_radius', 3))
+        refine_ffs = float(getattr(args, 'refine_flux_floor_sigma', 1.5))
+        min_matches = int(getattr(args, 'min_matches', 20))
+
+        for target_band, bidx in band_idx_map.items():
+            # Compute raw offsets for this target band
+            if target_band.startswith('rubin_'):
+                tidx = RUBIN_BAND_ORDER.index(target_band.split('_', 1)[1])
+                if tidx >= rubin_cube.shape[0]:
+                    continue
+                target_img = np.nan_to_num(_to_float32(rubin_cube[tidx]), nan=0.0)
+                target_xy_seed = project_vis_to_band_xy(vis_xy_base, vwcs, rwcs)
+                target_keep = signal_mask_in_band(target_img, target_xy_seed,
+                                                   radius=refine_radius, flux_floor_sigma=refine_ffs)
+                if int(target_keep.sum()) < min_matches:
+                    continue
+                vis_xy = vis_xy_base[target_keep]
+                target_xy = refine_centroids_in_band(target_img, target_xy_seed[target_keep],
+                                                      radius=refine_radius, flux_floor_sigma=refine_ffs)
+                t_ra, t_dec = rwcs.wcs_pix2world(target_xy[:, 0], target_xy[:, 1], 0)
+                v_ra, v_dec = vwcs.wcs_pix2world(vis_xy[:, 0], vis_xy[:, 1], 0)
+            elif target_band.startswith('nisp_'):
+                nb = target_band.split('_', 1)[1]
+                if nb not in nisp_data:
+                    continue
+                nisp_img, nwcs = nisp_data[nb]
+                nisp_xy_init = project_vis_to_band_xy(vis_xy_base, vwcs, nwcs)
+                nisp_radius = max(1, refine_radius // 3)
+                target_keep = signal_mask_in_band(nisp_img, nisp_xy_init,
+                                                   radius=nisp_radius, flux_floor_sigma=refine_ffs)
+                if int(target_keep.sum()) < min_matches:
+                    continue
+                vis_xy = vis_xy_base[target_keep]
+                nisp_xy = refine_centroids_in_band(nisp_img, nisp_xy_init[target_keep],
+                                                    radius=nisp_radius, flux_floor_sigma=refine_ffs)
+                t_ra, t_dec = nwcs.wcs_pix2world(nisp_xy[:, 0], nisp_xy[:, 1], 0)
+                v_ra, v_dec = vwcs.wcs_pix2world(vis_xy[:, 0], vis_xy[:, 1], 0)
+            else:
+                continue
+
+            raw_dra = (v_ra - t_ra) * np.cos(np.deg2rad(v_dec)) * 3600.0
+            raw_ddec = (v_dec - t_dec) * 3600.0
+            raw_offsets = np.stack([raw_dra, raw_ddec], axis=1).astype(np.float32)
+
+            # Subset the cached encoder features to kept sources
+            keep_idx = np.where(target_keep)[0]
+            enc_sub = {k: v[keep_idx] if isinstance(v, torch.Tensor) else v for k, v in all_enc.items()}
+
+            # Run MLP head with band embedding (cheap)
+            N = len(keep_idx)
+            preds, sigmas = [], []
+            for i in range(0, N, batch_size):
+                enc_batch = {k: v[i:i+batch_size].to(device) if isinstance(v, torch.Tensor) else v
+                             for k, v in enc_sub.items()}
+                bp2s = pix2sky_t[keep_idx[i:i+batch_size]]
+                if use_band_idx:
+                    bb = torch.full((min(batch_size, N-i),), int(bidx), dtype=torch.long, device=device)
+                else:
+                    bb = None
+                out = model._mlp_head(enc_batch, bp2s, bb, bp2s.shape[0], device)
+                preds.append(out['pred_offset_arcsec'].cpu().numpy())
+                sigmas.append(torch.exp(out['log_sigma']).cpu().numpy())
+
+            pred_offsets = np.concatenate(preds, axis=0).astype(np.float32)
+            sigma = np.concatenate(sigmas, axis=0).astype(np.float32)
+
+            r = results[target_band]
+            r['ra'].append(vis_ra[target_keep])
+            r['dec'].append(vis_dec[target_keep])
+            r['pred'].append(pred_offsets)
+            r['raw'].append(raw_offsets)
+            r['sigma'].append(sigma)
+            r['tiles'].extend([tile_id] * len(keep_idx))
+
+        # Free GPU memory for this tile
+        del rubin_t, vis_t, pix2sky_t, all_enc
+        torch.cuda.empty_cache()
+
+        if (ti + 1) % 50 == 0 or ti == 0:
+            n_src = sum(len(r['ra']) for r in results.values()) // max(1, len(results))
+            print(f'  [{ti+1}/{len(pairs)}] {tile_id}  (~{n_src} sources/band so far)')
+
+    # Concatenate per-band results
+    out = {}
+    for tb, r in results.items():
+        if not r['ra']:
+            continue
+        out[tb] = {
+            'ra':           np.concatenate(r['ra']),
+            'dec':          np.concatenate(r['dec']),
+            'pred_offsets': np.concatenate(r['pred'], axis=0),
+            'raw_offsets':  np.concatenate(r['raw'], axis=0),
+            'sigma':        np.concatenate(r['sigma']),
+            'tile_ids':     r['tiles'],
+        }
+    return out
 
 
 # ============================================================
@@ -568,15 +849,34 @@ def main():
     completed_bands = []
     n_sources_total = 0
 
+    # Use fast multiband path when processing multiple bands:
+    # detect once per tile, encode once, then predict each band via MLP head only.
+    if len(target_bands_to_process) > 1:
+        print(f'\nCollecting predictions for {len(target_bands_to_process)} bands '
+              f'from {len(pairs)} tiles (detect-once mode)...')
+        all_band_sources = collect_all_predictions_multiband(
+            model, device, pairs, target_bands_to_process,
+            input_bands, detect_bands, args,
+        )
+        print(f'Done. Bands with sources: {list(all_band_sources.keys())}')
+    else:
+        all_band_sources = None
+
     for band_i, target_band in enumerate(target_bands_to_process):
         print(f'\n{"="*60}')
         print(f'[{band_i+1}/{len(target_bands_to_process)}] Target band: {target_band}')
         print(f'{"="*60}')
 
-        print(f'Collecting predictions from {len(pairs)} tiles...')
-        sources = collect_all_predictions(
-            model, device, pairs, target_band, input_bands, detect_bands, args,
-        )
+        if all_band_sources is not None:
+            if target_band not in all_band_sources:
+                print(f'  Skipping {target_band}: no sources collected')
+                continue
+            sources = all_band_sources[target_band]
+        else:
+            print(f'Collecting predictions from {len(pairs)} tiles...')
+            sources = collect_all_predictions(
+                model, device, pairs, target_band, input_bands, detect_bands, args,
+            )
         n_src = sources.get('n_sources', len(sources['ra']))
         print(f'Total sources: {n_src}')
 
