@@ -169,13 +169,17 @@ def _adaptive_anchor_weights(
         return np.full(n_nodes, np.sqrt(max(0.0, anchor_lambda * 10.0)), dtype=np.float64)
 
     sigma = max(1.0, float(anchor_radius_px))
-    # dists[i, j] = squared distance from node i to source j
-    ddx = node_xy[:, 0:1] - vis_xy[:, 0:1].T  # [n_nodes, n_sources]
-    ddy = node_xy[:, 1:2] - vis_xy[:, 1:2].T
-    dist_sq = ddx ** 2 + ddy ** 2
-    kern = np.exp(-0.5 * dist_sq / (sigma ** 2))
-    # Weighted support at each node.
-    local_support = (kern * weights[None, :]).sum(axis=1)  # [n_nodes]
+    inv_2sig2 = 0.5 / (sigma ** 2)
+    # Chunked computation to avoid [n_nodes, n_sources] memory blowup.
+    local_support = np.zeros(n_nodes, dtype=np.float64)
+    chunk = max(1, min(8192, vis_xy.shape[0]))
+    for i in range(0, vis_xy.shape[0], chunk):
+        src_chunk = vis_xy[i:i+chunk]           # [C, 2]
+        w_chunk = weights[i:i+chunk]             # [C]
+        ddx = node_xy[:, 0:1] - src_chunk[:, 0:1].T  # [n_nodes, C]
+        ddy = node_xy[:, 1:2] - src_chunk[:, 1:2].T
+        kern = np.exp(-(ddx**2 + ddy**2) * inv_2sig2)
+        local_support += (kern * w_chunk[None, :]).sum(axis=1)
 
     # Use median support as the reference "well-constrained" level.
     base_support = max(float(np.median(local_support)), 1e-10)
@@ -259,42 +263,122 @@ def solve_control_grid_field(
         raise ValueError('Need at least 4 anchors to solve a control grid field.')
 
     x_nodes, y_nodes = _control_grid_nodes(vis_shape, grid_shape)
-    a = _basis_for_points(vis_xy, x_nodes, y_nodes)
     sqrt_w = np.sqrt(np.clip(weights, 1e-6, None))[:, None]
-    aw = a * sqrt_w
     d = _smoothness_rows(grid_shape)
-
-    # Anchor regularization -- adaptive or uniform.
     n_nodes = int(grid_shape[0]) * int(grid_shape[1])
-    if anchor_radius_px > 0:
-        per_node_sqrt_lam = _adaptive_anchor_weights(
-            x_nodes, y_nodes, vis_xy, weights, anchor_lambda, anchor_radius_px)
-        anchor = np.diag(per_node_sqrt_lam)
+
+    # For large source counts, use the normal equation approach:
+    # accumulate A^T W A and A^T W b in chunks, solve the K x K system.
+    # This is O(N*K^2) time and O(K^2) memory instead of O(N*K) memory.
+    use_normal_eq = vis_xy.shape[0] > 5000
+
+    if use_normal_eq:
+        AtA = np.zeros((n_nodes, n_nodes), dtype=np.float64)
+        Atb = np.zeros((n_nodes, 2), dtype=np.float64)
+
+        # Fast direct accumulation: each source touches only 4 grid nodes
+        # (bilinear), so we scatter 4x4 outer products directly into AtA
+        # without building the full [N, K] basis matrix.
+        xy = vis_xy.astype(np.float64)
+        gx, gy = int(x_nodes.size), int(y_nodes.size)
+        xs, ys = xy[:, 0], xy[:, 1]
+
+        ix = np.clip(np.searchsorted(x_nodes, xs, side='right').astype(np.int64) - 1, 0, max(0, gx - 2))
+        iy = np.clip(np.searchsorted(y_nodes, ys, side='right').astype(np.int64) - 1, 0, max(0, gy - 2))
+        ix1 = np.minimum(ix + 1, gx - 1)
+        iy1 = np.minimum(iy + 1, gy - 1)
+
+        x0, x1 = x_nodes[ix], x_nodes[ix1]
+        y0, y1 = y_nodes[iy], y_nodes[iy1]
+        dxn = np.where((x1 - x0) == 0, 1.0, x1 - x0)
+        dyn = np.where((y1 - y0) == 0, 1.0, y1 - y0)
+        tx = (xs - x0) / dxn
+        ty = (ys - y0) / dyn
+
+        # 4 bilinear weights and flat node indices per source
+        ww = np.stack([
+            (1 - tx) * (1 - ty),
+            tx * (1 - ty),
+            (1 - tx) * ty,
+            tx * ty,
+        ], axis=1)  # [N, 4]
+        ii = np.stack([
+            iy * gx + ix,
+            iy * gx + ix1,
+            iy1 * gx + ix,
+            iy1 * gx + ix1,
+        ], axis=1)  # [N, 4]
+
+        sw = sqrt_w.ravel()  # [N]
+
+        # Accumulate AtA and Atb in vectorized chunks
+        chunk = 8192
+        for ci in range(0, len(xs), chunk):
+            ce = min(ci + chunk, len(xs))
+            w_c = ww[ci:ce] * sw[ci:ce, None]  # [C, 4] weighted
+            i_c = ii[ci:ce]                     # [C, 4] indices
+            o_c = offsets_arcsec[ci:ce] * sw[ci:ce, None]  # [C, 2]
+
+            # Atb: scatter weighted offsets to nodes
+            for j in range(4):
+                np.add.at(Atb[:, 0], i_c[:, j], w_c[:, j] * o_c[:, 0])
+                np.add.at(Atb[:, 1], i_c[:, j], w_c[:, j] * o_c[:, 1])
+
+            # AtA: scatter 4x4 outer products
+            for j in range(4):
+                for k in range(j, 4):
+                    contrib = w_c[:, j] * w_c[:, k]
+                    np.add.at(AtA.ravel(), i_c[:, j] * n_nodes + i_c[:, k], contrib)
+                    if j != k:
+                        np.add.at(AtA.ravel(), i_c[:, k] * n_nodes + i_c[:, j], contrib)
+
+        # Smoothness regularization: D^T D
+        if d.size:
+            AtA += max(0.0, float(smooth_lambda)) * (d.T @ d)
+
+        # Anchor regularization
+        if anchor_radius_px > 0:
+            per_node_sqrt_lam = _adaptive_anchor_weights(
+                x_nodes, y_nodes, vis_xy, weights, anchor_lambda, anchor_radius_px)
+            AtA += np.diag(per_node_sqrt_lam ** 2)
+        else:
+            AtA += float(anchor_lambda) * np.eye(n_nodes, dtype=np.float64)
+
+        # Solve K x K system
+        use_gpu = _HAS_TORCH and _torch.cuda.is_available()
+        if use_gpu:
+            AtA_t = _torch.from_numpy(AtA).float().cuda()
+            Atb_t = _torch.from_numpy(Atb).float().cuda()
+            sol_t = _torch.linalg.solve(AtA_t, Atb_t)
+            sol = sol_t.cpu().numpy().astype(np.float64)
+            del AtA_t, Atb_t, sol_t
+            _torch.cuda.empty_cache()
+        else:
+            sol = np.linalg.solve(AtA, Atb)
+
     else:
-        anchor = np.sqrt(max(0.0, float(anchor_lambda))) * np.eye(n_nodes, dtype=np.float64)
+        # Small source count: build full design matrix (original path for per-tile solves).
+        a = _basis_for_points(vis_xy, x_nodes, y_nodes)
+        aw = a * sqrt_w
 
-    parts = [aw]
-    if d.size:
-        parts.append(np.sqrt(max(0.0, float(smooth_lambda))) * d)
-    parts.append(anchor)
-    design = np.concatenate(parts, axis=0)
+        if anchor_radius_px > 0:
+            per_node_sqrt_lam = _adaptive_anchor_weights(
+                x_nodes, y_nodes, vis_xy, weights, anchor_lambda, anchor_radius_px)
+            anchor = np.diag(per_node_sqrt_lam)
+        else:
+            anchor = np.sqrt(max(0.0, float(anchor_lambda))) * np.eye(n_nodes, dtype=np.float64)
 
-    # Build RHS for both axes at once: [M, 2]
-    rhs_data = offsets_arcsec * sqrt_w  # [N, 2]
-    pad_smooth = np.zeros((d.shape[0], 2), dtype=np.float64) if d.size else np.zeros((0, 2), dtype=np.float64)
-    pad_anchor = np.zeros((n_nodes, 2), dtype=np.float64)
-    rhs = np.concatenate([rhs_data, pad_smooth, pad_anchor], axis=0)  # [M, 2]
+        parts = [aw]
+        if d.size:
+            parts.append(np.sqrt(max(0.0, float(smooth_lambda))) * d)
+        parts.append(anchor)
+        design = np.concatenate(parts, axis=0)
 
-    # Solve via GPU (fast) or CPU fallback.
-    use_gpu = _HAS_TORCH and _torch.cuda.is_available() and design.shape[0] > 10000
-    if use_gpu:
-        design_t = _torch.from_numpy(design).float().cuda()
-        rhs_t = _torch.from_numpy(rhs).float().cuda()
-        sol_t = _torch.linalg.lstsq(design_t, rhs_t).solution
-        sol = sol_t.cpu().numpy().astype(np.float64)
-        del design_t, rhs_t, sol_t
-        _torch.cuda.empty_cache()
-    else:
+        rhs_data = offsets_arcsec * sqrt_w
+        pad_smooth = np.zeros((d.shape[0], 2), dtype=np.float64) if d.size else np.zeros((0, 2), dtype=np.float64)
+        pad_anchor = np.zeros((n_nodes, 2), dtype=np.float64)
+        rhs = np.concatenate([rhs_data, pad_smooth, pad_anchor], axis=0)
+
         sol, _, _, _ = np.linalg.lstsq(design, rhs, rcond=None)
 
     coeffs = [sol[:, k].reshape(grid_shape) for k in range(2)]

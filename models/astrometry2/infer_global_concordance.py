@@ -787,6 +787,11 @@ def build_parser() -> argparse.ArgumentParser:
                    help='[nn solver] initial learning rate (default 1e-3)')
     p.add_argument('--nn-weight-decay', type=float, default=1e-4,
                    help='[nn solver] L2 weight decay — higher = smoother field (default 1e-4)')
+    p.add_argument('--cache-predictions', type=str, default='',
+                   help='Path to save/load cached per-band predictions (.npz). '
+                        'If the file exists, skip detection+encoding and load from cache. '
+                        'If it does not exist, run detection+encoding and save to this path. '
+                        'This makes re-running with different grid/solver settings instant.')
     return p
 
 
@@ -849,18 +854,52 @@ def main():
     completed_bands = []
     n_sources_total = 0
 
-    # Use fast multiband path when processing multiple bands:
-    # detect once per tile, encode once, then predict each band via MLP head only.
-    if len(target_bands_to_process) > 1:
-        print(f'\nCollecting predictions for {len(target_bands_to_process)} bands '
-              f'from {len(pairs)} tiles (detect-once mode)...')
-        all_band_sources = collect_all_predictions_multiband(
-            model, device, pairs, target_bands_to_process,
-            input_bands, detect_bands, args,
-        )
-        print(f'Done. Bands with sources: {list(all_band_sources.keys())}')
+    # ---- Prediction cache: save/load the expensive detection+encoding step ----
+    cache_path = getattr(args, 'cache_predictions', '') or ''
+    all_band_sources = None
+
+    if cache_path and os.path.exists(cache_path):
+        print(f'\nLoading cached predictions from {cache_path}')
+        cache = np.load(cache_path, allow_pickle=True)
+        all_band_sources = {}
+        for tb in target_bands_to_process:
+            key = tb.replace('rubin_', '').replace('nisp_', 'nisp_')
+            if f'{key}_ra' in cache:
+                all_band_sources[tb] = {
+                    'ra':           cache[f'{key}_ra'],
+                    'dec':          cache[f'{key}_dec'],
+                    'pred_offsets': cache[f'{key}_pred'],
+                    'raw_offsets':  cache[f'{key}_raw'],
+                    'sigma':        cache[f'{key}_sigma'],
+                    'tile_ids':     list(cache[f'{key}_tiles']),
+                }
+        print(f'Loaded {len(all_band_sources)} bands from cache.')
     else:
-        all_band_sources = None
+        # Use fast multiband path when processing multiple bands:
+        # detect once per tile, encode once, then predict each band via MLP head only.
+        if len(target_bands_to_process) > 1:
+            print(f'\nCollecting predictions for {len(target_bands_to_process)} bands '
+                  f'from {len(pairs)} tiles (detect-once mode)...')
+            all_band_sources = collect_all_predictions_multiband(
+                model, device, pairs, target_bands_to_process,
+                input_bands, detect_bands, args,
+            )
+            print(f'Done. Bands with sources: {list(all_band_sources.keys())}')
+        # else: single-band, handled in the loop below
+
+        # Save cache if requested
+        if cache_path and all_band_sources is not None:
+            cache_dict = {}
+            for tb, src in all_band_sources.items():
+                key = tb.replace('rubin_', '').replace('nisp_', 'nisp_')
+                cache_dict[f'{key}_ra'] = src['ra']
+                cache_dict[f'{key}_dec'] = src['dec']
+                cache_dict[f'{key}_pred'] = src['pred_offsets']
+                cache_dict[f'{key}_raw'] = src['raw_offsets']
+                cache_dict[f'{key}_sigma'] = src['sigma']
+                cache_dict[f'{key}_tiles'] = np.array(src['tile_ids'], dtype=object)
+            np.savez_compressed(cache_path, **cache_dict)
+            print(f'Saved prediction cache to {cache_path}')
 
     for band_i, target_band in enumerate(target_bands_to_process):
         print(f'\n{"="*60}')
