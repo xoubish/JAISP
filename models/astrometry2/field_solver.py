@@ -402,9 +402,37 @@ def _evaluate_nodes_at_points(
     values: np.ndarray,
     xy: np.ndarray,
 ) -> np.ndarray:
-    a = _basis_for_points(xy, np.asarray(x_nodes, dtype=np.float64), np.asarray(y_nodes, dtype=np.float64))
-    vec = np.asarray(values, dtype=np.float64).reshape(-1)
-    return (a @ vec).astype(np.float32)
+    """Evaluate bilinear interpolation of grid values at arbitrary points.
+
+    Uses direct bilinear interpolation (O(N) time, O(1) per point) instead
+    of building the full [N, K] basis matrix.
+    """
+    x_nodes = np.asarray(x_nodes, dtype=np.float64)
+    y_nodes = np.asarray(y_nodes, dtype=np.float64)
+    values = np.asarray(values, dtype=np.float64)
+    xy = np.asarray(xy, dtype=np.float64)
+    gx, gy = x_nodes.size, y_nodes.size
+
+    xs, ys = xy[:, 0], xy[:, 1]
+    ix = np.clip(np.searchsorted(x_nodes, xs, side='right').astype(np.int64) - 1, 0, max(0, gx - 2))
+    iy = np.clip(np.searchsorted(y_nodes, ys, side='right').astype(np.int64) - 1, 0, max(0, gy - 2))
+    ix1 = np.minimum(ix + 1, gx - 1)
+    iy1 = np.minimum(iy + 1, gy - 1)
+
+    dx = x_nodes[ix1] - x_nodes[ix]
+    dy = y_nodes[iy1] - y_nodes[iy]
+    dx = np.where(dx == 0, 1.0, dx)
+    dy = np.where(dy == 0, 1.0, dy)
+    tx = (xs - x_nodes[ix]) / dx
+    ty = (ys - y_nodes[iy]) / dy
+
+    # Bilinear: sample the 4 corner values and interpolate
+    v00 = values[iy, ix]
+    v10 = values[iy, ix1]
+    v01 = values[iy1, ix]
+    v11 = values[iy1, ix1]
+    result = v00 * (1 - tx) * (1 - ty) + v10 * tx * (1 - ty) + v01 * (1 - tx) * ty + v11 * tx * ty
+    return result.astype(np.float32)
 
 
 def evaluate_control_grid_mesh(
@@ -444,14 +472,9 @@ def evaluate_control_grid_mesh(
     }
 
     if anchor_xy is not None and len(anchor_xy) > 0:
-        anchor_xy = np.asarray(anchor_xy, dtype=np.float64)
-        n_mesh = xy.shape[0]
-        min_dist = np.full(n_mesh, np.inf, dtype=np.float64)
-        chunk = 4096
-        for i in range(0, n_mesh, chunk):
-            mesh_chunk = xy[i:i + chunk]  # [C, 2]
-            d2 = ((mesh_chunk[:, None, :] - anchor_xy[None, :, :]) ** 2).sum(axis=2)
-            min_dist[i:i + chunk] = np.sqrt(d2.min(axis=1))
+        from scipy.spatial import cKDTree
+        tree = cKDTree(np.asarray(anchor_xy, dtype=np.float64))
+        min_dist, _ = tree.query(xy, k=1)
         out['coverage'] = min_dist.reshape(y_mesh.size, x_mesh.size).astype(np.float32)
 
     return out
