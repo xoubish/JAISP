@@ -1,12 +1,15 @@
 """JAISP Foundation v7 - mixed-resolution masked band prediction.
 
-Key idea:
-  - Keep Rubin, VIS, and NISP streams at native resolution in the early encoder.
-  - Fuse streams at a shared latent physical scale instead of forcing one input grid.
-  - Decode back to the target band's native resolution.
+Key ideas:
+  - Two instrument streams: Rubin (0.2"/px) and Euclid (0.1"/px from MER mosaics).
+  - Euclid stream uses concat+project to preserve per-band (VIS/Y/J/H) structure
+    through the encoder, enabling PSF-aware and color-aware representations.
+  - Rubin stream uses mean pooling (6 bands with similar PSFs, variable availability).
+  - Fuse streams at a shared latent physical scale (~0.8"/px).
+  - Decode back to the target band's native resolution with FiLM conditioning.
 
-This keeps v6's per-band stems and reconstruction objective while removing the
-Phase B Euclid-downsampling assumption.
+NISP Y/J/H data comes from Euclid MER mosaics at 0.1"/px (~1084x1084),
+identical to VIS. There is no separate NISP stream.
 """
 
 import sys
@@ -39,27 +42,84 @@ from jaisp_foundation_v6 import (
 
 RUBIN_BANDS = ["rubin_u", "rubin_g", "rubin_r", "rubin_i", "rubin_z", "rubin_y"]
 EUCLID_BANDS = ["euclid_VIS", "euclid_Y", "euclid_J", "euclid_H"]
-STREAM_ORDER = ["rubin", "vis", "nisp"]
+STREAM_ORDER = ["rubin", "euclid"]
 STREAM_PIXEL_SCALES = {
     "rubin": 0.2,
-    "vis": 0.1,
-    "nisp": 0.1,  # MER mosaics: NISP is resampled to 0.1"/px (same as VIS)
+    "euclid": 0.1,  # MER mosaics: all Euclid bands at 0.1"/px
 }
 STREAM_BRANCH_DEPTHS = {
-    "rubin": 2,  # 512 -> 128 at 0.8"/px
-    "vis": 3,    # 1050 -> ~131 at 0.8"/px
-    "nisp": 3,   # 1084 -> ~135 at 0.8"/px (MER mosaics, same scale as VIS)
+    "rubin": 2,   # 512 -> 128 at 0.8"/px
+    "euclid": 3,  # ~1084 -> ~135 at 0.8"/px
+}
+# Ordered band slots within each stream (used by StreamFuser for concat).
+STREAM_BAND_SLOTS = {
+    "rubin": RUBIN_BANDS,
+    "euclid": EUCLID_BANDS,
 }
 
 
 def band_group(band_name: str) -> str:
     if band_name in RUBIN_BANDS:
         return "rubin"
-    if band_name == "euclid_VIS":
-        return "vis"
-    if band_name in ("euclid_Y", "euclid_J", "euclid_H"):
-        return "nisp"
+    if band_name in EUCLID_BANDS:
+        return "euclid"
     raise KeyError(f"Unknown band: {band_name}")
+
+
+class StreamFuser(nn.Module):
+    """Fuse per-band BandStem outputs within a stream.
+
+    For streams with <=2 bands (or where concat is too expensive), uses mean.
+    For streams with >2 bands at the same resolution, uses fixed-slot concat
+    with zero-filled missing bands, followed by a 1x1 projection.
+
+    This preserves per-band information (PSF differences, color structure)
+    through the encoder instead of discarding it via mean pooling.
+    """
+
+    def __init__(self, band_names: List[str], stem_ch: int, out_ch: int, use_concat: bool):
+        super().__init__()
+        self.band_names = list(band_names)
+        self.band_to_slot = {b: i for i, b in enumerate(self.band_names)}
+        self.n_slots = len(self.band_names)
+        self.use_concat = use_concat and self.n_slots > 1
+
+        if self.use_concat:
+            self.proj = nn.Sequential(
+                nn.Conv2d(self.n_slots * stem_ch, out_ch, kernel_size=1, bias=False),
+                LayerNorm2d(out_ch),
+                nn.GELU(),
+            )
+        self.stem_ch = stem_ch
+        self.out_ch = out_ch
+
+    def forward(self, band_feats: Dict[str, torch.Tensor]) -> torch.Tensor:
+        """Fuse available band features.
+
+        Args:
+            band_feats: {band_name: [B, stem_ch, H, W]} for available bands.
+        Returns:
+            [B, out_ch, H, W] fused features.
+        """
+        if not band_feats:
+            raise ValueError("StreamFuser received no band features.")
+
+        if not self.use_concat:
+            # Mean pooling fallback.
+            feats = list(band_feats.values())
+            return torch.stack(feats, dim=0).mean(dim=0)
+
+        # Get reference shape from any available feature.
+        ref = next(iter(band_feats.values()))
+        B, C, H, W = ref.shape
+
+        # Allocate zero-filled slot tensor.
+        slots = ref.new_zeros(B, self.n_slots * C, H, W)
+        for band_name, feat in band_feats.items():
+            idx = self.band_to_slot[band_name]
+            slots[:, idx * C : (idx + 1) * C] = feat
+
+        return self.proj(slots)
 
 
 class StreamEncoder(nn.Module):
@@ -176,7 +236,15 @@ class TargetDecoder(nn.Module):
 
 
 class JAISPMixedEncoderV7(nn.Module):
-    """Encode mixed-resolution context bands and fuse them on a common latent grid."""
+    """Encode mixed-resolution context bands and fuse them on a common latent grid.
+
+    Two streams:
+      - rubin:  6 BandStems → mean pool → StreamEncoder(depth=2)
+      - euclid: 4 BandStems → concat+project → StreamEncoder(depth=3)
+
+    The Euclid stream preserves per-band structure (VIS/Y/J/H have different
+    PSFs: 0.2" vs 0.5") through the full encoder via fixed-slot concatenation.
+    """
 
     def __init__(
         self,
@@ -196,6 +264,12 @@ class JAISPMixedEncoderV7(nn.Module):
 
         self.stems = nn.ModuleDict({b: BandStem(stem_ch) for b in band_names})
         self.info_maps = nn.ModuleDict({b: InformationMap() for b in band_names})
+
+        # StreamFusers: Rubin uses mean, Euclid uses concat+project.
+        self.stream_fusers = nn.ModuleDict({
+            "rubin": StreamFuser(RUBIN_BANDS, stem_ch, stem_ch, use_concat=False),
+            "euclid": StreamFuser(EUCLID_BANDS, stem_ch, stem_ch, use_concat=True),
+        })
 
         self.stream_encoders = nn.ModuleDict({
             stream: StreamEncoder(
@@ -309,11 +383,12 @@ class JAISPMixedEncoderV7(nn.Module):
         context_images: Dict[str, torch.Tensor],
         context_rms: Dict[str, torch.Tensor],
     ) -> Dict:
-        stem_feats = {stream: [] for stream in STREAM_ORDER}
+        # Run BandStems and group by stream.
+        stem_feats = {stream: {} for stream in STREAM_ORDER}
         for band, img in context_images.items():
             rms = context_rms[band]
             stream = band_group(band)
-            stem_feats[stream].append(self.stems[band](img, rms))
+            stem_feats[stream][band] = self.stems[band](img, rms)
 
         fused_hw = self._estimate_fused_hw(context_images)
         stream_maps = {}
@@ -321,10 +396,10 @@ class JAISPMixedEncoderV7(nn.Module):
         stream_encoded = []
 
         for stream_idx, stream in enumerate(STREAM_ORDER):
-            feats = stem_feats[stream]
-            if not feats:
+            band_feats = stem_feats[stream]
+            if not band_feats:
                 continue
-            x = torch.stack(feats, dim=0).mean(dim=0)
+            x = self.stream_fusers[stream](band_feats)
             pyramids = self.stream_encoders[stream](x)
             stream_pyramids[stream] = pyramids
             latent = pyramids[-1]
@@ -385,8 +460,7 @@ class JAISPFoundationV7(nn.Module):
         num_bands = len(self.band_names)
         self.target_decoders = nn.ModuleDict({
             "rubin": TargetDecoder(hidden_ch, hidden_ch, [256, 128], num_bands, blocks_per_stage),
-            "vis": TargetDecoder(hidden_ch, hidden_ch, [256, 128, 64], num_bands, blocks_per_stage),
-            "nisp": TargetDecoder(hidden_ch, hidden_ch, [256, 128, 64], num_bands, blocks_per_stage),  # MER mosaics: same res as VIS
+            "euclid": TargetDecoder(hidden_ch, hidden_ch, [256, 128, 64], num_bands, blocks_per_stage),
         })
 
         self._init_weights()

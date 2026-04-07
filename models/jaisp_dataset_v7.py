@@ -27,13 +27,11 @@ from jaisp_dataset_v6 import (
 
 
 def band_group(band_name: str) -> str:
-    """Map a band name to its native-resolution stream."""
+    """Map a band name to its instrument stream."""
     if band_name in RUBIN_BANDS:
         return "rubin"
-    if band_name == "euclid_VIS":
-        return "vis"
-    if band_name in ("euclid_Y", "euclid_J", "euclid_H"):
-        return "nisp"
+    if band_name in EUCLID_BANDS:
+        return "euclid"
     raise KeyError(f"Unknown band: {band_name}")
 
 
