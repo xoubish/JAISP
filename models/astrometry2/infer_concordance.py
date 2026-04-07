@@ -356,7 +356,7 @@ def predict_tile(
             return None
         nisp_img, nwcs = nisp_data[nb]
         nisp_xy_init = project_vis_to_band_xy(vis_xy, vwcs, nwcs)
-        nisp_radius = max(1, int(args.refine_radius) // 3)
+        nisp_radius = int(args.refine_radius)  # MER mosaics: NISP at 0.1"/px, same as VIS
         target_keep = signal_mask_in_band(
             nisp_img,
             nisp_xy_init,

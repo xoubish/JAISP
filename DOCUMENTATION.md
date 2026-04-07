@@ -25,7 +25,7 @@ A self-supervised multi-instrument foundation model for precision cosmology with
 
 ## Motivation
 
-Rubin Observatory's LSST and ESA's Euclid will together produce the deepest, widest multi-wavelength imaging survey ever conducted. They observe the same sky, but through very different eyes: Rubin captures six optical bands (u through y) at 0.2 arcsec/pixel over a 512x512 tile grid, while Euclid provides a single ultra-sharp visible channel (VIS) at 0.1 arcsec/pixel on a 1050x1050 grid, plus three near-infrared bands (Y, J, H) at 0.3 arcsec/pixel. Jointly analyzing these instruments enables science that neither can achieve alone -- sharper source detection by combining Euclid's resolution with Rubin's depth, sub-pixel astrometric alignment across surveys, and more precise photometric measurements that leverage all 10 wavelength channels simultaneously.
+Rubin Observatory's LSST and ESA's Euclid will together produce the deepest, widest multi-wavelength imaging survey ever conducted. They observe the same sky, but through very different eyes: Rubin captures six optical bands (u through y) at 0.2 arcsec/pixel over a 512x512 tile grid, while Euclid provides a single ultra-sharp visible channel (VIS) at 0.1 arcsec/pixel on a ~1084x1084 grid, plus three near-infrared bands (Y, J, H) delivered as MER mosaics at the same 0.1 arcsec/pixel scale. Jointly analyzing these instruments enables science that neither can achieve alone -- sharper source detection by combining Euclid's resolution with Rubin's depth, sub-pixel astrometric alignment across surveys, and more precise photometric measurements that leverage all 10 wavelength channels simultaneously.
 
 The challenge is that these instruments have different pixel scales, point-spread functions, noise properties, and coordinate systems. JAISP addresses this by learning a single spatially precise shared representation from both instruments through self-supervised pretraining, then attaching lightweight task-specific heads for detection, astrometry, and photometry. The central insight -- arrived at after five failed iterations -- is that **pixel-space reconstruction** via a Masked Autoencoder (MAE), where the model hides one band and learns to reconstruct it from the remaining bands, forces the encoder to preserve the exact spatial layout needed by precision cosmology tasks. Latent-space objectives like JEPA and contrastive learning optimize for "feature similarity" but allow the network to discard sub-pixel spatial information, which is precisely what astrometry and photometry demand.
 
@@ -35,7 +35,7 @@ The system works in two layers. First, a foundation model is trained once throug
 
 ```
  Rubin tiles (6 bands, 512x512, 0.2"/px)
- Euclid tiles (VIS 1050x1050 @ 0.1"/px, NISP 350x350 @ 0.3"/px)
+ Euclid tiles (VIS + NISP Y/J/H, all ~1084x1084 @ 0.1"/px from MER mosaics)
          |
     [ Foundation Model (self-supervised MAE) ]
          |
@@ -64,7 +64,7 @@ Both products use the same NPZ schemas. In the flat set, filenames encode tract/
 *Left: Spatial distribution of Rubin tile centers by patch, covering the ECDFS field. Right: Tile counts per patch showing matched Rubin+Euclid pair availability.*
 
 ![10-band science tile](docs/figures/random_10bandtile.png)
-*All 10 bands for a sample matched tile. Top row: Rubin u/g/r/i/z/y (512x512, 0.2"/px). Bottom row: Euclid VIS (1050x1050, 0.1"/px) and NISP Y/J/H (350x350, 0.3"/px). Note the sharper VIS resolution and the different noise properties across bands.*
+*All 10 bands for a sample matched tile. Top row: Rubin u/g/r/i/z/y (512x512, 0.2"/px). Bottom row: Euclid VIS and NISP Y/J/H (all ~1084x1084, 0.1"/px from MER mosaics). Note the different noise properties across bands.*
 
 ![10-band RMS tile](docs/figures/random_10bandtile_rms.png)
 *Per-pixel RMS (noise) maps for the same tile, derived from the variance arrays in the NPZ files. Rubin RMS shows chip-edge effects and depth variations. Euclid NISP RMS reveals satellite trails and detector artifacts. These maps are used for per-pixel noise normalization in the foundation model BandStems and in the astrometry matcher.*
@@ -106,8 +106,8 @@ Pixel scale: 0.2 arcsec/pixel. Each tile covers roughly 102 x 102 arcsec on the 
 
 | Key              | Shape             | Pixel Scale    |
 |------------------|-------------------|----------------|
-| `img_VIS`        | `[~1050, ~1050]`  | 0.1 arcsec/px  |
-| `img_Y`, `img_J`, `img_H` | `[~350, ~350]` | 0.3 arcsec/px |
+| `img_VIS`        | `[~1084, ~1084]`  | 0.1 arcsec/px  |
+| `img_Y`, `img_J`, `img_H` | `[~1084, ~1084]` | 0.1 arcsec/px (MER mosaics) |
 | `var_VIS/Y/J/H`  | same              | Variance       |
 | `wcs_VIS/Y/J/H`  | string            | FITS WCS       |
 
@@ -213,16 +213,16 @@ See the next section for the full v7 architecture.
 
 The v7 architecture has three main stages: per-instrument encoding at native resolution, cross-instrument fusion at a shared physical scale, and target-specific decoding back to native resolution.
 
-**Encoding**: Each instrument has its own encoder branch. Rubin's six bands each pass through a BandStem (a small CNN that noise-normalizes and extracts local features), then the stem outputs are averaged and fed through a StreamEncoder with 2 ConvNeXt downsampling stages. VIS uses 3 stages (because it starts at finer resolution and needs more downsampling to reach the common scale). NISP uses 1 stage. The branch depths are chosen so that all streams converge to approximately 0.8 arcsec/pixel -- this is a physics-grounded design where the fusion happens at matched angular resolution, not matched pixel count.
+**Encoding**: Each instrument has its own encoder branch. Rubin's six bands each pass through a BandStem (a small CNN that noise-normalizes and extracts local features), then the stem outputs are averaged and fed through a StreamEncoder with 2 ConvNeXt downsampling stages. VIS and NISP both use 3 stages (they share the same 0.1"/px MER mosaic resolution and ~1084x1084 tile size). The branch depths are chosen so that all streams converge to approximately 0.8 arcsec/pixel -- this is a physics-grounded design where the fusion happens at matched angular resolution, not matched pixel count.
 
 **Fusion**: The encoded streams are interpolated to a common spatial grid, summed with learned stream identity embeddings (so the transformer can distinguish Rubin features from VIS features from NISP features), and passed through a transformer bottleneck with 4 layers and 8 attention heads operating on approximately 130x130 tokens with 2D sinusoidal positional encodings.
 
 **Decoding**: A TargetDecoder upsamples back to the target band's native resolution using transposed convolutions and skip connections. The skip connections are routed from whichever encoder pyramid level has the closest matching physical scale, fusing information across all instrument streams at each decoder stage. FiLM conditioning tells the decoder which specific band to reconstruct.
 
 ```
-Rubin bands (512x512, 0.2"/px)   -> BandStems -> Rubin branch (2 stages) --\
-VIS band   (1050x1050, 0.1"/px)  -> BandStem  -> VIS branch   (3 stages) --> latent @ 0.8"/px
-NISP bands (350x350, 0.3"/px)    -> BandStems -> NISP branch  (1 stage)  --/    (~130x130 tokens)
+Rubin bands (512x512, 0.2"/px)    -> BandStems -> Rubin branch (2 stages) --\
+VIS band   (~1084x1084, 0.1"/px)  -> BandStem  -> VIS branch   (3 stages) --> latent @ 0.8"/px
+NISP bands (~1084x1084, 0.1"/px)  -> BandStems -> NISP branch  (3 stages) --/  (~135x135 tokens)
                                                                                        |
                                                                         Stream mean fusion +
                                                                         learned stream embeddings
@@ -234,9 +234,11 @@ NISP bands (350x350, 0.3"/px)    -> BandStems -> NISP branch  (1 stage)  --/    
                                                                         pyramid skip connections
                                                                                        |
                                                                         Native-resolution output
-                                                                        (VIS->1050, NISP->350,
+                                                                        (VIS->~1084, NISP->~1084,
                                                                          Rubin->512)
 ```
+
+Note: NISP Y/J/H data comes from Euclid MER mosaics, already resampled to 0.1"/px (same as VIS).
 
 **Training**: Unlike v6's two-phase curriculum, v7 training is unified from epoch 1. Tiles with Euclid coverage use cross-instrument masking; Rubin-only tiles automatically fall back to within-instrument prediction. In the current flat training set, the Rubin side is effectively fully paired (790 matched pairs), so almost every sample participates in cross-instrument learning. The loss is the same InformationMap-weighted L1 as v6.
 

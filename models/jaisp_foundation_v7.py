@@ -43,12 +43,12 @@ STREAM_ORDER = ["rubin", "vis", "nisp"]
 STREAM_PIXEL_SCALES = {
     "rubin": 0.2,
     "vis": 0.1,
-    "nisp": 0.3,
+    "nisp": 0.1,  # MER mosaics: NISP is resampled to 0.1"/px (same as VIS)
 }
 STREAM_BRANCH_DEPTHS = {
     "rubin": 2,  # 512 -> 128 at 0.8"/px
     "vis": 3,    # 1050 -> ~131 at 0.8"/px
-    "nisp": 1,   # 350 -> 175, then interpolate to common latent grid
+    "nisp": 3,   # 1084 -> ~135 at 0.8"/px (MER mosaics, same scale as VIS)
 }
 
 
@@ -386,7 +386,7 @@ class JAISPFoundationV7(nn.Module):
         self.target_decoders = nn.ModuleDict({
             "rubin": TargetDecoder(hidden_ch, hidden_ch, [256, 128], num_bands, blocks_per_stage),
             "vis": TargetDecoder(hidden_ch, hidden_ch, [256, 128, 64], num_bands, blocks_per_stage),
-            "nisp": TargetDecoder(hidden_ch, hidden_ch, [256, 128], num_bands, blocks_per_stage),
+            "nisp": TargetDecoder(hidden_ch, hidden_ch, [256, 128, 64], num_bands, blocks_per_stage),  # MER mosaics: same res as VIS
         })
 
         self._init_weights()

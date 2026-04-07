@@ -821,7 +821,7 @@ def build_patch_samples_multiband(
                 continue
             nisp_img, nwcs = nisp_data[nb]
             nisp_xy_init = project_vis_to_band_xy(vis_xy, vwcs, nwcs)
-            nisp_radius = max(1, refine_radius // 3)
+            nisp_radius = refine_radius  # MER mosaics: NISP at 0.1"/px, same as VIS
             valid = signal_mask_in_band(
                 nisp_img,
                 nisp_xy_init,
@@ -833,7 +833,7 @@ def build_patch_samples_multiband(
                 continue
             nisp_xy_refined = refine_centroids_in_band(
                 nisp_img, nisp_xy_init,
-                radius=nisp_radius,  # NISP pixels are 3x coarser
+                radius=nisp_radius,
                 flux_floor_sigma=refine_flux_floor_sigma,
             )
             n_ra, n_dec = nwcs.wcs_pix2world(nisp_xy_refined[valid, 0], nisp_xy_refined[valid, 1], 0)

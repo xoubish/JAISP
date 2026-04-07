@@ -92,9 +92,8 @@ def short_band_name(band: str) -> str:
 def native_resolution(band: str) -> str:
     if band in RUBIN_BANDS:
         return "512×512 @ 0.2\"/px"
-    if band == "euclid_VIS":
-        return "~1050×1050 @ 0.1\"/px"
-    return "~350×350 @ 0.3\"/px"
+    # MER mosaics: all Euclid bands (VIS + NISP) are at 0.1"/px
+    return "~1084×1084 @ 0.1\"/px"
 
 
 # ============================================================

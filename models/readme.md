@@ -38,9 +38,9 @@ v7 keeps each instrument at native resolution through independent encoder branch
 ## v7 Architecture
 
 ```
-Rubin bands (512x512, 0.2"/px)   -> BandStems -> Rubin branch (2 stages) --\
-VIS band   (1050x1050, 0.1"/px)  -> BandStem  -> VIS branch   (3 stages) --> latent @ 0.8"/px
-NISP bands (350x350, 0.3"/px)    -> BandStems -> NISP branch  (1 stage)  --/    (~130x130 tokens)
+Rubin bands (512x512, 0.2"/px)    -> BandStems -> Rubin branch (2 stages) --\
+VIS band   (~1084x1084, 0.1"/px)  -> BandStem  -> VIS branch   (3 stages) --> latent @ 0.8"/px
+NISP bands (~1084x1084, 0.1"/px)  -> BandStems -> NISP branch  (3 stages) --/  (~135x135 tokens)
                                                                                        |
                                                                         Stream mean fusion +
                                                                         learned stream embeddings
@@ -52,9 +52,12 @@ NISP bands (350x350, 0.3"/px)    -> BandStems -> NISP branch  (1 stage)  --/    
                                                                         pyramid skip connections
                                                                                        |
                                                                         Native-resolution output
-                                                                        (VIS->1050, NISP->350,
+                                                                        (VIS->~1084, NISP->~1084,
                                                                          Rubin->512)
 ```
+
+Note: NISP Y/J/H data comes from Euclid MER mosaics, which are already resampled
+to the VIS pixel scale (0.1"/px). NISP and VIS share the same resolution and tile size.
 
 **Key design choices:**
 

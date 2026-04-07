@@ -24,9 +24,9 @@ import torch.nn.functional as F
 
 PIXEL_SCALES = {
     "euclid_VIS": 0.1,
-    "euclid_Y": 0.3,
-    "euclid_J": 0.3,
-    "euclid_H": 0.3,
+    "euclid_Y": 0.1,   # MER mosaics: resampled to VIS pixel scale
+    "euclid_J": 0.1,   # MER mosaics: resampled to VIS pixel scale
+    "euclid_H": 0.1,   # MER mosaics: resampled to VIS pixel scale
     "rubin_u": 0.2,
     "rubin_g": 0.2,
     "rubin_r": 0.2,

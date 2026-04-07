@@ -352,7 +352,7 @@ def collect_all_predictions_multiband(
                     continue
                 nisp_img, nwcs = nisp_data[nb]
                 nisp_xy_init = project_vis_to_band_xy(vis_xy_base, vwcs, nwcs)
-                nisp_radius = max(1, refine_radius // 3)
+                nisp_radius = refine_radius  # MER mosaics: NISP at 0.1"/px, same as VIS
                 target_keep = signal_mask_in_band(nisp_img, nisp_xy_init,
                                                    radius=nisp_radius, flux_floor_sigma=refine_ffs)
                 if int(target_keep.sum()) < min_matches:

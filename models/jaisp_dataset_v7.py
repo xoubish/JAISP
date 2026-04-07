@@ -44,9 +44,9 @@ def sample_context_target_phaseB_mixed(
 ) -> Optional[Dict]:
     """Sample a mixed-resolution Phase B context/target split.
 
-    Rubin bands remain at 512x512, VIS stays near 1050x1050, and NISP bands
-    stay at their native 350x350-ish resolution. The model is responsible for
-    resolution-aware fusion downstream.
+    Rubin bands remain at 512x512. All Euclid bands (VIS and NISP Y/J/H)
+    are ~1084x1084 at 0.1"/px from MER mosaics. The model is responsible
+    for resolution-aware fusion downstream.
     """
     if not sample.get("has_euclid"):
         return None
