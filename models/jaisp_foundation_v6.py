@@ -48,11 +48,18 @@ ALL_BANDS = RUBIN_BANDS + EUCLID_BANDS
 # ============================================================
 
 class InformationMap(nn.Module):
-    """Signal-based pixel weighting: focuses loss on sources, edges, not blank sky."""
-    def __init__(self, snr_threshold: float = 2.0, min_weight: float = 0.001):
+    """Signal-based pixel weighting: focuses loss on sources, edges, not blank sky.
+
+    Uses an RMS-adaptive floor so that noisy bands (high RMS) retain a
+    meaningful minimum weight on blank-sky pixels, penalising hallucinated
+    sources that would otherwise go unpunished.
+    """
+    def __init__(self, snr_threshold: float = 2.0, min_weight: float = 0.001,
+                 adaptive_floor_scale: float = 0.3):
         super().__init__()
         self.snr_threshold = float(snr_threshold)
         self.min_weight = float(min_weight)
+        self.adaptive_floor_scale = float(adaptive_floor_scale)
         sx = torch.tensor([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]], dtype=torch.float32).view(1, 1, 3, 3)
         self.register_buffer('sobel_x', sx)
         self.register_buffer('sobel_y', sx.transpose(-1, -2).contiguous())
@@ -66,7 +73,11 @@ class InformationMap(nn.Module):
         grad_max = grad.amax(dim=(2, 3), keepdim=True) + 1e-10
         grad_weight = grad / grad_max
         weights = torch.maximum(snr_weight, grad_weight * 0.5) ** 2
-        weights = weights.clamp(min=self.min_weight)
+        # RMS-adaptive floor: noisier bands get a higher minimum weight
+        # so blank-sky pixels still contribute to the loss
+        mean_rms = rms.mean(dim=(2, 3), keepdim=True)
+        adaptive_min = self.min_weight + torch.sigmoid(mean_rms - 1.0) * self.adaptive_floor_scale
+        weights = weights.clamp(min=adaptive_min)
         return weights / (weights.sum(dim=(2, 3), keepdim=True) + 1e-10) * (image.shape[2] * image.shape[3])
 
 

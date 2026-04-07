@@ -524,13 +524,18 @@ class JAISPFoundationV7(nn.Module):
 
         target_norm = (target_image / (target_rms + 1e-10)).clamp(-10.0, 100.0)
         info_w = self.encoder.info_maps[target_band](target_image, target_rms)
-        loss = (info_w * (pred - target_norm).abs()).mean()
+        pixel_loss = (info_w * (pred - target_norm).abs()).mean()
+        # Tile-level RMS band weight: noisy bands (high mean RMS) get
+        # proportionally larger loss so the model can't ignore them.
+        rms_weight = target_rms.mean().clamp(min=0.1)
+        loss = rms_weight * pixel_loss
 
         return {
             "loss": loss,
             "pred": pred.detach(),
             "target_norm": target_norm.detach(),
             "info_weights": info_w.detach(),
+            "rms_weight": rms_weight.detach(),
             "fused_hw": enc_out["fused_hw"],
         }
 
