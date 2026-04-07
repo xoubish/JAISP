@@ -327,6 +327,8 @@ def collect_all_predictions_multiband(
         refine_ffs = float(getattr(args, 'refine_flux_floor_sigma', 1.5))
         min_matches = int(getattr(args, 'min_matches', 20))
 
+        rubin_refine_radius = max(1, refine_radius // 3)
+
         for target_band, bidx in band_idx_map.items():
             # Compute raw offsets for this target band
             if target_band.startswith('rubin_'):
@@ -336,12 +338,12 @@ def collect_all_predictions_multiband(
                 target_img = np.nan_to_num(_to_float32(rubin_cube[tidx]), nan=0.0)
                 target_xy_seed = project_vis_to_band_xy(vis_xy_base, vwcs, rwcs)
                 target_keep = signal_mask_in_band(target_img, target_xy_seed,
-                                                   radius=refine_radius, flux_floor_sigma=refine_ffs)
+                                                   radius=rubin_refine_radius, flux_floor_sigma=refine_ffs)
                 if int(target_keep.sum()) < min_matches:
                     continue
                 vis_xy = vis_xy_base[target_keep]
                 target_xy = refine_centroids_in_band(target_img, target_xy_seed[target_keep],
-                                                      radius=refine_radius, flux_floor_sigma=refine_ffs)
+                                                      radius=rubin_refine_radius, flux_floor_sigma=refine_ffs)
                 t_ra, t_dec = rwcs.wcs_pix2world(target_xy[:, 0], target_xy[:, 1], 0)
                 v_ra, v_dec = vwcs.wcs_pix2world(vis_xy[:, 0], vis_xy[:, 1], 0)
             elif target_band.startswith('nisp_'):
@@ -569,18 +571,18 @@ def solve_global_field(
         )
         grid_shape = (grid_h, grid_w)
 
-    # Build RA/Dec coordinate arrays for the mesh
+    # Build WCS: uniform angular pixels, TAN projection handles cos(dec).
+    # CDELT1 is negative (RA increases westward in FITS convention).
     mesh_h, mesh_w = mesh['dra'].shape
-    dec_grid = dec_ref + (np.arange(mesh_h) * dstep_arcsec + y_min) / 3600.0
-    ra_grid  = ra_ref  + (np.arange(mesh_w) * dstep_arcsec + x_min) / (cos_dec * 3600.0)
+    dstep_deg = dstep_arcsec / 3600.0
 
     return {
         'field':               field,
         'mesh':                mesh,
-        'ra_grid':             ra_grid,
-        'dec_grid':            dec_grid,
         'ra_ref':              ra_ref,
         'dec_ref':             dec_ref,
+        'x_min_arcsec':        x_min,
+        'y_min_arcsec':        y_min,
         'dstep_arcsec':        dstep_arcsec,
         'n_sources':           len(ra),
         'grid_shape':          grid_shape,
@@ -594,29 +596,52 @@ def solve_global_field(
 # FITS output
 # ============================================================
 
+def _build_concordance_wcs(result: dict) -> 'fits.Header':
+    """Build a shared TAN-projection WCS for the concordance mesh.
+
+    Uses uniform angular pixels (dstep x dstep arcsec) in both axes.
+    CDELT1 is negative (RA increases westward per FITS convention).
+    CRPIX is set so that mesh pixel (0,0) maps to the SW corner of the footprint.
+    """
+    ra_ref  = result['ra_ref']
+    dec_ref = result['dec_ref']
+    x_min   = result['x_min_arcsec']
+    y_min   = result['y_min_arcsec']
+    dstep   = result['dstep_arcsec']
+    mesh_h, mesh_w = result['mesh']['dra'].shape
+
+    dstep_deg = dstep / 3600.0
+    # CRPIX: pixel that corresponds to (ra_ref, dec_ref).
+    # Mesh pixel 0 corresponds to x_min arcsec offset from ra_ref.
+    crpix1 = -x_min / dstep + 1.0   # x_min is negative (west of center)
+    crpix2 = -y_min / dstep + 1.0   # y_min is negative (south of center)
+
+    w = WCS(naxis=2)
+    w.wcs.crpix = [crpix1, crpix2]
+    w.wcs.crval = [ra_ref, dec_ref]
+    w.wcs.cdelt = [-dstep_deg, dstep_deg]  # RA negative, Dec positive
+    w.wcs.ctype = ['RA---TAN', 'DEC--TAN']
+    w.wcs.cunit = ['deg', 'deg']
+    return w.to_header()
+
+
 def _build_band_hdus(
     result: dict,
     target_band: str,
+    wcs_header: 'fits.Header' = None,
 ) -> list:
     """Build FITS HDUs for one band's global concordance field.
 
-    Returns a list of ImageHDUs (DRA, DDE, optionally COV) with a band prefix
-    in the extension name so multiple bands coexist in one FITS file.
+    Returns a list of ImageHDUs (DRA, DDE) with a band prefix in the
+    extension name so multiple bands coexist in one FITS file.
     """
-    mesh      = result['mesh']
-    ra_grid   = result['ra_grid']
-    dec_grid  = result['dec_grid']
-    ra_ref    = result['ra_ref']
-    dec_ref   = result['dec_ref']
-    dstep     = result['dstep_arcsec']
+    mesh    = result['mesh']
+    ra_ref  = result['ra_ref']
+    dec_ref = result['dec_ref']
+    dstep   = result['dstep_arcsec']
 
-    w = WCS(naxis=2)
-    w.wcs.crpix  = [1.0, 1.0]
-    w.wcs.crval  = [float(ra_grid[0]), float(dec_grid[0])]
-    w.wcs.cdelt  = [float(ra_grid[1]  - ra_grid[0])  if len(ra_grid)  > 1 else dstep / 3600.0,
-                    float(dec_grid[1] - dec_grid[0]) if len(dec_grid) > 1 else dstep / 3600.0]
-    w.wcs.ctype  = ['RA---TAN', 'DEC--TAN']
-    wcs_header   = w.to_header()
+    if wcs_header is None:
+        wcs_header = _build_concordance_wcs(result)
 
     # Band key for extension names: e.g. "r", "nisp_Y"
     if target_band.startswith('rubin_'):
@@ -646,9 +671,6 @@ def _build_band_hdus(
     hdus = []
     hdus.append(_make_hdu(mesh['dra'],  'DRA', f'DeltaRA* offset field ({target_band}, arcsec)'))
     hdus.append(_make_hdu(mesh['ddec'], 'DDE', f'DeltaDec offset field ({target_band}, arcsec)'))
-    if 'coverage' in mesh and mesh['coverage'] is not None:
-        hdus.append(_make_hdu(mesh['coverage'], 'COV',
-                              f'Min distance to nearest source ({target_band}, arcsec)'))
     return hdus
 
 
@@ -657,8 +679,13 @@ def write_global_fits(
     output_path: str,
     target_bands: list,
     n_sources_total: int = 0,
+    coverage_hdu: fits.ImageHDU = None,
 ) -> None:
-    """Write the combined multi-band global concordance FITS."""
+    """Write the combined multi-band global concordance FITS.
+
+    Coverage is written once as a shared 'COVERAGE' extension since all
+    bands share the same CenterNet-detected anchor positions.
+    """
     primary = fits.PrimaryHDU()
     primary.header['CONCRDNC'] = (True, 'JAISP global sky-coord concordance product')
     primary.header['SOLVETYP'] = ('global_sky', 'Single field fitted over full mosaic')
@@ -668,10 +695,15 @@ def write_global_fits(
         primary.header[f'BAND{i}'] = (b, f'Target band {i}')
 
     all_hdus = [primary] + band_hdus
+    if coverage_hdu is not None:
+        all_hdus.append(coverage_hdu)
+
     fits.HDUList(all_hdus).writeto(output_path, overwrite=True)
+    n_band_ext = len(band_hdus)
+    n_cov = 1 if coverage_hdu is not None else 0
     print(f'\nWrote global concordance: {output_path}')
     print(f'  Bands: {target_bands}')
-    print(f'  Extensions: {len(band_hdus)} ({len(band_hdus)//3} bands x DRA/DDE/COV)')
+    print(f'  Extensions: {n_band_ext} band ({n_band_ext//2} x DRA/DDE) + {n_cov} shared COV')
 
 
 # ============================================================
@@ -693,19 +725,59 @@ class GlobalConcordanceMap:
 
     def __init__(self, fits_path: str):
         with fits.open(fits_path) as hdul:
-            dra_hdu  = hdul['GLOBAL.DRA']
-            dde_hdu  = hdul['GLOBAL.DDE']
-            self.dra  = dra_hdu.data.astype(np.float32)
-            self.dde  = dde_hdu.data.astype(np.float32)
-            self.cov  = hdul['GLOBAL.COV'].data.astype(np.float32) if 'GLOBAL.COV' in hdul else None
-            h = dra_hdu.header
-            self.dstep_arcsec = float(h.get('DSTEP', 1.0))
-            self.ra_ref       = float(h.get('RA_REF',  0.0))
-            self.dec_ref      = float(h.get('DEC_REF', 0.0))
-            # Use the WCS to get the grid origin
-            self.wcs = WCS(h, naxis=2)
-        print(f'GlobalConcordanceMap: {self.dra.shape} mesh at {self.dstep_arcsec}"/px  '
-              f'from global_concordance FITS')
+            ext_names = {h.name.upper(): h.name for h in hdul if h.name != 'PRIMARY'}
+
+            # Multi-band format: {band}.DRA, {band}.DDE, shared COVERAGE
+            # Single-band legacy: GLOBAL.DRA, GLOBAL.DDE, GLOBAL.COV
+            self.band_fields = {}
+            self.wcs = None
+            self.dstep_arcsec = 1.0
+
+            # Try multi-band format first
+            for ext_name in ext_names.values():
+                if ext_name.endswith('.DRA'):
+                    band_key = ext_name[:-4]  # e.g. 'R', 'NISP_Y'
+                    dde_name = f'{band_key}.DDE'
+                    if dde_name.upper() in ext_names:
+                        dra_hdu = hdul[ext_name]
+                        dde_hdu = hdul[ext_names[dde_name.upper()]]
+                        self.band_fields[band_key] = {
+                            'dra': dra_hdu.data.astype(np.float32),
+                            'dde': dde_hdu.data.astype(np.float32),
+                        }
+                        if self.wcs is None:
+                            self.wcs = WCS(dra_hdu.header, naxis=2)
+                            self.dstep_arcsec = float(dra_hdu.header.get('DSTEP', 1.0))
+
+            # Legacy single-band format fallback
+            if not self.band_fields and 'GLOBAL.DRA' in ext_names:
+                dra_hdu = hdul[ext_names['GLOBAL.DRA']]
+                dde_hdu = hdul[ext_names['GLOBAL.DDE']]
+                self.band_fields['GLOBAL'] = {
+                    'dra': dra_hdu.data.astype(np.float32),
+                    'dde': dde_hdu.data.astype(np.float32),
+                }
+                self.wcs = WCS(dra_hdu.header, naxis=2)
+                self.dstep_arcsec = float(dra_hdu.header.get('DSTEP', 1.0))
+
+            self.cov = hdul['COVERAGE'].data.astype(np.float32) if 'COVERAGE' in ext_names else None
+            # Legacy coverage
+            if self.cov is None and 'GLOBAL.COV' in ext_names:
+                self.cov = hdul[ext_names['GLOBAL.COV']].data.astype(np.float32)
+
+        bands_str = ', '.join(sorted(self.band_fields.keys()))
+        first = next(iter(self.band_fields.values()))
+        print(f'GlobalConcordanceMap: {first["dra"].shape} mesh at {self.dstep_arcsec}"/px  '
+              f'bands=[{bands_str}]')
+
+    def _resolve_band_key(self, band: str) -> str:
+        """Map a band name to the FITS extension key."""
+        # Try exact match first, then common variants
+        for candidate in [band, band.upper(), f'NISP_{band}', f'NISP_{band.upper()}',
+                          band.replace('rubin_', '').upper(), 'GLOBAL']:
+            if candidate in self.band_fields:
+                return candidate
+        raise KeyError(f'Band {band} not found in concordance. Available: {list(self.band_fields.keys())}')
 
     def _sky_to_mesh_xy(self, ra: np.ndarray, dec: np.ndarray) -> np.ndarray:
         """Convert sky (RA, Dec) → fractional mesh pixel indices [N, 2] (col, row)."""
@@ -724,10 +796,13 @@ class GlobalConcordanceMap:
         self,
         ra: np.ndarray,
         dec: np.ndarray,
+        band: str = 'r',
     ):
-        """Return (dra_arcsec, ddec_arcsec) at sky positions."""
+        """Return (dra_arcsec, ddec_arcsec) at sky positions for a specific band."""
+        key = self._resolve_band_key(band)
+        fields = self.band_fields[key]
         mesh_xy = self._sky_to_mesh_xy(np.atleast_1d(ra), np.atleast_1d(dec))
-        return self._interp(self.dra, mesh_xy), self._interp(self.dde, mesh_xy)
+        return self._interp(fields['dra'], mesh_xy), self._interp(fields['dde'], mesh_xy)
 
     def coverage_at_sky(self, ra: np.ndarray, dec: np.ndarray) -> Optional[np.ndarray]:
         if self.cov is None:
@@ -741,13 +816,13 @@ class GlobalConcordanceMap:
         rubin_y,
         rubin_wcs: WCS,
         vis_wcs: WCS,
-        band: str = 'r',   # noqa: ARG002 — kept for API compatibility with ConcordanceMap
+        band: str = 'r',
     ):
         """Project Rubin pixel(s) onto the VIS grid with global concordance applied."""
         rubin_x = np.atleast_1d(np.asarray(rubin_x, dtype=np.float64))
         rubin_y = np.atleast_1d(np.asarray(rubin_y, dtype=np.float64))
         ra, dec = rubin_wcs.wcs_pix2world(rubin_x, rubin_y, 0)
-        dra, ddec = self.correction_at_sky(ra, dec)
+        dra, ddec = self.correction_at_sky(ra, dec, band=band)
         cos_dec  = np.cos(np.deg2rad(dec))
         ra_corr  = ra  + (dra  / 3600.0) / cos_dec
         dec_corr = dec + (ddec / 3600.0)
@@ -853,6 +928,7 @@ def main():
     all_band_hdus = []
     completed_bands = []
     n_sources_total = 0
+    shared_coverage_hdu = None  # built from first band, shared across all
 
     # ---- Prediction cache: save/load the expensive detection+encoding step ----
     cache_path = getattr(args, 'cache_predictions', '') or ''
@@ -949,8 +1025,19 @@ def main():
         print(f'  NN pred  median: {np.median(pred_mag):.1f} mas')
         print(f'  Field footprint: {result["field_shape_arcsec"][1]:.0f}" x {result["field_shape_arcsec"][0]:.0f}"')
 
-        # Accumulate HDUs for combined FITS
-        band_hdus = _build_band_hdus(result, target_band)
+        # Build shared WCS from first band; reuse for all subsequent bands
+        if shared_coverage_hdu is None:
+            shared_wcs_header = _build_concordance_wcs(result)
+            if 'coverage' in result['mesh'] and result['mesh']['coverage'] is not None:
+                cov_hdu = fits.ImageHDU(data=result['mesh']['coverage'].astype(np.float32), name='COVERAGE')
+                cov_hdu.header.update(shared_wcs_header)
+                cov_hdu.header['DSTEP'] = (float(result['dstep_arcsec']), 'Mesh step size in arcsec')
+                cov_hdu.header['DUNIT'] = ('arcsec', 'Min distance to nearest anchor source')
+                cov_hdu.header['COVTYPE'] = ('min_dist', 'Shared across all bands')
+                shared_coverage_hdu = cov_hdu
+
+        # Accumulate HDUs for combined FITS (all bands share the same WCS)
+        band_hdus = _build_band_hdus(result, target_band, wcs_header=shared_wcs_header)
         all_band_hdus.extend(band_hdus)
         completed_bands.append(target_band)
         n_sources_total += n_src
@@ -976,9 +1063,10 @@ def main():
             'field_shape_arcsec': list(result['field_shape_arcsec']),
         })
 
-    # Write single combined FITS with all bands
+    # Write single combined FITS with all bands + one shared coverage
     if all_band_hdus:
-        write_global_fits(all_band_hdus, args.output, completed_bands, n_sources_total)
+        write_global_fits(all_band_hdus, args.output, completed_bands,
+                          n_sources_total, coverage_hdu=shared_coverage_hdu)
 
     if args.summary_json and all_summaries:
         with open(args.summary_json, 'w') as f:

@@ -492,10 +492,11 @@ def build_patch_samples(
                 flux_floor_sigma=refine_flux_floor_sigma,
             )
             rubin_xy_seed = project_vis_to_band_xy(vis_xy, vwcs, rwcs)
+            rubin_refine_radius = max(1, refine_radius // 3)
             target_keep = signal_mask_in_band(
                 rubin_target,
                 rubin_xy_seed,
-                radius=refine_radius,
+                radius=rubin_refine_radius,
                 flux_floor_sigma=refine_flux_floor_sigma,
             )
             if int(target_keep.sum()) < int(min_matches):
@@ -504,7 +505,7 @@ def build_patch_samples(
             rubin_xy_target = refine_centroids_in_band(
                 rubin_target,
                 rubin_xy_seed[target_keep],
-                radius=refine_radius,
+                radius=rubin_refine_radius,
                 flux_floor_sigma=refine_flux_floor_sigma,
             )
         else:
@@ -777,6 +778,11 @@ def build_patch_samples_multiband(
         per_band_valid = {}    # band_name -> (N,) bool
 
         # Rubin target bands.
+        # Use a tight refinement radius (1 pixel = 0.2") to avoid injecting
+        # centroid noise on blurry 0.2"/px Rubin images.  The WCS-projected
+        # position is already accurate to ~10-15 mas; aggressive refinement
+        # with radius=3 adds ~40 mas of noise (confirmed empirically).
+        rubin_refine_radius = max(1, refine_radius // 3)
         for tband in rubin_targets:
             short = tband.split('_', 1)[1]
             bidx = RUBIN_BAND_ORDER.index(short)
@@ -787,7 +793,7 @@ def build_patch_samples_multiband(
             valid = signal_mask_in_band(
                 rubin_band_img,
                 rubin_xy_seed,
-                radius=refine_radius,
+                radius=rubin_refine_radius,
                 flux_floor_sigma=refine_flux_floor_sigma,
             )
             per_band_valid[tband] = valid
@@ -795,7 +801,7 @@ def build_patch_samples_multiband(
                 continue
             rubin_xy_refined = refine_centroids_in_band(
                 rubin_band_img, rubin_xy_seed,
-                radius=refine_radius, flux_floor_sigma=refine_flux_floor_sigma,
+                radius=rubin_refine_radius, flux_floor_sigma=refine_flux_floor_sigma,
             )
             r_ra, r_dec = rwcs.wcs_pix2world(rubin_xy_refined[valid, 0], rubin_xy_refined[valid, 1], 0)
             v_ra, v_dec = vwcs.wcs_pix2world(vis_xy[valid, 0], vis_xy[valid, 1], 0)

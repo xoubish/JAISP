@@ -324,12 +324,13 @@ def predict_tile(
     if target_band.startswith('rubin_'):
         target_idx = RUBIN_BAND_ORDER.index(target_band.split('_', 1)[1])
         rubin_target = np.nan_to_num(_to_float32(rubin_cube[target_idx]), nan=0.0)
+        rubin_refine_radius = max(1, int(args.refine_radius) // 3)
         if _detr is not None:
             rubin_xy_seed = project_vis_to_band_xy(vis_xy, vwcs, rwcs)
             target_keep = signal_mask_in_band(
                 rubin_target,
                 rubin_xy_seed,
-                radius=args.refine_radius,
+                radius=rubin_refine_radius,
                 flux_floor_sigma=args.refine_flux_floor_sigma,
             )
             if int(target_keep.sum()) < int(args.min_matches):
@@ -341,7 +342,7 @@ def predict_tile(
         rubin_xy_target = refine_centroids_in_band(
             rubin_target,
             rubin_xy_seed,
-            radius=args.refine_radius,
+            radius=rubin_refine_radius,
             flux_floor_sigma=args.refine_flux_floor_sigma,
         )
         r_ra, r_dec = rwcs.wcs_pix2world(rubin_xy_target[:, 0], rubin_xy_target[:, 1], 0)
