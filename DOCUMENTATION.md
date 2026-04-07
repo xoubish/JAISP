@@ -189,9 +189,11 @@ The reason this works is simple and powerful: to reconstruct a held-out band at 
 
 #### v7: Mixed-Resolution MAE (current)
 
-v7 fixes v6's resolution bottleneck. Instead of forcing all instruments onto one pixel grid, each instrument processes at its native resolution through independent encoder branches with different depths. The branches are designed so that after their respective downsampling stages, all streams arrive at approximately the same physical angular scale (~0.8 arcsec/pixel). At this common physical scale they fuse into a shared latent representation, pass through a transformer bottleneck, and then decode back to the target band's native resolution.
+v7 fixes v6's resolution bottleneck. Instead of forcing all instruments onto one pixel grid, each instrument processes at its native resolution through independent encoder branches with different depths. The branches are designed so that after their respective downsampling stages, both streams arrive at approximately the same physical angular scale (~0.8 arcsec/pixel). At this common physical scale they fuse into a shared latent representation, pass through a transformer bottleneck, and then decode back to the target band's native resolution.
 
-This means VIS features are never downsampled to Rubin's coarser grid. When the model reconstructs a VIS band, it decodes to the full 1050x1050 resolution. When it reconstructs a Rubin band, it decodes to 512x512. The encoder learns to preserve each instrument's native spatial information throughout.
+A key design choice is how per-band features are aggregated within each stream. The Euclid stream uses **fixed-slot concatenation** followed by a learned 1×1 projection, preserving per-band PSF and color structure (VIS PSF: 0.2" vs NISP PSF: ~0.5") through the entire encoder. The Rubin stream uses mean pooling (all 6 optical bands have similar PSFs). This asymmetric design ensures the encoder can learn band-specific spatial features for Euclid while keeping the Rubin path efficient.
+
+VIS features are never downsampled to Rubin's coarser grid. When the model reconstructs any Euclid band, it decodes to the full ~1084x1084 resolution. When it reconstructs a Rubin band, it decodes to 512x512. The encoder learns to preserve each instrument's native spatial information throughout.
 
 See the next section for the full v7 architecture.
 
@@ -205,7 +207,7 @@ See the next section for the full v7 architecture.
 | v4 | Native-res JEPA | InformationMap + shift tolerance | Superseded: spatially imprecise |
 | v5 | Native-res JEPA | Strict position matching | Failed: JEPA can't enforce pixel precision |
 | v6 | Dense MAE | Pixel-space reconstruction | Works: 31.9 mas astrometry |
-| v7 | Mixed-res MAE | Native resolution per instrument | **Current**: preserves VIS advantage |
+| v7 | Mixed-res MAE | 2-stream (Rubin mean / Euclid concat), native resolution | **Current**: preserves per-band PSF structure |
 
 ### v7 Mixed-Resolution MAE (Current)
 
@@ -213,32 +215,38 @@ See the next section for the full v7 architecture.
 
 The v7 architecture has three main stages: per-instrument encoding at native resolution, cross-instrument fusion at a shared physical scale, and target-specific decoding back to native resolution.
 
-**Encoding**: Each instrument has its own encoder branch. Rubin's six bands each pass through a BandStem (a small CNN that noise-normalizes and extracts local features), then the stem outputs are averaged and fed through a StreamEncoder with 2 ConvNeXt downsampling stages. VIS and NISP both use 3 stages (they share the same 0.1"/px MER mosaic resolution and ~1084x1084 tile size). The branch depths are chosen so that all streams converge to approximately 0.8 arcsec/pixel -- this is a physics-grounded design where the fusion happens at matched angular resolution, not matched pixel count.
+**Encoding**: The model has two instrument streams, each with its own encoder branch:
 
-**Fusion**: The encoded streams are interpolated to a common spatial grid, summed with learned stream identity embeddings (so the transformer can distinguish Rubin features from VIS features from NISP features), and passed through a transformer bottleneck with 4 layers and 8 attention heads operating on approximately 130x130 tokens with 2D sinusoidal positional encodings.
+- **Rubin stream**: Six BandStems (one per optical band) produce per-band feature maps. These are **mean-pooled** into a single tensor and fed through a StreamEncoder with 2 ConvNeXt downsampling stages. Mean pooling is acceptable here because all Rubin bands have similar PSFs (~0.7-1.0") and variable band availability (some tiles may lack u or y) is handled gracefully.
+- **Euclid stream**: Four BandStems (VIS, Y, J, H) produce per-band feature maps. These are **concatenated** into fixed slots (4 × 64 = 256 channels, with zero-filled slots for masked bands during MAE training) and projected back to 64 channels via a learned 1×1 convolution. This preserves per-band structure through the entire encoder -- critical because the Euclid bands have very different PSFs (VIS: 0.2", NISP Y/J/H: ~0.5") and the encoder needs to learn band-specific spatial features for downstream photometry and deblending. The fused features pass through a StreamEncoder with 3 ConvNeXt downsampling stages.
 
-**Decoding**: A TargetDecoder upsamples back to the target band's native resolution using transposed convolutions and skip connections. The skip connections are routed from whichever encoder pyramid level has the closest matching physical scale, fusing information across all instrument streams at each decoder stage. FiLM conditioning tells the decoder which specific band to reconstruct.
+The branch depths are chosen so that both streams converge to approximately 0.8 arcsec/pixel -- this is a physics-grounded design where the fusion happens at matched angular resolution, not matched pixel count.
+
+**Fusion**: The encoded streams are interpolated to a common spatial grid, summed with learned stream identity embeddings (so the transformer can distinguish Rubin from Euclid features), and passed through a transformer bottleneck with 4 layers and 8 attention heads operating on approximately 132×132 tokens with 2D sinusoidal positional encodings.
+
+**Decoding**: A per-stream TargetDecoder upsamples back to the target band's native resolution using bilinear interpolation and skip connections. The skip connections are routed from whichever encoder pyramid level has the closest matching physical scale, fusing information across both instrument streams at each decoder stage. FiLM conditioning tells the decoder which specific band to reconstruct.
 
 ```
-Rubin bands (512x512, 0.2"/px)    -> BandStems -> Rubin branch (2 stages) --\
-VIS band   (~1084x1084, 0.1"/px)  -> BandStem  -> VIS branch   (3 stages) --> latent @ 0.8"/px
-NISP bands (~1084x1084, 0.1"/px)  -> BandStems -> NISP branch  (3 stages) --/  (~135x135 tokens)
-                                                                                       |
-                                                                        Stream mean fusion +
-                                                                        learned stream embeddings
-                                                                                       |
-                                                                        Transformer bottleneck
-                                                                        (depth=4, heads=8)
-                                                                                       |
-                                                                        TargetDecoder with
-                                                                        pyramid skip connections
-                                                                                       |
-                                                                        Native-resolution output
-                                                                        (VIS->~1084, NISP->~1084,
-                                                                         Rubin->512)
+Rubin:  6 BandStems -> mean pool -> [64, 512, 512]      -> 2-stage encoder --\
+                                                                               --> latent @ 0.8"/px
+Euclid: 4 BandStems -> concat+1×1 proj -> [64, 1084, 1084] -> 3-stage encoder --/    (~132×132 tokens)
+         (VIS/Y/J/H)  (zero-fill missing bands)                                          |
+                                                                           Stream fusion +
+                                                                           learned stream embeddings
+                                                                                          |
+                                                                           Transformer bottleneck
+                                                                           (depth=4, heads=8)
+                                                                                          |
+                                                                           TargetDecoder with
+                                                                           pyramid skip connections
+                                                                                          |
+                                                                           Native-resolution output
+                                                                           (Euclid->~1084, Rubin->512)
 ```
 
-Note: NISP Y/J/H data comes from Euclid MER mosaics, already resampled to 0.1"/px (same as VIS).
+The Euclid concat+project design (via the `StreamFuser` module) is the key architectural difference from earlier versions. By preserving per-band information through the encoder, the model can learn that the same galaxy looks different in VIS vs H-band due to PSF differences -- exactly the information that photometry and deblending need. During MAE training, when one Euclid band is masked as the reconstruction target, its slot is zero-filled; the 1×1 projection learns to ignore zeros, so the encoder gracefully handles variable band availability.
+
+NISP Y/J/H data comes from Euclid MER mosaics, already resampled to 0.1"/px (same as VIS).
 
 **Training**: Unlike v6's two-phase curriculum, v7 training is unified from epoch 1. Tiles with Euclid coverage use cross-instrument masking; Rubin-only tiles automatically fall back to within-instrument prediction. In the current flat training set, the Rubin side is effectively fully paired (790 matched pairs), so almost every sample participates in cross-instrument learning. The loss is the same InformationMap-weighted L1 as v6.
 
@@ -254,7 +262,7 @@ Note: NISP Y/J/H data comes from Euclid MER mosaics, already resampled to 0.1"/p
 | `cross_instrument_prob` | 1.0 |
 | Epoch | 86 |
 | Val loss | 1.4689 |
-| Total params | 16.0M |
+| Total params | 16.0M (old 3-stream) / 13.3M (current 2-stream concat) |
 
 ---
 
@@ -337,16 +345,15 @@ StemCenterNet keeps the same CenterNet-style output heads but swaps the backbone
 
 ```
 Frozen V7 BandStems at native resolution
-  -> Rubin bands -> learned weighted Rubin stream
-  -> VIS band    -> VIS stream
-  -> Y/J/H bands -> learned weighted NISP stream
-  -> concatenate Rubin / VIS / NISP in VIS frame
+  -> Rubin bands (6 stems) -> learned weighted Rubin stream
+  -> Euclid bands (4 stems: VIS/Y/J/H) -> learned weighted Euclid stream
+  -> reproject Rubin to Euclid frame, concatenate streams
   -> shallow residual encoder-decoder
   -> Dense prediction heads at VIS resolution:
-       Heatmap  [B, 1, ~1050, ~1050]
-       Offset   [B, 2, ~1050, ~1050]
-       Log flux [B, 1, ~1050, ~1050]
-       Profile  [B, 4, ~1050, ~1050]  [optional]
+       Heatmap  [B, 1, ~1084, ~1084]
+       Offset   [B, 2, ~1084, ~1084]
+       Log flux [B, 1, ~1084, ~1084]
+       Profile  [B, 4, ~1084, ~1084]  [optional]
 ```
 
 Compared with the bottleneck detector, this path gives the head much more local spatial information but less deep cross-band fusion. That tradeoff is scientifically useful: if it wins, native-resolution pretraining is paying off directly for detection; if it loses on NIR-only or dropout-style sources, that tells us the fused latent is doing something genuinely important for multi-band reasoning.
@@ -589,25 +596,15 @@ JAISP/
 ### 1. Foundation Model Training
 
 ```bash
-# V7 mixed-resolution MAE on the current flat tile set (recommended)
-CUDA_VISIBLE_DEVICES=0,1 WANDB_MODE=online torchrun \
-    --standalone \
-    --master_port 29501 \
-    --nproc_per_node=2 \
-    models/train_jaisp_foundation_v7.py \
-    --rubin_dir  data/rubin_tiles_all \
-    --euclid_dir data/euclid_tiles_all \
-    --output_dir checkpoints/jaisp_v7_tiles_all_ddp \
-    --device cuda \
-    --num_workers 2 \
-    --epochs 80 \
-    --warmup_epochs 5 \
-    --batch_size 1 \
-    --accum_steps 2 \
-    --n_targets_per_step 1 \
-    --cross_instrument_prob 1.0 \
-    --seed 42 \
-    --wandb_name JAISP-Foundation-V7
+# V7 mixed-resolution MAE with 2-stream concat architecture (recommended)
+cd models && python train_jaisp_foundation_v7.py \
+    --rubin_dir  ../data/rubin_tiles_all \
+    --euclid_dir ../data/euclid_tiles_all \
+    --output_dir ./checkpoints/jaisp_v7_concat \
+    --hidden_ch 256 --transformer_depth 4 --transformer_heads 8 \
+    --fused_pixel_scale_arcsec 0.8 --cross_instrument_prob 1.0 \
+    --epochs 100 --lr 3e-4 --accum_steps 4 \
+    --wandb_name v7_concat_euclid_fused
 ```
 
 ### 2. Detection Head

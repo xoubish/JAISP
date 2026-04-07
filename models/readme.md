@@ -31,42 +31,50 @@ v6 replaced this with pixel-space L1 reconstruction. To reconstruct a band corre
 
 v6 Phase B force-downsampled Euclid VIS (1050x1050 at 0.1"/px) to Rubin's 512x512 grid before encoding. This discarded the 2x resolution advantage that makes VIS valuable for astrometry and deblending.
 
-v7 keeps each instrument at native resolution through independent encoder branches, then fuses at a shared physical scale in latent space. VIS resolution is preserved end-to-end.
+v7 keeps each instrument at native resolution through two encoder branches (Rubin + Euclid), then fuses at a shared physical scale in latent space. VIS and NISP resolution is preserved end-to-end.
 
 ---
 
 ## v7 Architecture
 
+Two streams: Rubin (mean-pooled, 6 bands with similar PSFs) and Euclid (concat+project, 4 bands with different PSFs).
+
 ```
-Rubin bands (512x512, 0.2"/px)    -> BandStems -> Rubin branch (2 stages) --\
-VIS band   (~1084x1084, 0.1"/px)  -> BandStem  -> VIS branch   (3 stages) --> latent @ 0.8"/px
-NISP bands (~1084x1084, 0.1"/px)  -> BandStems -> NISP branch  (3 stages) --/  (~135x135 tokens)
-                                                                                       |
-                                                                        Stream mean fusion +
-                                                                        learned stream embeddings
-                                                                                       |
-                                                                        Transformer bottleneck
-                                                                        (depth=4, heads=8)
-                                                                                       |
-                                                                        TargetDecoder with
-                                                                        pyramid skip connections
-                                                                                       |
-                                                                        Native-resolution output
-                                                                        (VIS->~1084, NISP->~1084,
-                                                                         Rubin->512)
+Rubin:  6 BandStems -> mean pool -> [64, 512, 512]      -> 2-stage encoder --\
+                                                                               --> latent @ 0.8"/px
+Euclid: 4 BandStems -> concat+1×1 proj -> [64, 1084, 1084] -> 3-stage encoder --/  (~132×132 tokens)
+         (VIS/Y/J/H)  (zero-fill missing bands)                                          |
+                                                                           Stream fusion +
+                                                                           learned stream embeddings
+                                                                                          |
+                                                                           Transformer bottleneck
+                                                                           (depth=4, heads=8)
+                                                                                          |
+                                                                           TargetDecoder with
+                                                                           pyramid skip connections
+                                                                                          |
+                                                                           Native-resolution output
+                                                                           (Euclid->~1084, Rubin->512)
 ```
 
-Note: NISP Y/J/H data comes from Euclid MER mosaics, which are already resampled
-to the VIS pixel scale (0.1"/px). NISP and VIS share the same resolution and tile size.
+NISP Y/J/H data comes from Euclid MER mosaics at 0.1"/px (same as VIS). All 4 Euclid
+bands share one stream because they share the same pixel scale and tile size.
+
+The Euclid stream uses `StreamFuser` with fixed-slot concatenation: each of the 4 BandStem
+outputs is placed in its assigned slot (VIS=0, Y=1, J=2, H=3), missing bands get zero-filled
+slots, and a learned 1×1 projection maps 4×64=256 channels to 64. This preserves per-band
+PSF structure (VIS: 0.2" vs NISP: ~0.5") through the full encoder.
 
 **Key design choices:**
 
-- Branch depth differs per instrument so all streams arrive at ~0.8"/px before fusion.
+- Two streams (Rubin + Euclid) with concat for Euclid, mean for Rubin.
+- Branch depth differs per instrument so both streams arrive at ~0.8"/px before fusion.
 - `_estimate_fused_hw` converts to angular arcsec scale for physics-grounded fusion.
 - `build_target_skips` selects pyramid levels by closest physical scale match.
-- Learned stream identity embeddings distinguish Rubin/VIS/NISP feature statistics.
+- Learned stream identity embeddings distinguish Rubin/Euclid feature statistics.
 - Unified training: no Phase A/B. Tiles with Euclid use cross-instrument masking; Rubin-only tiles fall back to within-instrument prediction automatically.
 - Loss: InformationMap-weighted L1 in noise-normalized units.
+- ~13.3M parameters (down from 16M with the old 3-stream design).
 
 ---
 
