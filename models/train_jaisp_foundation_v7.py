@@ -576,10 +576,10 @@ class JAISPTrainerV7:
             with torch.autocast("cuda", dtype=self.amp_dtype, enabled=self.use_amp):
                 out = eval_model(ctx_img, ctx_rms, target_band, tgt_img, tgt_rms)
 
-            truth = out["target_norm"][0, 0].cpu().numpy()
-            pred = out["pred"][0, 0].cpu().numpy()
+            truth = out["target_norm"][0, 0].float().cpu().numpy()
+            pred = out["pred"][0, 0].float().cpu().numpy()
             resid = pred - truth
-            info = out["info_weights"][0, 0].cpu().numpy()
+            info = out["info_weights"][0, 0].float().cpu().numpy()
             fused_hw_summary = out["fused_hw"]
 
             bright = info_weighted_mask(info, top_frac=0.10)
