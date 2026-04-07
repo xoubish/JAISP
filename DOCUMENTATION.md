@@ -153,7 +153,7 @@ This was a creative idea -- moving from patch-level to object-level learning, wh
 
 v4 made a critical architectural shift: instead of extracting patches, process the full 512x512 tile at native resolution. This eliminated the information loss from patching entirely. The architecture used per-band CNN stems with noise normalization, a shared ViT-like trunk with positional encodings, and a BYOL/JEPA-style student-teacher framework with exponential moving average (EMA).
 
-Two important innovations appeared in v4. First, **InformationMap weighting**: instead of treating all pixels equally, the loss was weighted by a signal-to-noise map combined with Sobel gradient magnitudes. This naturally focused learning on source pixels (high SNR, strong gradients) rather than empty background, solving the background-dominance problem without resorting to patch sampling. InformationMap weighting proved valuable enough to survive into v6 and v7.
+Two important innovations appeared in v4. First, **InformationMap weighting**: instead of treating all pixels equally, the loss was weighted by a signal-to-noise map combined with Sobel gradient magnitudes. This naturally focused learning on source pixels (high SNR, strong gradients) rather than empty background, solving the background-dominance problem without resorting to patch sampling. InformationMap weighting proved valuable enough to survive into v6 and v7, where it was extended with an RMS-adaptive minimum weight floor to prevent hallucination in noisy bands (see v7 Training).
 
 Second, v4 introduced a **shift-tolerant alignment loss** that allowed tokens to match within a +/-5 pixel tolerance window. The reasoning was that Rubin and Euclid have genuine sub-pixel astrometric misalignments, so forcing exact positional matching would create conflicting gradients.
 
@@ -248,7 +248,15 @@ The Euclid concat+project design (via the `StreamFuser` module) is the key archi
 
 NISP Y/J/H data comes from Euclid MER mosaics, already resampled to 0.1"/px (same as VIS).
 
-**Training**: Unlike v6's two-phase curriculum, v7 training is unified from epoch 1. Tiles with Euclid coverage use cross-instrument masking; Rubin-only tiles automatically fall back to within-instrument prediction. In the current flat training set, the Rubin side is effectively fully paired (790 matched pairs), so almost every sample participates in cross-instrument learning. The loss is the same InformationMap-weighted L1 as v6.
+**Training**: Unlike v6's two-phase curriculum, v7 training is unified from epoch 1. Tiles with Euclid coverage use cross-instrument masking; Rubin-only tiles automatically fall back to within-instrument prediction. In the current flat training set, the Rubin side is effectively fully paired (790 matched pairs), so almost every sample participates in cross-instrument learning.
+
+**Loss**: InformationMap-weighted L1 in noise-normalized (SNR) space, with two RMS-aware mechanisms:
+
+1. **RMS-adaptive InformationMap floor**: The original InformationMap used a fixed minimum weight (`min_weight=0.001`) for blank-sky pixels. This meant that for noisy bands (u, y) where almost no pixels exceed the SNR threshold, the model could hallucinate sources at near-zero loss cost -- the info weights were negligible at blank-sky locations, so false sources went unpunished. The adaptive floor raises the minimum weight based on the tile's mean RMS: `adaptive_min = 0.001 + sigmoid(mean_rms - 1.0) * 0.3`. Bands with higher noise get a higher floor, ensuring blank-sky pixels contribute meaningfully to the loss and penalizing hallucinations.
+
+2. **Tile-level RMS band weight**: The per-target loss is multiplied by the target band's mean RMS across the tile: `loss = mean_rms * pixel_loss`. In noise-normalized space, noisy bands naturally produce smaller loss magnitudes (targets are flatter). This multiplicative weight compensates, giving noisy bands proportionally larger gradients so the model cannot coast on the easy high-SNR bands (g/r/i/z).
+
+Training uses mixed-precision (bfloat16 autocast) and supports multi-GPU via `torchrun` with DistributedDataParallel.
 
 **Best checkpoint** (`jaisp_v7_baseline`):
 
@@ -597,6 +605,18 @@ JAISP/
 
 ```bash
 # V7 mixed-resolution MAE with 2-stream concat architecture (recommended)
+# Multi-GPU with bfloat16 AMP (adjust --nproc_per_node to number of GPUs)
+cd models && torchrun --nproc_per_node=2 train_jaisp_foundation_v7.py \
+    --rubin_dir  ../data/rubin_tiles_all \
+    --euclid_dir ../data/euclid_tiles_all \
+    --output_dir ./checkpoints/jaisp_v7_concat \
+    --hidden_ch 256 --transformer_depth 4 --transformer_heads 8 \
+    --fused_pixel_scale_arcsec 0.8 --cross_instrument_prob 1.0 \
+    --epochs 100 --lr 3e-4 --accum_steps 2 \
+    --persistent_workers --num_workers 4 \
+    --wandb_name v7_rms_aware_loss
+
+# Single-GPU fallback (plain python, no torchrun needed)
 cd models && python train_jaisp_foundation_v7.py \
     --rubin_dir  ../data/rubin_tiles_all \
     --euclid_dir ../data/euclid_tiles_all \
@@ -604,6 +624,7 @@ cd models && python train_jaisp_foundation_v7.py \
     --hidden_ch 256 --transformer_depth 4 --transformer_heads 8 \
     --fused_pixel_scale_arcsec 0.8 --cross_instrument_prob 1.0 \
     --epochs 100 --lr 3e-4 --accum_steps 4 \
+    --persistent_workers --num_workers 4 \
     --wandb_name v7_concat_euclid_fused
 ```
 

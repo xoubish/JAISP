@@ -150,6 +150,10 @@ class JAISPTrainerV7:
         self.checkpoint_every_n_epochs = int(checkpoint_every_n_epochs)
         self.persistent_workers = bool(persistent_workers)
 
+        # AMP: use bfloat16 on CUDA (no GradScaler needed for bf16)
+        self.use_amp = self.device.type == "cuda"
+        self.amp_dtype = torch.bfloat16
+
         random.seed(self.seed)
         np.random.seed(self.seed)
         torch.manual_seed(self.seed)
@@ -307,13 +311,15 @@ class JAISPTrainerV7:
         elif shuffle:
             generator = torch.Generator()
             generator.manual_seed(int(generator_seed if generator_seed is not None else self.seed))
+        use_persistent = self.num_workers > 0 and self.persistent_workers
         loader = DataLoader(
             subset,
             batch_size=self.batch_size,
             shuffle=(shuffle and sampler is None),
             num_workers=self.num_workers,
             pin_memory=(self.device.type == "cuda"),
-            persistent_workers=(self.num_workers > 0 and self.persistent_workers),
+            persistent_workers=use_persistent,
+            prefetch_factor=2 if self.num_workers > 0 else None,
             drop_last=False,
             collate_fn=collate_v6,
             generator=generator,
@@ -427,13 +433,14 @@ class JAISPTrainerV7:
                 step_loss_val = 0.0
                 n_tgts = len(batch["targets"])
                 for tgt in batch["targets"]:
-                    out = self.model(
-                        batch["ctx_img"],
-                        batch["ctx_rms"],
-                        tgt["band"],
-                        tgt["image"],
-                        tgt["rms"],
-                    )
+                    with torch.autocast("cuda", dtype=self.amp_dtype, enabled=self.use_amp):
+                        out = self.model(
+                            batch["ctx_img"],
+                            batch["ctx_rms"],
+                            tgt["band"],
+                            tgt["image"],
+                            tgt["rms"],
+                        )
                     (out["loss"] / (n_tgts * self.accum_steps)).backward()
                     loss_scalar = float(out["loss"].detach())
                     step_loss_val += loss_scalar
@@ -508,13 +515,14 @@ class JAISPTrainerV7:
                     continue
 
                 for tgt in batch["targets"]:
-                    out = eval_model(
-                        batch["ctx_img"],
-                        batch["ctx_rms"],
-                        tgt["band"],
-                        tgt["image"],
-                        tgt["rms"],
-                    )
+                    with torch.autocast("cuda", dtype=self.amp_dtype, enabled=self.use_amp):
+                        out = eval_model(
+                            batch["ctx_img"],
+                            batch["ctx_rms"],
+                            tgt["band"],
+                            tgt["image"],
+                            tgt["rms"],
+                        )
                     val_losses.append(float(out["loss"]))
                 n_seen += 1
             if n_seen >= 50:
@@ -565,7 +573,8 @@ class JAISPTrainerV7:
             tgt_img = pool[target_band]["image"].unsqueeze(0).to(self.device)
             tgt_rms = pool[target_band]["rms"].unsqueeze(0).to(self.device)
 
-            out = eval_model(ctx_img, ctx_rms, target_band, tgt_img, tgt_rms)
+            with torch.autocast("cuda", dtype=self.amp_dtype, enabled=self.use_amp):
+                out = eval_model(ctx_img, ctx_rms, target_band, tgt_img, tgt_rms)
 
             truth = out["target_norm"][0, 0].cpu().numpy()
             pred = out["pred"][0, 0].cpu().numpy()
