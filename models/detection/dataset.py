@@ -69,8 +69,15 @@ def _vis_bright_core_and_spike_mask(
     vis_img: np.ndarray,
     spike_radius: int = 40,
     min_star_area: int = 20,
+    max_spike_radius: int = 400,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Return bright-source centroids and a dilated mask around their cores.
+
+    The mask radius scales with each star's saturated area:
+        r = spike_radius * sqrt(area / min_star_area)
+    so faint saturated stars get the base radius while bright stars with
+    large saturated cores get proportionally larger masks that cover their
+    longer diffraction spikes.
 
     This is used both by the classical VIS pseudo-labeler and by self-training
     refinement so artifact suppression stays consistent across stages.
@@ -103,14 +110,15 @@ def _vis_bright_core_and_spike_mask(
     bright_ys = np.array([c[0] for c in coms], dtype=np.float64)
     bright_xs = np.array([c[1] for c in coms], dtype=np.float64)
 
-    core_mask = np.isin(labeled, core_labels)
-    r = max(int(spike_radius), 0)
-    if r > 0:
+    # Per-star brightness-scaled dilation: brighter stars (larger saturated
+    # area) get proportionally larger masks.
+    for lb in core_labels:
+        r = int(spike_radius * np.sqrt(areas[lb] / min_star_area))
+        r = min(max(r, 1), max_spike_radius)
+        blob_mask = labeled == lb
         yg, xg = np.ogrid[-r:r + 1, -r:r + 1]
         disk = (xg ** 2 + yg ** 2) <= r ** 2
-        spike_mask = binary_dilation(core_mask, structure=disk)
-    else:
-        spike_mask = core_mask
+        spike_mask |= binary_dilation(blob_mask, structure=disk)
 
     return bright_xs, bright_ys, spike_mask
 

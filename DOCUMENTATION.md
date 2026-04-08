@@ -272,6 +272,32 @@ Training uses mixed-precision (bfloat16 autocast) and supports multi-GPU via `to
 | Val loss | 1.4689 |
 | Total params | 16.0M (old 3-stream) / 13.3M (current 2-stream concat) |
 
+**`v7_rms_aware_loss` run** (2026-04-07, [wandb](https://wandb.ai/AI-Astro/JAISP-Foundation-v7/runs/x9y9os7r)):
+
+| Metric | Value |
+|--------|-------|
+| val/best_loss | 4.0493 |
+| val/loss | 4.0515 |
+| train/epoch_loss | 4.7354 |
+
+Per-band reconstruction quality (bright sources):
+
+| Band | Train Loss | MAE | Pearson r | std ratio |
+|------|-----------|-----|-----------|-----------|
+| Rubin g | 1.83 | 1.206 | 0.998 | 1.011 |
+| Rubin r | 1.39 | 1.020 | 0.998 | 1.004 |
+| Rubin i | 2.52 | 1.265 | 0.997 | 1.013 |
+| Rubin z | 4.32 | 0.802 | 0.989 | 1.001 |
+| Rubin u | 5.33 | 0.808 | 0.968 | 0.959 |
+| Rubin y | **27.51** | 0.849 | 0.969 | 0.935 |
+| Euclid VIS | — | 0.598 | 0.870 | 0.919 |
+| Euclid Y | — | 0.197 | 0.887 | 1.024 |
+| Euclid J | — | 0.198 | 0.932 | 0.991 |
+| Euclid H | — | 0.203 | 0.942 | 1.031 |
+| **Mean** | — | **0.715** | **0.955** | **0.989** |
+
+Notes: Rubin g/r/i/z reconstructions are near-perfect. Rubin u and Euclid NISP bands are solid. **Rubin y training loss is anomalously high** (27.5 vs 1.3–5.3 for other Rubin bands) despite reasonable reconstruction metrics — needs investigation. Euclid VIS is the weakest band (r=0.87, std_ratio=0.92), possibly under-reconstructed at native resolution.
+
 ---
 
 ## Downstream Heads
@@ -636,28 +662,31 @@ cd models && python train_jaisp_foundation_v7.py \
 # models/detection/dataset.py and astrometry2/source_matching.py.
 
 # Option A: fused-bottleneck CenterNet
+# 200-tile subset is sufficient for detection; full 790 tiles add training
+# time without significant accuracy gain.
 # Step 1: Precompute encoder features (one-time)
 python models/detection/precompute_features.py \
-    --rubin_dir    data/rubin_tiles_all \
-    --euclid_dir   data/euclid_tiles_all \
-    --encoder_ckpt checkpoints/<v7-foundation>/checkpoint_best.pt \
-    --out_dir      data/cached_features_v7_tiles_all
+    --rubin_dir    data/rubin_tiles_200 \
+    --euclid_dir   data/euclid_tiles_200 \
+    --encoder_ckpt models/checkpoints/jaisp_v7_concat/checkpoint_best.pt \
+    --out_dir      data/cached_features_v7_rms_aware \
+    --n_augments   8
 
 # Step 2: Self-training (runs round 1 + label refinement + round 2)
 python models/detection/self_train.py \
-    --feature_dir  data/cached_features_v7_tiles_all \
-    --rubin_dir    data/rubin_tiles_all \
-    --euclid_dir   data/euclid_tiles_all \
-    --out_dir      checkpoints/centernet_v7 \
+    --feature_dir  data/cached_features_v7_rms_aware \
+    --rubin_dir    data/rubin_tiles_200 \
+    --euclid_dir   data/euclid_tiles_200 \
+    --out_dir      checkpoints/centernet_v7_rms_aware \
     --rounds 2 --epochs 100 --batch_size 4 \
     --wandb_project jaisp-detection
 
 # Option B: native-resolution StemCenterNet
 python models/detection/self_train_stem.py \
-    --encoder_ckpt checkpoints/<v7-foundation>/checkpoint_best.pt \
-    --rubin_dir    data/rubin_tiles_all \
-    --euclid_dir   data/euclid_tiles_all \
-    --out_dir      checkpoints/stem_centernet_v7 \
+    --encoder_ckpt models/checkpoints/jaisp_v7_concat/checkpoint_best.pt \
+    --rubin_dir    data/rubin_tiles_200 \
+    --euclid_dir   data/euclid_tiles_200 \
+    --out_dir      checkpoints/stem_centernet_v7_rms_aware \
     --rounds 2 --epochs 60 --batch_size 1 \
     --stream_ch 16 --base_ch 32 \
     --promotion_spike_radius 20 \
@@ -725,16 +754,17 @@ python models/photometry/train_psf_net.py \
 | Checkpoint / Artifact | Location | Description |
 |-----------------------|----------|-------------|
 | Historical V7 foundation baseline | `checkpoints/jaisp_v7_baseline/checkpoint_best.pt` | Legacy 144-tile V7 baseline (epoch 86, val_loss 1.4689) |
-| Current flat-set V7 working checkpoint | `checkpoints/jaisp_v7_tiles_all_ddp_online/checkpoint_best.pt` | Current downstream backbone used for recent detection experiments on the flat tile layout |
-| V7 detector (CenterNet bottleneck) | `checkpoints/centernet_v7_patch25_box16_round2/centernet_best.pt` | Current development checkpoint for fused-bottleneck CenterNet self-training |
-| V7 detector (StemCenterNet, artifact-aware) | `checkpoints/stem_centernet_v7_patch25_box16_round2_mask20/stem_centernet_best.pt` | Current development checkpoint for native-resolution StemCenterNet with lighter bright-star veto during round-2 promotion |
-| Cached features (recommended bottleneck path) | `data/cached_features_v7_tiles_all/` | Suggested output directory when rerunning CenterNet precompute on the flat tile set |
+| Previous flat-set V7 checkpoint | `checkpoints/jaisp_v7_tiles_all_ddp_online/checkpoint_best.pt` | Previous downstream backbone (before RMS-aware loss) |
+| **Current V7 foundation (RMS-aware)** | `models/checkpoints/jaisp_v7_concat/checkpoint_best.pt` | **Latest**: v7_rms_aware_loss run (epoch 92, val_loss 4.0493). Use this for all new downstream training. |
+| V7 detector (CenterNet bottleneck) | `checkpoints/centernet_v7_patch25_box16_round2/centernet_best.pt` | Trained on previous (non-RMS-aware) foundation; needs retraining on current checkpoint |
+| V7 detector (StemCenterNet, artifact-aware) | `checkpoints/stem_centernet_v7_patch25_box16_round2_mask20/stem_centernet_best.pt` | Trained on previous foundation; needs retraining on current checkpoint |
+| Cached features (previous) | `data/cached_features_v7_patch25_box16/` | Cached features from previous foundation checkpoint (stale) |
 
 ---
 
 ## Current Status
 
-- **V7 foundation** now has a working flat-set checkpoint at `checkpoints/jaisp_v7_tiles_all_ddp_online/checkpoint_best.pt`, which is the backbone currently used for downstream experiments on the new flat tile layout. The older `jaisp_v7_baseline` checkpoint is still useful as a historical reference.
+- **V7 foundation** current best checkpoint is `models/checkpoints/jaisp_v7_concat/checkpoint_best.pt` from the `v7_rms_aware_loss` run (epoch 92, val_loss 4.0493). This uses RMS-aware loss weighting and should be used for all new downstream training. The older `jaisp_v7_tiles_all_ddp_online` and `jaisp_v7_baseline` checkpoints are kept as historical references.
 - **Detection** now has three supported choices in the repo: classical VIS, fused-bottleneck `CenterNet`, and native-resolution `StemCenterNet`. The DETR code remains archived for historical reference only. The two neural detectors are intentionally both kept because they test different hypotheses about whether deep multi-band fusion or native-resolution stem reuse is more valuable for science detection tasks.
 - **Astrometry V7** matcher is actively being trained and evaluated. Recent improvements:
   - **Stream stages**: `--stream-stages 1` uses frozen V7 stream encoder ConvNeXt stages after the stems, giving richer features that leverage V7's deeper pretrained representations (not just the bare stems which are equivalent to V6).
