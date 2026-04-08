@@ -191,6 +191,8 @@ def train(args):
     use_cached = args.feature_dir is not None
     mode_str = 'cached features' if use_cached else 'live encoder'
     print(f'Training CenterNet detector on {device} ({mode_str})')
+    if device.type == 'cuda':
+        torch.backends.cudnn.benchmark = True
 
     if args.predict_profile:
         raise ValueError(
@@ -270,6 +272,7 @@ def train(args):
         model = CenterNetDetector(
             encoder=None,
             encoder_dim=encoder_dim,
+            head_ch=args.head_ch,
             predict_profile=args.predict_profile,
         ).to(device)
     else:
@@ -277,6 +280,7 @@ def train(args):
         model = CenterNetDetector(
             encoder=encoder,
             encoder_dim=encoder_dim,
+            head_ch=args.head_ch,
             predict_profile=args.predict_profile,
         ).to(device)
 
@@ -440,6 +444,8 @@ if __name__ == '__main__':
                    help='Detection significance for pseudo-labels')
     p.add_argument('--sigma',            type=float, default=2.0,
                    help='Gaussian sigma for heatmap targets (feature-map pixels)')
+    p.add_argument('--head_ch',          type=int, default=256,
+                   help='CenterNet decoder width. Lower is faster/lighter; default 256.')
     p.add_argument('--predict_profile',  action='store_true',
                    help='Add profile head (e1, e2, r_half, sersic_n)')
     p.add_argument('--wandb_project',    default=None)

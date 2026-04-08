@@ -59,6 +59,7 @@ def _run_training_round(
     lr: float = 1e-4,
     sigma: float = 2.0,
     nsig: float = 3.0,
+    head_ch: int = 256,
     device: torch.device = None,
     wandb_project: str = None,
     wandb_name: str = None,
@@ -75,6 +76,7 @@ def _run_training_round(
         '--lr', str(lr),
         '--sigma', str(sigma),
         '--nsig', str(nsig),
+        '--head_ch', str(head_ch),
     ]
     if euclid_dir:
         cmd += ['--euclid_dir', euclid_dir]
@@ -120,7 +122,11 @@ def _refine_labels(
 
     # Load trained model (head only)
     ckpt = torch.load(checkpoint, map_location='cpu', weights_only=True)
-    model = CenterNetDetector(encoder=None, encoder_dim=ckpt['encoder_dim'])
+    model = CenterNetDetector(
+        encoder=None,
+        encoder_dim=ckpt['encoder_dim'],
+        head_ch=ckpt.get('head_ch', 256),
+    )
     model.load_state_dict(ckpt['state_dict'])
     model = model.to(device).eval()
 
@@ -256,6 +262,8 @@ def main():
     p.add_argument('--lr',          type=float, default=1e-4)
     p.add_argument('--nsig',        type=float, default=3.0)
     p.add_argument('--sigma',       type=float, default=2.0)
+    p.add_argument('--head_ch',     type=int, default=256,
+                   help='CenterNet decoder width. Lower is faster/lighter; default 256.')
     p.add_argument('--promote_conf', type=float, default=0.8,
                    help='Confidence threshold for promoting novel detections')
     p.add_argument('--demote_conf', type=float, default=0.3,
@@ -318,6 +326,7 @@ def main():
             lr=args.lr,
             sigma=args.sigma,
             nsig=args.nsig,
+            head_ch=args.head_ch,
             device=device,
             wandb_project=args.wandb_project,
             wandb_name=f'round{round_num}',
