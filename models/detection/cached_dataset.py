@@ -11,7 +11,9 @@ precomputed augmentation variants.
 
 from __future__ import annotations
 
+import os
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -195,20 +197,37 @@ class CachedFeatureDataset(Dataset):
         print(f'  Computing pseudo-labels (nsig={self.nsig}) for '
               f'{len(tiles_to_compute)} tiles ...', end=' ', flush=True)
 
-        from concurrent.futures import ProcessPoolExecutor
-        import os
         euclid_str = str(euclid_dir) if euclid_dir else None
         rubin_str = str(rubin_dir)
         work = [(tid, euclid_str, rubin_str, self.nsig, self.max_sources)
                 for tid in tiles_to_compute]
-        n_workers = min(len(work), max(1, os.cpu_count() // 2))
-        with ProcessPoolExecutor(max_workers=n_workers) as pool:
-            for tid, centroids, classes, src in pool.map(_compute_one_label, work):
-                self._label_cache[tid] = (centroids, classes)
-                if src == 'vis':
-                    n_vis += 1
-                elif src == 'rubin':
-                    n_rubin += 1
+        total = len(work)
+        processed = 0
+
+        def _record(result):
+            nonlocal n_vis, n_rubin, processed
+            tid, centroids, classes, src = result
+            self._label_cache[tid] = (centroids, classes)
+            if src == 'vis':
+                n_vis += 1
+            elif src == 'rubin':
+                n_rubin += 1
+            processed += 1
+            if processed % 10 == 0 or processed == total:
+                print(f'{processed}/{total}', end=' ', flush=True)
+
+        # The brightness-scaled VIS spike masks are much heavier than the old
+        # fixed-radius masks.  A small thread pool avoids the BrokenProcessPool
+        # failures seen with many forked workers while still parallelising the
+        # NumPy/SciPy-heavy preprocessing.
+        n_workers = min(total, max(1, min(4, os.cpu_count() or 1)))
+        if n_workers > 1:
+            with ThreadPoolExecutor(max_workers=n_workers) as pool:
+                for result in pool.map(_compute_one_label, work):
+                    _record(result)
+        else:
+            for item in work:
+                _record(_compute_one_label(item))
 
         # Save full cache (existing + newly computed) with current nsig.
         torch.save({'labels': dict(self._label_cache), 'nsig': self.nsig}, cache_path)

@@ -82,7 +82,7 @@ def _vis_bright_core_and_spike_mask(
     This is used both by the classical VIS pseudo-labeler and by self-training
     refinement so artifact suppression stays consistent across stages.
     """
-    from scipy.ndimage import binary_dilation, center_of_mass, label as ndlabel
+    from scipy.ndimage import center_of_mass, distance_transform_edt, find_objects, label as ndlabel
 
     H, W = vis_img.shape
     bright_xs = np.empty(0, dtype=np.float64)
@@ -110,15 +110,32 @@ def _vis_bright_core_and_spike_mask(
     bright_ys = np.array([c[0] for c in coms], dtype=np.float64)
     bright_xs = np.array([c[1] for c in coms], dtype=np.float64)
 
+    blob_slices = find_objects(labeled)
+
     # Per-star brightness-scaled dilation: brighter stars (larger saturated
-    # area) get proportionally larger masks.
+    # area) get proportionally larger masks.  Work on each blob's local crop
+    # instead of dilating the full image every time; the brightness-scaled
+    # radii can be hundreds of pixels, so full-frame dilation is very slow.
     for lb in core_labels:
         r = int(spike_radius * np.sqrt(areas[lb] / min_star_area))
-        r = min(max(r, 1), max_spike_radius)
-        blob_mask = labeled == lb
-        yg, xg = np.ogrid[-r:r + 1, -r:r + 1]
-        disk = (xg ** 2 + yg ** 2) <= r ** 2
-        spike_mask |= binary_dilation(blob_mask, structure=disk)
+        blob_slice = blob_slices[lb - 1]
+        if blob_slice is None:
+            continue
+
+        y_slice, x_slice = blob_slice
+        if r <= 0:
+            spike_mask[y_slice, x_slice] |= labeled[y_slice, x_slice] == lb
+            continue
+
+        r = min(r, max_spike_radius)
+        y0 = max(0, y_slice.start - r)
+        y1 = min(H, y_slice.stop + r)
+        x0 = max(0, x_slice.start - r)
+        x1 = min(W, x_slice.stop + r)
+
+        local_blob = labeled[y0:y1, x0:x1] == lb
+        local_mask = distance_transform_edt(~local_blob) <= r
+        spike_mask[y0:y1, x0:x1] |= local_mask
 
     return bright_xs, bright_ys, spike_mask
 
