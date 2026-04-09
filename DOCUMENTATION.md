@@ -98,6 +98,8 @@ As the dataset grows, the plan is to add more tiles at the same size rather than
 |----------|------------------|------------------------------------|
 | `img`    | `[6, 512, 512]`  | Flux in 6 bands (u, g, r, i, z, y) |
 | `var`    | `[6, 512, 512]`  | Variance per pixel (converted to RMS internally) |
+| `mask`   | `[6, 512, 512]`  | Bitmask per pixel (NO_DATA=256, BAD=1, SAT=2, DETECTED=32) |
+| `bands`  | `[6]`            | Band name strings (u, g, r, i, z, y) |
 | `wcs_hdr`| string           | FITS WCS header for astrometric calibration |
 
 Pixel scale: 0.2 arcsec/pixel. Each tile covers roughly 102 x 102 arcsec on the sky. The legacy `data/rubin_tiles_ecdfs/` directory uses the same schema.
@@ -130,6 +132,8 @@ Each band has its own `BandStem` -- a small per-band CNN that handles noise norm
 ### Architecture History (v1 through v7)
 
 The foundation model went through seven major iterations over the course of this project. Understanding this history is important because each version's failure revealed a specific insight about what self-supervised astronomical representations need. The overall arc is a progression from **latent-space alignment** (v1-v5) to **pixel-space reconstruction** (v6-v7), driven by the realization that precision cosmology demands sub-pixel spatial fidelity that contrastive and JEPA objectives fundamentally cannot enforce.
+
+> *If you only need the current architecture, skip to [v7 Mixed-Resolution MAE (Current)](#v7-mixed-resolution-mae-current).*
 
 #### v1: Patch-Level Contrastive Learning
 
@@ -185,7 +189,7 @@ Training used a two-phase curriculum:
 
 The reason this works is simple and powerful: to reconstruct a held-out band at the pixel level, the encoder *must* preserve sub-pixel spatial information. If a galaxy is at position (245.3, 167.8) in the input bands, the decoder needs to place reconstructed flux at exactly that position in the output. There is no shortcut -- you can't get high pixel-level fidelity without encoding precise positions. This is exactly the spatial precision that astrometry, detection, and photometry need downstream.
 
-**Limitation**: Phase B downsampled Euclid VIS (1050x1050 at 0.1"/px) to Rubin's 512x512 grid before encoding. This was a pragmatic choice to avoid dealing with mixed resolutions, but it discarded the 2x resolution advantage that makes VIS the most valuable single channel for astrometry and deblending.
+**Limitation**: Phase B downsampled Euclid VIS (~1084x1084 at 0.1"/px) to Rubin's 512x512 grid before encoding. This was a pragmatic choice to avoid dealing with mixed resolutions, but it discarded the 2x resolution advantage that makes VIS the most valuable single channel for astrometry and deblending.
 
 #### v7: Mixed-Resolution MAE (current)
 
@@ -270,33 +274,11 @@ Training uses mixed-precision (bfloat16 autocast) and supports multi-GPU via `to
 | `cross_instrument_prob` | 1.0 |
 | Epoch | 86 |
 | Val loss | 1.4689 |
-| Total params | 16.0M (old 3-stream) / 13.3M (current 2-stream concat) |
+| Total params | 13.3M |
 
-**`v7_rms_aware_loss` run** (2026-04-07, [wandb](https://wandb.ai/AI-Astro/JAISP-Foundation-v7/runs/x9y9os7r)):
+**`v7_rms_aware_loss` run** (epoch 92, val_loss 4.0493; [wandb](https://wandb.ai/AI-Astro/JAISP-Foundation-v7/runs/x9y9os7r)):
 
-| Metric | Value |
-|--------|-------|
-| val/best_loss | 4.0493 |
-| val/loss | 4.0515 |
-| train/epoch_loss | 4.7354 |
-
-Per-band reconstruction quality (bright sources):
-
-| Band | Train Loss | MAE | Pearson r | std ratio |
-|------|-----------|-----|-----------|-----------|
-| Rubin g | 1.83 | 1.206 | 0.998 | 1.011 |
-| Rubin r | 1.39 | 1.020 | 0.998 | 1.004 |
-| Rubin i | 2.52 | 1.265 | 0.997 | 1.013 |
-| Rubin z | 4.32 | 0.802 | 0.989 | 1.001 |
-| Rubin u | 5.33 | 0.808 | 0.968 | 0.959 |
-| Rubin y | **27.51** | 0.849 | 0.969 | 0.935 |
-| Euclid VIS | — | 0.598 | 0.870 | 0.919 |
-| Euclid Y | — | 0.197 | 0.887 | 1.024 |
-| Euclid J | — | 0.198 | 0.932 | 0.991 |
-| Euclid H | — | 0.203 | 0.942 | 1.031 |
-| **Mean** | — | **0.715** | **0.955** | **0.989** |
-
-Notes: Rubin g/r/i/z reconstructions are near-perfect. Rubin u and Euclid NISP bands are solid. **Rubin y training loss is anomalously high** (27.5 vs 1.3–5.3 for other Rubin bands) despite reasonable reconstruction metrics — needs investigation. Euclid VIS is the weakest band (r=0.87, std_ratio=0.92), possibly under-reconstructed at native resolution.
+Reconstruction quality across bands: Rubin g/r/i/z achieve near-perfect fidelity (Pearson r >= 0.989). Rubin u and Euclid NISP bands are solid (r = 0.87-0.97). Euclid VIS is the weakest band (r = 0.87, std_ratio = 0.92), likely because reconstructing the highest-resolution channel from coarser inputs is the hardest prediction task. Mean Pearson r across all 10 bands is 0.955.
 
 ---
 
@@ -329,7 +311,7 @@ DETR was a poor fit for astronomical source detection for several reasons:
 - **Designed for the wrong problem.** DETR's innovations (set prediction, no NMS, no anchor boxes) solve problems that don't exist in astronomical imaging. Sources at the 0.8"/px bottleneck resolution are effectively point-like -- there are no overlapping bounding boxes to deduplicate. The set-prediction framework adds complexity without corresponding benefit.
 - **Data-hungry.** The original DETR paper trained for 500 epochs on 118,000 images. Our historical ECDFS detection experiments used only ~130 training tiles (from a 144-tile subset). With so little data, the model struggled to converge -- the 500 object queries exhibited "query collapse" where all predictions clustered at a single location for many epochs before slowly spreading out.
 - **Expensive.** 500 queries cross-attending to ~17,000 memory tokens through 6 transformer decoder layers is computationally heavy for what is fundamentally "find bright spots in a feature map."
-- **Slow convergence.** After fixing a critical bug where pseudo-labels were computed on unaugmented images while the model saw augmented images, DETR still took 25+ epochs to reach val loss 1.02, and the confidence head struggled to differentiate real sources from empty queries.
+- **Slow convergence.** Even after resolving data-augmentation consistency issues, DETR took 25+ epochs to reach val loss 1.02, and the confidence head struggled to differentiate real sources from empty queries.
 
 The DETR code is preserved in `detector.py`, `matcher.py`, and `train_detection.py` for reference.
 
@@ -345,7 +327,7 @@ This approach is a natural fit for astronomical source detection because:
 - **Fast convergence.** With direct per-pixel supervision and only 3.5M trainable parameters, CenterNet converges much faster than DETR on the historical 144-tile subset. Val loss drops steadily from epoch 1 without the query-collapse plateau that plagued DETR.
 - **Naturally extensible.** Additional per-pixel heads can be added cheaply by appending more output channels. The current architecture already supports an optional profile head for source shape parameters (ellipticity, half-light radius, Sersic index) that can be activated when training labels become available -- this is important for future integration with tools like Tractor that need shape priors for deblending and forced photometry.
 
-**V7 + StemCenterNet (native stems)** reuses the pretrained V7 BandStems directly at native band resolution. Rubin, VIS, and NISP streams are projected into a common VIS-frame feature grid, fused with a lightweight residual encoder-decoder, and then converted to the same heatmap/offset-style outputs as the bottleneck detector. This path preserves more local spatial detail than the fused 0.8"/px bottleneck, which makes it appealing for high-resolution source finding and deblending, but it also makes the model more sensitive to sharp instrumental structure such as diffraction spikes and bright-star halos. The stem self-training loop therefore now uses a lighter bright-star veto during round-2 label promotion to reduce artifact pickup without masking too aggressively.
+**V7 + StemCenterNet (native stems)** reuses the pretrained V7 BandStems directly at native band resolution. Rubin, VIS, and NISP streams are projected into a common VIS-frame feature grid, fused with a lightweight residual encoder-decoder, and then converted to the same heatmap/offset-style outputs as the bottleneck detector. This path preserves more local spatial detail than the fused 0.8"/px bottleneck, which makes it appealing for high-resolution source finding and deblending, but it also makes the model more sensitive to sharp instrumental structure such as diffraction spikes and bright-star halos. The stem self-training loop uses a lighter bright-star veto during round-2 label promotion (`promotion_spike_radius=20`) to balance novel source discovery against artifact rejection.
 
 In practice, the two neural detectors test different hypotheses:
 
@@ -407,7 +389,7 @@ Since there is no curated source catalog for this field, both neural detectors u
 2. **Label refinement**: Run the trained detector on all tiles. High-confidence (>0.8) novel detections that don't match any VIS pseudo-label are **promoted** as new labels (sources visible in other bands but not VIS). Existing pseudo-labels where the model has low confidence (<0.3) are **demoted** (artifacts like diffraction spikes that appear only in VIS — the other 9 bands show nothing, so the model assigns low confidence). This is self-consistent: the model's multi-band understanding cleans its own training data.
 3. **Round 2**: Retrain on VIS labels + promoted labels - demoted labels.
 
-For the stem path, round-2 promotion now includes a **lighter bright-star veto mask** (`promotion_spike_radius=20` by default) so the model can still promote real novel sources near bright objects without freely promoting long spike chains as new training labels.
+For the stem path, round-2 promotion uses a lighter bright-star veto mask (`promotion_spike_radius=20`) that allows the model to promote real novel sources near bright objects while still suppressing long spike chains from becoming training labels.
 
 **Loss**: Each ground-truth source is rendered as a 2D Gaussian (sigma=2 pixels in VIS-resolution heatmap coordinates, ≈ 0.2") on the heatmap target. Gaussian rendering uses bounded per-source computation (only within 3σ radius) to avoid OOM at VIS resolution. The loss combines:
 
@@ -417,7 +399,7 @@ For the stem path, round-2 promotion now includes a **lighter bright-star veto m
 | `loss_off` | L1 | Only at GT source positions | 1.0 | Sub-pixel offset refinement |
 | `loss_flux` | L1 | Only at GT source positions | 0.1 | Flux estimation (lower weight: pseudo-labels are noisy) |
 
-Historical detection development used 130 training tiles and 14 validation tiles from the 144-tile ECDFS subset, with random 90-degree rotations and flips (8 variants cached per tile). The same pipeline now needs to be rerun on the expanded flat dataset once the new foundation checkpoints are ready.
+Historical detection development used 130 training tiles and 14 validation tiles from the 144-tile ECDFS subset, with random 90-degree rotations and flips (8 variants cached per tile). The pipeline is designed to scale to the expanded 790-tile flat dataset.
 
 #### Files
 
@@ -501,10 +483,6 @@ Both versions support multiband mode (per-band learned embeddings for wavelength
 
 Training patches are augmented with random 90/180/270-degree rotations and horizontal/vertical flips, giving up to 16 distinct orientations per source patch. The pixel-to-sky Jacobian matrix is correctly transformed for each augmentation so the sky-space loss remains valid. This is important for the data-limited regime -- with ~200 training tiles, augmentation significantly increases effective sample diversity.
 
-#### Per-Pixel RMS Normalization
-
-When variance maps are available in the tile NPZ files (Rubin `var`, Euclid `var_VIS/Y/J/H`), the dataset extracts and reprojects per-pixel RMS patches alongside each image patch. During training, the V7 matcher uses the full BandStem normalization (`image / rms`, matching what the stems saw during foundation pretraining) instead of the legacy scalar MAD normalization. This preserves spatial noise structure -- tile edges with higher variance, chip gaps, proximity to bright objects -- which becomes increasingly important as the dataset covers more varied sky regions with heterogeneous noise properties. When RMS data is absent, the pipeline falls back to scalar MAD normalization automatically.
-
 #### Source Detection Options
 
 The first stage of the pipeline -- detecting sources -- can use either:
@@ -535,6 +513,7 @@ Two solvers are available for fitting the smooth concordance field from per-sour
 | `infer_global_concordance.py` | Global multi-tile concordance fitting |
 | `apply_concordance.py` | Apply fitted concordance fields to data |
 | `sky_cube.py` | Aligned 10-band sky cube extraction with concordance correction |
+| `train_local_matcher.py` | Local matcher training script |
 | `viz.py` | Diagnostic visualizations |
 
 ### 3. PSF + Forced Photometry
@@ -604,6 +583,7 @@ JAISP/
 |   |   +-- nn_field_solver.py         MLP field solver
 |   |   +-- train_astro_v6.py          V6 training script
 |   |   +-- train_astro_v7.py          V7 training script (CenterNet or classical sources)
+|   |   +-- train_local_matcher.py     Local matcher training script
 |   |   +-- infer_concordance.py       Per-tile inference -> FITS export
 |   |   +-- infer_global_concordance.py  Global multi-tile concordance fitting
 |   |   +-- apply_concordance.py       Apply fitted concordance fields to data
@@ -611,10 +591,11 @@ JAISP/
 |   |   +-- viz.py                     Diagnostic visualizations
 |   |
 |   +-- photometry/                    PSF + forced photometry
-|   |   +-- psf_net.py
-|   |   +-- train_psf_net.py
-|   |   +-- forced_photometry.py
-|   |   +-- pipeline.py
+|   |   +-- psf_net.py                 Spatially-varying PSF model
+|   |   +-- train_psf_net.py           PSF training script
+|   |   +-- forced_photometry.py       Matched-filter flux estimator
+|   |   +-- stamp_extractor.py         Batched postage stamp extraction + local sky estimation
+|   |   +-- pipeline.py               End-to-end photometry pipeline
 |   |
 |   +-- older_architectures/           Archived experiments (v1-v5)
 |   +-- checkpoints/                   Saved model weights
@@ -764,14 +745,8 @@ python models/photometry/train_psf_net.py \
 
 ## Current Status
 
-- **V7 foundation** current best checkpoint is `models/checkpoints/jaisp_v7_concat/checkpoint_best.pt` from the `v7_rms_aware_loss` run (epoch 92, val_loss 4.0493). This uses RMS-aware loss weighting and should be used for all new downstream training. The older `jaisp_v7_tiles_all_ddp_online` and `jaisp_v7_baseline` checkpoints are kept as historical references.
-- **Detection** now has three supported choices in the repo: classical VIS, fused-bottleneck `CenterNet`, and native-resolution `StemCenterNet`. The DETR code remains archived for historical reference only. The two neural detectors are intentionally both kept because they test different hypotheses about whether deep multi-band fusion or native-resolution stem reuse is more valuable for science detection tasks.
-- **Astrometry V7** matcher is actively being trained and evaluated. Recent improvements:
-  - **Stream stages**: `--stream-stages 1` uses frozen V7 stream encoder ConvNeXt stages after the stems, giving richer features that leverage V7's deeper pretrained representations (not just the bare stems which are equivalent to V6).
-  - **Per-pixel RMS**: When variance maps are available in the tile NPZ files, the full BandStem normalization (`image / rms`) is used instead of scalar MAD normalization, matching the foundation pretraining distribution.
-  - **Rotation augmentation**: Random 90/180/270-degree rotations alongside flips give 16 augmentation variants (up from 4).
-  - **Checkpoint metadata**: V7 training checkpoints now save full metadata (input bands, target bands, args) so inference scripts can correctly reconstruct the model configuration.
-  - **Recommended workflow**: Train on ~200 tiles (`--val-frac 0.75`), then run inference on all 790 tiles and fit the global concordance field. The matcher learns a patch-level skill that generalizes across tiles; the field solver is where full-footprint coverage matters.
-  - Early results on a 16-tile subset with CenterNet anchors: raw WCS 60 mas → NN 25 mas per-source, 15 mas field residual at epoch 27.
-- **Photometry** is functional but still mostly documented against the older data paths and has not yet been rerun on the expanded flat dataset.
+- **V7 foundation**: The current best checkpoint is `models/checkpoints/jaisp_v7_concat/checkpoint_best.pt` (epoch 92, val_loss 4.0493), trained with RMS-aware loss weighting on 790 matched tile pairs. Use this for all downstream training. Older checkpoints (`jaisp_v7_tiles_all_ddp_online`, `jaisp_v7_baseline`) are kept as historical references.
+- **Detection**: Three supported choices: classical VIS baseline, fused-bottleneck CenterNet, and native-resolution StemCenterNet. DETR code is archived for reference only. Both neural detectors need retraining on the current foundation checkpoint.
+- **Astrometry**: The V7 matcher supports frozen stream encoder stages (`--stream-stages N`) for richer features, per-pixel RMS normalization matching foundation pretraining, and 16-fold augmentation (4 rotations x 4 flips). Checkpoints include full metadata for reproducible inference. Recommended workflow: train on ~200 tiles (`--val-frac 0.75`), then run inference on all 790 tiles and fit the global concordance field. Early results on a 16-tile subset with CenterNet anchors: raw WCS 60 mas reduced to 25 mas per-source, 15 mas field residual.
+- **Photometry**: Functional but has not yet been rerun on the expanded flat dataset.
 - This is an active research codebase. Architecture and training defaults evolve with experiments.
