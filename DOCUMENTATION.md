@@ -667,7 +667,7 @@ python models/detection/self_train_stem.py \
     --encoder_ckpt models/checkpoints/jaisp_v7_concat/checkpoint_best.pt \
     --rubin_dir    data/rubin_tiles_200 \
     --euclid_dir   data/euclid_tiles_200 \
-    --out_dir      checkpoints/stem_centernet_v7_rms_aware \
+    --out_dir      checkpoints/stem_centernet_v7_rms_aware_200 \
     --rounds 2 --epochs 60 --batch_size 1 \
     --stream_ch 16 --base_ch 32 \
     --promotion_spike_radius 20 \
