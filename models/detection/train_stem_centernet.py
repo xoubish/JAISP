@@ -197,7 +197,7 @@ def train(args):
         model = DDP(
             model,
             device_ids=[local_rank] if device.type == "cuda" else None,
-            find_unused_parameters=True,
+            find_unused_parameters=False,
         )
 
     model_to_save = model.module if use_ddp else model
