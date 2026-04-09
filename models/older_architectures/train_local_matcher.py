@@ -394,8 +394,12 @@ def build_parser() -> argparse.ArgumentParser:
     # Multi-band mode
     p.add_argument('--multiband', action='store_true',
                    help='Train in multi-band mode: all 6 Rubin bands as input, per-band MLP head.')
-    p.add_argument('--target-bands', type=str, nargs='+', default=['all'],
-                   help='Target bands for multiband mode. "all" = all 6 Rubin bands, "all_nisp" adds NISP Y/J/H. Default: all.')
+    p.add_argument('--target-bands', type=str, nargs='+', default=['all', 'all_nisp'],
+                   help='Target bands for multiband mode. "all" = all 6 Rubin bands, '
+                        '"all_nisp" adds NISP Y/J/H. Default: all + all_nisp.')
+    p.add_argument('--bands', type=str, nargs='+', default=None,
+                   help='Alias for --target-bands. Accepts Rubin letters (u g r i z y), '
+                        'and NISP bands as "nisp_Y/J/H" or uppercase "Y/J/H".')
     p.add_argument('--include-nisp', action='store_true',
                    help='Include NISP Y/J/H as input channels (multiband mode only).')
     p.add_argument('--band-embed-dim', type=int, default=16,
@@ -449,6 +453,39 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--wandb-run-name', type=str, default='')
     p.add_argument('--wandb-mode', type=str, default='online', choices=['online', 'offline', 'disabled'])
     return p
+
+
+def apply_band_overrides(args):
+    """Normalize band-related args for multiband training/inference."""
+    # Alias: --bands overrides --target-bands if provided.
+    if getattr(args, 'bands', None):
+        expanded = []
+        for item in args.bands:
+            expanded.extend([p.strip() for p in str(item).split(',') if str(p).strip()])
+        args.target_bands = expanded
+    elif getattr(args, 'target_bands', None):
+        # Expand comma-separated entries in target_bands too.
+        expanded = []
+        for item in args.target_bands:
+            expanded.extend([p.strip() for p in str(item).split(',') if str(p).strip()])
+        args.target_bands = expanded
+
+    # Default to Rubin + NISP if target_bands missing/empty.
+    if not getattr(args, 'target_bands', None):
+        args.target_bands = ['all', 'all_nisp']
+
+    # Auto-enable NISP inputs if any NISP targets are requested.
+    wants_nisp = False
+    for b in args.target_bands:
+        s = str(b).strip()
+        if not s:
+            continue
+        if s.lower().startswith('nisp_') or s.lower() == 'all_nisp' or s in ('Y', 'J', 'H'):
+            wants_nisp = True
+            break
+    if wants_nisp:
+        args.include_nisp = True
+    return args
 
 
 def train(args):
@@ -663,6 +700,7 @@ def train(args):
 
 if __name__ == '__main__':
     args = build_parser().parse_args()
+    args = apply_band_overrides(args)
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
     os.environ.setdefault('PYTHONHASHSEED', str(args.seed))

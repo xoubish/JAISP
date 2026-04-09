@@ -12,7 +12,7 @@ Extra CLI args vs train_local_matcher.py:
 
 Usage:
     python train_astro_v7.py \
-        --v7-checkpoint ../../checkpoints/jaisp_v7_baseline/checkpoint_best.pt \
+        --v7-checkpoint ../../models/checkpoints/jaisp_v7_concat/checkpoint_best.pt \
         --rubin-dir     ../../data/rubin_tiles_ecdfs \
         --euclid-dir    ../../data/euclid_tiles_ecdfs \
         --multiband \
@@ -21,8 +21,8 @@ Usage:
 
     # With CenterNet source detection:
     python train_astro_v7.py \
-        --v7-checkpoint       ../../checkpoints/jaisp_v7_baseline/checkpoint_best.pt \
-        --detector-checkpoint ../checkpoints/centernet_v7_selftrain_vis/centernet_best.pt \
+        --v7-checkpoint       ../../models/checkpoints/jaisp_v7_concat/checkpoint_best.pt \
+        --detector-checkpoint ../checkpoints/centernet_v7_rms_aware/centernet_best.pt \
         --rubin-dir      ../../data/rubin_tiles_ecdfs \
         --euclid-dir     ../../data/euclid_tiles_ecdfs \
         --multiband \
@@ -46,6 +46,7 @@ for _p in (_MODELS_DIR, _SCRIPT_DIR):
     sys.path.insert(0, _sp)
 
 from astrometry2.train_local_matcher import (
+    apply_band_overrides,
     build_parser,
     compute_loss,
     compute_metrics,
@@ -111,7 +112,7 @@ def build_v7_parser() -> argparse.ArgumentParser:
 
     g = p.add_argument_group('v7 backbone')
     g.add_argument('--v7-checkpoint', type=str, required=True,
-                   help='Path to jaisp_v7_baseline checkpoint_best.pt')
+                   help='Path to V7 foundation checkpoint_best.pt (RMS-aware recommended).')
     g.add_argument('--adapter-blocks', type=int, default=2,
                    help='Trainable ConvNeXt adapter blocks (default: 2)')
     g.add_argument('--unfreeze-stems', action='store_true',
@@ -140,6 +141,7 @@ def build_v7_parser() -> argparse.ArgumentParser:
 # ============================================================
 
 def train(args):
+    args = apply_band_overrides(args)
     device = torch.device(
         args.device if args.device else ('cuda' if torch.cuda.is_available() else 'cpu')
     )

@@ -678,14 +678,18 @@ python models/detection/self_train_stem.py \
 
 The matcher is a patch-level model -- it only needs to learn "given a 33x33 patch pair, predict the offset." Training on ~200 tiles is sufficient; inference and field solving then run on all 790. Use `--val-frac 0.75` to train on ~200 tiles while holding out the rest for validation.
 
+Notes:
+- In multiband mode, the default now trains **all Rubin + NISP bands** (10 total). Use `--bands` to limit targets (e.g., `--bands u g r i z y` for Rubin-only).
+
 ```bash
 # V7 backbone with CenterNet source detection (recommended)
 python models/astrometry2/train_astro_v7.py \
-    --v7-checkpoint       checkpoints/<v7-foundation>/checkpoint_best.pt \
-    --detector-checkpoint checkpoints/<detector>/centernet_best.pt \
+    --v7-checkpoint       models/checkpoints/jaisp_v7_concat/checkpoint_best.pt \
+    --detector-checkpoint checkpoints/centernet_v7_rms_aware/centernet_best.pt \
     --rubin-dir      data/rubin_tiles_all \
     --euclid-dir     data/euclid_tiles_all \
     --multiband \
+    --bands all,all_nisp \
     --stream-stages 1 \
     --val-frac 0.75 \
     --epochs 60 \
@@ -694,10 +698,11 @@ python models/astrometry2/train_astro_v7.py \
 
 # V7 backbone with classical source detection (no detector needed)
 python models/astrometry2/train_astro_v7.py \
-    --v7-checkpoint  checkpoints/<v7-foundation>/checkpoint_best.pt \
+    --v7-checkpoint  models/checkpoints/jaisp_v7_concat/checkpoint_best.pt \
     --rubin-dir      data/rubin_tiles_all \
     --euclid-dir     data/euclid_tiles_all \
     --multiband \
+    --bands all,all_nisp \
     --stream-stages 1 \
     --val-frac 0.75 \
     --epochs 60 \
@@ -710,8 +715,8 @@ python models/astrometry2/train_astro_v7.py \
 # Generate concordance FITS with V7 matcher + CenterNet sources
 python models/astrometry2/infer_concordance.py \
     --checkpoint         checkpoints/astro_v7/checkpoint_best.pt \
-    --v7-checkpoint      checkpoints/<v7-foundation>/checkpoint_best.pt \
-    --detector-checkpoint checkpoints/<detector>/centernet_best.pt \
+    --v7-checkpoint      models/checkpoints/jaisp_v7_concat/checkpoint_best.pt \
+    --detector-checkpoint checkpoints/centernet_v7_rms_aware/centernet_best.pt \
     --rubin-dir     data/rubin_tiles_all \
     --euclid-dir    data/euclid_tiles_all \
     --output        concordance_v7.fits \

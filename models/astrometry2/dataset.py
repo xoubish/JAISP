@@ -99,7 +99,25 @@ def _constant_rms_image(image: np.ndarray) -> np.ndarray:
     return np.full_like(img, max(sig, 1e-10), dtype=np.float32)
 
 
-def build_full_context_detector_inputs(edata, rubin_cube: np.ndarray) -> Tuple[Dict[str, np.ndarray], Dict[str, np.ndarray], Tuple[int, int]]:
+def _rms_from_var_or_image(var: Optional[np.ndarray], img: np.ndarray) -> np.ndarray:
+    """Return RMS from variance, with robust fallback to image-based estimate."""
+    if var is None:
+        return _constant_rms_image(img)
+    v = np.asarray(var, dtype=np.float32)
+    rms = np.sqrt(np.maximum(np.nan_to_num(v, nan=0.0), 0.0)).astype(np.float32)
+    good = np.isfinite(rms) & (rms > 0)
+    if good.all():
+        return rms
+    fallback = _constant_rms_image(img)
+    rms = np.where(good, rms, fallback)
+    return rms.astype(np.float32)
+
+
+def build_full_context_detector_inputs(
+    edata,
+    rubin_cube: np.ndarray,
+    rubin_var: Optional[np.ndarray] = None,
+) -> Tuple[Dict[str, np.ndarray], Dict[str, np.ndarray], Tuple[int, int]]:
     """Build the full 10-band input dict expected by the V7 detector."""
     tile_images: Dict[str, np.ndarray] = {}
     tile_rms: Dict[str, np.ndarray] = {}
@@ -110,11 +128,15 @@ def build_full_context_detector_inputs(edata, rubin_cube: np.ndarray) -> Tuple[D
         band = f'rubin_{short}'
         img = np.nan_to_num(_to_float32(rubin_cube[i]), nan=0.0)
         tile_images[band] = img
-        tile_rms[band] = _constant_rms_image(img)
+        band_var = None
+        if rubin_var is not None and i < rubin_var.shape[0]:
+            band_var = rubin_var[i]
+        tile_rms[band] = _rms_from_var_or_image(band_var, img)
 
     vis_img = np.nan_to_num(_to_float32(edata['img_VIS']), nan=0.0)
     tile_images['euclid_VIS'] = vis_img
-    tile_rms['euclid_VIS'] = _constant_rms_image(vis_img)
+    vis_var = edata['var_VIS'] if 'var_VIS' in edata else None
+    tile_rms['euclid_VIS'] = _rms_from_var_or_image(vis_var, vis_img)
 
     for short in NISP_BAND_ORDER:
         key = f'img_{short}'
@@ -122,7 +144,9 @@ def build_full_context_detector_inputs(edata, rubin_cube: np.ndarray) -> Tuple[D
             continue
         img = np.nan_to_num(_to_float32(edata[key]), nan=0.0)
         tile_images[f'euclid_{short}'] = img
-        tile_rms[f'euclid_{short}'] = _constant_rms_image(img)
+        var_key = f'var_{short}'
+        band_var = edata[var_key] if var_key in edata else None
+        tile_rms[f'euclid_{short}'] = _rms_from_var_or_image(band_var, img)
 
     return tile_images, tile_rms, vis_img.shape
 
@@ -130,12 +154,13 @@ def build_full_context_detector_inputs(edata, rubin_cube: np.ndarray) -> Tuple[D
 def detect_sources_multiband(
     edata,
     rubin_cube: np.ndarray,
+    rubin_var: Optional[np.ndarray],
     detector,
     device,
     conf_threshold: float = 0.3,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Run the neural detector on the full 10-band tile and return VIS-frame anchors."""
-    tile_images, tile_rms, tile_hw = build_full_context_detector_inputs(edata, rubin_cube)
+    tile_images, tile_rms, tile_hw = build_full_context_detector_inputs(edata, rubin_cube, rubin_var=rubin_var)
     return detect_sources_neural(
         tile_images,
         tile_rms,
@@ -456,7 +481,9 @@ def build_patch_samples(
             rdata = np.load(rubin_path, allow_pickle=True)
             edata = np.load(euclid_path, allow_pickle=True)
             rubin_cube = rdata['img']
+            rubin_var = rdata['var'] if 'var' in rdata else None
             vis_img = np.nan_to_num(_to_float32(edata['img_VIS']), nan=0.0)
+            vis_var = _to_float32(edata['var_VIS']) if 'var_VIS' in edata else None
             rubin_target = np.nan_to_num(_to_float32(rubin_cube[target_idx]), nan=0.0)
             rwcs = WCS(rdata['wcs_hdr'].item())
             vhdr = safe_header_from_card_string(edata['wcs_VIS'].item())
@@ -470,6 +497,7 @@ def build_patch_samples(
             ax, ay = detect_sources_multiband(
                 edata,
                 rubin_cube,
+                rubin_var,
                 detr_detector,
                 detr_device,
                 conf_threshold=detr_conf_threshold,
@@ -560,10 +588,16 @@ def build_patch_samples(
             keep.sort()
 
         tile_samples = []
+        # Pre-compute per-band RMS images (sqrt of variance, clamped).
+        has_rms = rubin_var is not None and vis_var is not None
+        if has_rms:
+            vis_rms = np.sqrt(np.maximum(np.nan_to_num(vis_var, nan=0.0), 1e-20)).astype(np.float32)
+
         for idx in keep:
             anchor_xy = vis_xy[idx]
             vis_patch = extract_vis_patch(vis_img, anchor_xy, patch_size)
             rubin_patches = []
+            rubin_rms_patches = [] if has_rms else None
             for band in input_bands:
                 band_idx = RUBIN_BAND_ORDER.index(band.split('_', 1)[1])
                 if band_idx >= rubin_cube.shape[0]:
@@ -571,22 +605,31 @@ def build_patch_samples(
                 rubin_band_img = np.nan_to_num(_to_float32(rubin_cube[band_idx]), nan=0.0)
                 rubin_patch = reproject_rubin_patch_to_vis(rubin_band_img, rwcs, vwcs, anchor_xy, patch_size)
                 rubin_patches.append(rubin_patch)
+                if rubin_rms_patches is not None:
+                    band_rms = np.sqrt(np.maximum(
+                        np.nan_to_num(_to_float32(rubin_var[band_idx]), nan=0.0), 1e-20,
+                    )).astype(np.float32)
+                    rubin_rms_patches.append(
+                        reproject_rubin_patch_to_vis(band_rms, rwcs, vwcs, anchor_xy, patch_size)
+                    )
             if not rubin_patches:
                 continue
 
             pix2sky = local_vis_pixel_to_sky_matrix(vwcs, anchor_xy)
-            tile_samples.append(
-                {
-                    'tile_id': tile_id,
-                    'anchor_xy': anchor_xy.astype(np.float32),
-                    'rubin_patch': np.stack(rubin_patches, axis=0).astype(np.float32),
-                    'vis_patch': vis_patch[None].astype(np.float32),
-                    'target_offset_arcsec': offsets[idx].astype(np.float32),
-                    'pixel_to_sky': pix2sky.astype(np.float32),
-                    'input_bands': list(input_bands),
-                    'target_band': target_band,
-                }
-            )
+            sample = {
+                'tile_id': tile_id,
+                'anchor_xy': anchor_xy.astype(np.float32),
+                'rubin_patch': np.stack(rubin_patches, axis=0).astype(np.float32),
+                'vis_patch': vis_patch[None].astype(np.float32),
+                'target_offset_arcsec': offsets[idx].astype(np.float32),
+                'pixel_to_sky': pix2sky.astype(np.float32),
+                'input_bands': list(input_bands),
+                'target_band': target_band,
+            }
+            if has_rms:
+                sample['rubin_rms_patch'] = np.stack(rubin_rms_patches, axis=0).astype(np.float32)
+                sample['vis_rms_patch'] = extract_vis_patch(vis_rms, anchor_xy, patch_size)[None].astype(np.float32)
+            tile_samples.append(sample)
 
         if tile_samples:
             samples.extend(tile_samples)
@@ -673,13 +716,21 @@ def build_patch_samples_multiband(
         target_bands_norm.extend([f'nisp_{b}' for b in NISP_BAND_ORDER])
     # Also parse individual band names.
     for b in target_bands_raw:
-        b_lc = b.lower()
-        if b_lc.startswith('nisp_'):
-            nb = normalize_nisp_band(b)
+        b_str = str(b).strip()
+        if not b_str:
+            continue
+        b_lc = b_str.lower()
+        # Allow shorthand NISP bands as uppercase Y/J/H.
+        if b_str in ('Y', 'J', 'H'):
+            nb = normalize_nisp_band(f'nisp_{b_str}')
+            if nb not in target_bands_norm:
+                target_bands_norm.append(nb)
+        elif b_lc.startswith('nisp_'):
+            nb = normalize_nisp_band(b_str)
             if nb not in target_bands_norm:
                 target_bands_norm.append(nb)
         elif b_lc not in ('all', 'all_rubin', 'all_nisp'):
-            nb = normalize_rubin_band(b)
+            nb = normalize_rubin_band(b_str)
             if nb not in target_bands_norm:
                 target_bands_norm.append(nb)
     if not target_bands_norm:
@@ -730,6 +781,7 @@ def build_patch_samples_multiband(
             ax, ay = detect_sources_multiband(
                 edata,
                 rubin_cube,
+                rubin_var,
                 detr_detector,
                 detr_device,
                 conf_threshold=detr_conf_threshold,

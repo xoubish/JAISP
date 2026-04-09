@@ -202,6 +202,7 @@ def collect_all_predictions_multiband(
             rdata = np.load(rubin_path, allow_pickle=True)
             edata = np.load(euclid_path, allow_pickle=True)
             rubin_cube = rdata['img']
+            rubin_var = rdata['var'] if 'var' in rdata else None
             vis_img = np.nan_to_num(_to_float32(edata['img_VIS']), nan=0.0)
             rwcs = WCS(rdata['wcs_hdr'].item())
             vhdr = safe_header_from_card_string(edata['wcs_VIS'].item())
@@ -214,7 +215,7 @@ def collect_all_predictions_multiband(
         # ---- DETECT ONCE ----
         if _detr is not None:
             ax, ay = detect_sources_multiband(
-                edata, rubin_cube, _detr, device,
+                edata, rubin_cube, rubin_var, _detr, device,
                 conf_threshold=getattr(args, 'detector_conf_threshold', 0.3),
             )
             if ax.size == 0:
