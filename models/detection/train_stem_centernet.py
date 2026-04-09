@@ -28,6 +28,7 @@ for _p in (_HERE, _MODELS):
 
 from detection.centernet_loss import CenterNetLoss
 from detection.dataset import TileDetectionDataset, collate_fn
+from jaisp_foundation_v7 import RUBIN_BANDS, EUCLID_BANDS
 from detection.stem_centernet_detector import (
     StemCenterNetDetector,
     load_v7_foundation_from_checkpoint,
@@ -96,6 +97,24 @@ def _ddp_info(args) -> tuple[bool, int, int, int]:
         backend = "nccl" if torch.cuda.is_available() else "gloo"
         dist.init_process_group(backend=backend)
     return use_ddp, rank, local_rank, world_size
+
+
+def _ddp_needs_find_unused(ds: TileDetectionDataset) -> bool:
+    if not getattr(ds, "use_all_bands", False):
+        return False
+    base = getattr(ds, "_base", None)
+    if base is None or not hasattr(base, "tiles"):
+        return True
+    need_rubin = set(RUBIN_BANDS)
+    need_euclid = set(EUCLID_BANDS)
+    for tile in base.tiles:
+        avail_r = set(tile.get("avail_rubin", []))
+        avail_e = set(tile.get("avail_euclid", []))
+        if not need_rubin.issubset(avail_r):
+            return True
+        if not need_euclid.issubset(avail_e):
+            return True
+    return False
 
 
 def train(args):
@@ -193,12 +212,18 @@ def train(args):
             print(f"  [warn] Unexpected init-checkpoint keys: {unexpected}")
         print(f"  Initialized detector weights from {args.init_checkpoint}")
 
+    ddp_find_unused = _ddp_needs_find_unused(full_ds) if use_ddp else False
     if use_ddp:
+        # Safer default: allow unused params to avoid rank crashes when a band
+        # is missing on some samples. The warning is harmless.
+        ddp_find_unused = True
         model = DDP(
             model,
             device_ids=[local_rank] if device.type == "cuda" else None,
-            find_unused_parameters=False,
+            find_unused_parameters=ddp_find_unused,
         )
+        if rank == 0:
+            print(f"DDP: find_unused_parameters={ddp_find_unused}")
 
     model_to_save = model.module if use_ddp else model
     n_total = sum(p.numel() for p in model_to_save.parameters())
