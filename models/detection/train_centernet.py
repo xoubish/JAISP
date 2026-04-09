@@ -84,9 +84,13 @@ def _log_tile(batch, out, wandb, step, conf_thr=0.3, nms_kernel=7, euclid_dir=No
     hm = out['heatmap'][0, 0].detach().cpu().numpy()
     hm_h, hm_w = hm.shape
 
-    # Background image: r-band (live mode), VIS (cached mode), or black fallback
+    # Background image: VIS (preferred), r-band fallback, or black
     rgb = None
-    if 'images' in batch and 'rubin_r' in batch['images']:
+    if 'images' in batch and 'euclid_VIS' in batch['images']:
+        vis_band = batch['images']['euclid_VIS'][0, 0].cpu().numpy()
+        lo, hi = np.percentile(vis_band, [1, 99])
+        rgb = np.clip((vis_band - lo) / max(hi - lo, 1e-6), 0, 1)
+    elif 'images' in batch and 'rubin_r' in batch['images']:
         r_band = batch['images']['rubin_r'][0, 0].cpu().numpy()
         lo, hi = np.percentile(r_band, [1, 99])
         rgb = np.clip((r_band - lo) / max(hi - lo, 1e-6), 0, 1)
