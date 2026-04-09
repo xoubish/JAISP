@@ -240,7 +240,7 @@ def train(args):
                                pin_memory=True)
         val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False,
                                 collate_fn=collate_cached, num_workers=val_workers)
-        encoder_dim = 256  # V7 default
+        encoder_dim = full_ds.feature_dim
     else:
         full_ds = TileDetectionDataset(
             rubin_dir=args.rubin_dir,

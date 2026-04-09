@@ -1,7 +1,7 @@
 """Precompute frozen V7 encoder bottleneck features for all tiles.
 
 Runs the full 10-band V7 encoder once per tile per augmentation variant
-and saves the bottleneck tensor [256, H, W] to disk. CenterNet training
+and saves the bottleneck tensor [C, H, W] to disk. CenterNet training
 then loads these cached features directly — no encoder forward pass needed.
 
 Usage
@@ -120,11 +120,12 @@ def main():
                         rms_d[band] = torch.from_numpy(rms[None, None]).to(device)
 
             with torch.no_grad():
-                feats = encoder(images, rms_d)  # [1, 256, H, W]
+                feats = encoder(images, rms_d)  # [1, C, H, W]
 
             # Save feature tensor + aug params
             torch.save({
-                'features':   feats[0].cpu(),  # [256, H, W]
+                'features':   feats[0].cpu(),  # [C, H, W]
+                'encoder_dim': int(feats.shape[1]),
                 'tile_id':    tile_id,
                 'aug_params': (n_rot, flip_ud, flip_lr),
                 'aug_idx':    aug_idx,

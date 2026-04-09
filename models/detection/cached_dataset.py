@@ -109,6 +109,11 @@ class CachedFeatureDataset(Dataset):
               f'{min(n_augs)}-{max(n_augs)} augs each, '
               f'{len(feat_files)} total samples')
 
+        sample_meta = torch.load(feat_files[0], map_location='cpu', weights_only=True)
+        sample_feats = sample_meta['features']
+        self.feature_dim = int(sample_meta.get('encoder_dim', sample_feats.shape[0]))
+        self.feature_hw = tuple(int(x) for x in sample_feats.shape[-2:])
+
         # Build flat index: (tile_id, feature_path)
         self._samples: List[Tuple[str, Path]] = []
         for tid in self._tile_ids:
@@ -241,7 +246,7 @@ class CachedFeatureDataset(Dataset):
 
         # Load cached features
         cached = torch.load(feat_path, map_location='cpu', weights_only=True)
-        features = cached['features']          # [256, H, W]
+        features = cached['features']          # [C, H, W]
         aug_params = cached['aug_params']       # (n_rot, flip_ud, flip_lr)
 
         # Get pseudo-labels and transform to match this augmentation
@@ -251,7 +256,7 @@ class CachedFeatureDataset(Dataset):
         )
 
         return {
-            'features':  features,                                # [256, H, W]
+            'features':  features,                                # [C, H, W]
             'centroids': torch.from_numpy(centroids_np),         # [M, 2]
             'classes':   torch.from_numpy(classes_np),           # [M]
             'tile_id':   tile_id,
@@ -262,7 +267,7 @@ class CachedFeatureDataset(Dataset):
 def collate_cached(batch: List[dict]) -> dict:
     """Collate for CachedFeatureDataset: stack features, keep labels as lists."""
     return {
-        'features':  torch.stack([s['features'] for s in batch]),  # [B, 256, H, W]
+        'features':  torch.stack([s['features'] for s in batch]),  # [B, C, H, W]
         'centroids': [s['centroids'] for s in batch],
         'classes':   [s['classes'] for s in batch],
         'tile_id':   [s['tile_id'] for s in batch],

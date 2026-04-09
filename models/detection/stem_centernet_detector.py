@@ -27,10 +27,14 @@ for _p in (_HERE, _MODELS):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
-from jaisp_foundation_v7 import JAISPFoundationV7, ALL_BANDS
+from jaisp_foundation_v7 import (
+    ALL_BANDS,
+    EUCLID_BANDS,
+    RUBIN_BANDS,
+    JAISPFoundationV7,
+)
 
-RUBIN_BANDS = ["rubin_u", "rubin_g", "rubin_r", "rubin_i", "rubin_z", "rubin_y"]
-NISP_BANDS = ["euclid_Y", "euclid_J", "euclid_H"]
+NISP_BANDS = [band for band in EUCLID_BANDS if band != "euclid_VIS"]
 
 
 def _num_groups(ch: int) -> int:

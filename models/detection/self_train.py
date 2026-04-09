@@ -45,6 +45,7 @@ for _p in (_HERE, _MODELS):
         sys.path.insert(0, str(_p))
 
 from detection.centernet_detector import CenterNetDetector
+from detection.dataset import _vis_bright_core_and_spike_mask
 
 
 def _run_training_round(
@@ -106,6 +107,7 @@ def _refine_labels(
     promote_conf: float = 0.8,
     demote_conf: float = 0.3,
     match_radius: float = 0.01,
+    promotion_spike_radius: int = 20,
     device: torch.device = None,
 ) -> tuple:
     """Run trained detector on all tiles. Promote novel high-confidence
@@ -149,11 +151,27 @@ def _refine_labels(
     total_promoted = 0
     total_demoted = 0
     total_tiles = 0
+    total_artifact_vetoed = 0
 
     for feat_path in feat_files:
         tile_id = feat_path.stem.rsplit('_aug', 1)[0]
         cached = torch.load(feat_path, map_location='cpu', weights_only=True)
         feats = cached['features'].unsqueeze(0).to(device)
+
+        promotion_mask = None
+        if promotion_spike_radius > 0 and euclid_dir:
+            vis_path = Path(euclid_dir) / f'{tile_id}_euclid.npz'
+            if vis_path.exists():
+                try:
+                    edata = np.load(str(vis_path), allow_pickle=True, mmap_mode='r')
+                    vis_img = np.nan_to_num(
+                        np.asarray(edata['img_VIS'], dtype=np.float32), nan=0.0)
+                    _, _, promotion_mask = _vis_bright_core_and_spike_mask(
+                        vis_img,
+                        spike_radius=promotion_spike_radius,
+                    )
+                except Exception:
+                    promotion_mask = None
 
         # Run detector
         with torch.no_grad():
@@ -197,6 +215,18 @@ def _refine_labels(
             pred_y = (yi.float() + dy) / max(fH - 1, 1)
             pred_xy = torch.stack([pred_x, pred_y], dim=1).cpu().numpy()
 
+            if promotion_mask is not None and len(pred_xy) > 0:
+                if promotion_mask.shape != (fH, fW):
+                    pm = torch.from_numpy(promotion_mask.astype(np.float32))
+                    pm = pm.unsqueeze(0).unsqueeze(0)
+                    pm = F.interpolate(pm, size=(fH, fW), mode='nearest')
+                    promotion_mask = pm[0, 0].cpu().numpy() > 0
+                px = np.clip(np.round(pred_xy[:, 0] * (fW - 1)).astype(int), 0, fW - 1)
+                py = np.clip(np.round(pred_xy[:, 1] * (fH - 1)).astype(int), 0, fH - 1)
+                keep = ~promotion_mask[py, px]
+                total_artifact_vetoed += int((~keep).sum())
+                pred_xy = pred_xy[keep]
+
             if orig_labels.shape[0] == 0:
                 novel = pred_xy
             else:
@@ -214,6 +244,11 @@ def _refine_labels(
     print(f'\nLabel refinement across {total_tiles} tiles:')
     print(f'  Promoted: {total_promoted} novel high-confidence detections')
     print(f'  Demoted:  {total_demoted} low-confidence pseudo-labels (likely artifacts)')
+    if promotion_spike_radius > 0:
+        print(
+            f'  Artifact-vetoed: {total_artifact_vetoed} high-confidence peaks '
+            f'inside bright-star masks (radius={promotion_spike_radius}px)'
+        )
     return promoted, demoted
 
 
@@ -271,6 +306,8 @@ def main():
                         '(model says "this is not a real source in 10-band space")')
     p.add_argument('--match_radius', type=float, default=0.01,
                    help='Normalized distance below which a prediction matches an existing label')
+    p.add_argument('--promotion_spike_radius', type=int, default=20,
+                   help='Bright-star veto radius (pixels) for promoting novel detections; set 0 to disable')
     p.add_argument('--init_checkpoint', default=None,
                    help='Existing detector checkpoint to bootstrap from when start_round > 1')
     p.add_argument('--wandb_project', default=None)
@@ -301,6 +338,7 @@ def main():
             promote_conf=args.promote_conf,
             demote_conf=args.demote_conf,
             match_radius=args.match_radius,
+            promotion_spike_radius=args.promotion_spike_radius,
             device=device,
         )
         extra_labels_path = str(out_dir / f'refined_labels_round{prior_round}.pt')
@@ -346,6 +384,7 @@ def main():
                 promote_conf=args.promote_conf,
                 demote_conf=args.demote_conf,
                 match_radius=args.match_radius,
+                promotion_spike_radius=args.promotion_spike_radius,
                 device=device,
             )
             extra_labels_path = str(out_dir / f'refined_labels_round{round_num}.pt')

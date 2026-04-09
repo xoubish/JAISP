@@ -8,13 +8,17 @@ bottleneck.
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
 import numpy as np
 import torch
 import torch.optim as optim
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, Subset, random_split
+from torch.utils.data.distributed import DistributedSampler
 
 _HERE = Path(__file__).resolve().parent
 _MODELS = _HERE.parent
@@ -78,17 +82,39 @@ def _apply_extra_labels_inplace(ds: TileDetectionDataset, extra_labels_path: str
     print(f"  Label refinement applied: +{n_added} promoted, -{n_removed} demoted")
 
 
-def train(args):
-    device = torch.device(args.device if args.device else ("cuda" if torch.cuda.is_available() else "cpu"))
-    print(f"Training stem-based CenterNet detector on {device}")
+def _ddp_info(args) -> tuple[bool, int, int, int]:
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    rank = int(os.environ.get("RANK", "0"))
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    use_ddp = world_size > 1
+    if args.ddp and world_size == 1:
+        raise ValueError(
+            "--ddp was set but WORLD_SIZE=1. "
+            "Launch with torchrun --nproc_per_node=<N> to enable DDP."
+        )
+    if use_ddp and not dist.is_initialized():
+        backend = "nccl" if torch.cuda.is_available() else "gloo"
+        dist.init_process_group(backend=backend)
+    return use_ddp, rank, local_rank, world_size
 
-    np.random.seed(args.seed)
-    torch.manual_seed(args.seed)
+
+def train(args):
+    use_ddp, rank, local_rank, world_size = _ddp_info(args)
+    if use_ddp and torch.cuda.is_available():
+        torch.cuda.set_device(local_rank)
+        device = torch.device(f"cuda:{local_rank}")
+    else:
+        device = torch.device(args.device if args.device else ("cuda" if torch.cuda.is_available() else "cpu"))
+    if rank == 0:
+        print(f"Training stem-based CenterNet detector on {device} (ddp={use_ddp})")
+
+    np.random.seed(args.seed + rank)
+    torch.manual_seed(args.seed + rank)
     if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(args.seed)
+        torch.cuda.manual_seed_all(args.seed + rank)
 
     use_wandb = args.wandb_project is not None
-    if use_wandb:
+    if use_wandb and rank == 0:
         import wandb
         wandb.init(project=args.wandb_project, name=args.wandb_run, config=vars(args))
 
@@ -110,22 +136,45 @@ def train(args):
     )
 
     val_workers = max(1, args.num_workers // 2) if args.num_workers > 0 else 0
-    tr_loader = DataLoader(
-        tr_ds,
-        batch_size=args.batch_size,
-        shuffle=True,
-        collate_fn=collate_fn,
-        num_workers=args.num_workers,
-        pin_memory=True,
-    )
-    val_loader = DataLoader(
-        val_ds,
-        batch_size=args.batch_size,
-        shuffle=False,
-        collate_fn=collate_fn,
-        num_workers=val_workers,
-    )
-    print(f"Train: {n_tr} samples   Val: {n_val} samples")
+    if use_ddp:
+        tr_sampler = DistributedSampler(tr_ds, num_replicas=world_size, rank=rank, shuffle=True)
+        val_sampler = DistributedSampler(val_ds, num_replicas=world_size, rank=rank, shuffle=False)
+        tr_loader = DataLoader(
+            tr_ds,
+            batch_size=args.batch_size,
+            sampler=tr_sampler,
+            shuffle=False,
+            collate_fn=collate_fn,
+            num_workers=args.num_workers,
+            pin_memory=True,
+        )
+        val_loader = DataLoader(
+            val_ds,
+            batch_size=args.batch_size,
+            sampler=val_sampler,
+            shuffle=False,
+            collate_fn=collate_fn,
+            num_workers=val_workers,
+        )
+    else:
+        tr_sampler = None
+        tr_loader = DataLoader(
+            tr_ds,
+            batch_size=args.batch_size,
+            shuffle=True,
+            collate_fn=collate_fn,
+            num_workers=args.num_workers,
+            pin_memory=True,
+        )
+        val_loader = DataLoader(
+            val_ds,
+            batch_size=args.batch_size,
+            shuffle=False,
+            collate_fn=collate_fn,
+            num_workers=val_workers,
+        )
+    if rank == 0:
+        print(f"Train: {n_tr} samples   Val: {n_val} samples")
 
     foundation = load_v7_foundation_from_checkpoint(args.encoder_ckpt, device=device)
     model = StemCenterNetDetector(
@@ -144,9 +193,14 @@ def train(args):
             print(f"  [warn] Unexpected init-checkpoint keys: {unexpected}")
         print(f"  Initialized detector weights from {args.init_checkpoint}")
 
-    n_total = sum(p.numel() for p in model.parameters())
-    n_train = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"Parameters: {n_total/1e6:.2f}M total, {n_train/1e6:.2f}M trainable")
+    if use_ddp:
+        model = DDP(model, device_ids=[local_rank] if device.type == "cuda" else None)
+
+    model_to_save = model.module if use_ddp else model
+    n_total = sum(p.numel() for p in model_to_save.parameters())
+    n_train = sum(p.numel() for p in model_to_save.parameters() if p.requires_grad)
+    if rank == 0:
+        print(f"Parameters: {n_total/1e6:.2f}M total, {n_train/1e6:.2f}M trainable")
 
     criterion = CenterNetLoss(sigma=args.sigma)
     optimizer = optim.AdamW(
@@ -167,8 +221,11 @@ def train(args):
         full_ds._base.augment = prev_augment
 
     for epoch in range(args.epochs):
+        if tr_sampler is not None:
+            tr_sampler.set_epoch(epoch)
         model.train()
-        tr_losses = []
+        tr_loss_sum = 0.0
+        tr_batches = 0
         for batch in tr_loader:
             images = {b: v.to(device) for b, v in batch["images"].items()}
             rms = {b: v.to(device) for b, v in batch["rms"].items()}
@@ -181,9 +238,10 @@ def train(args):
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
 
-            tr_losses.append(float(losses["loss_total"]))
+            tr_loss_sum += float(losses["loss_total"])
+            tr_batches += 1
             step += 1
-            if use_wandb and step % 10 == 0:
+            if use_wandb and rank == 0 and step % 10 == 0:
                 wandb.log({
                     "train/loss": float(losses["loss_total"]),
                     "train/loss_hm": float(losses["loss_hm"]),
@@ -193,10 +251,16 @@ def train(args):
                 }, step=step)
 
         scheduler.step()
-        mean_tr = float(np.mean(tr_losses)) if tr_losses else float("nan")
+        if use_ddp:
+            t = torch.tensor([tr_loss_sum, float(tr_batches)], device=device, dtype=torch.float32)
+            dist.all_reduce(t, op=dist.ReduceOp.SUM)
+            tr_loss_sum = float(t[0].item())
+            tr_batches = int(t[1].item())
+        mean_tr = tr_loss_sum / max(tr_batches, 1)
 
         model.eval()
-        val_losses = []
+        val_loss_sum = 0.0
+        val_batches = 0
         prev_augment = full_ds._base.augment
         full_ds._base.augment = False
         with torch.no_grad():
@@ -206,15 +270,22 @@ def train(args):
                     rms = {b: v.to(device) for b, v in batch["rms"].items()}
                     out = model(images, rms)
                     losses = criterion(out, [c.to(device) for c in batch["centroids"]])
-                    val_losses.append(float(losses["loss_total"]))
+                    val_loss_sum += float(losses["loss_total"])
+                    val_batches += 1
             finally:
                 full_ds._base.augment = prev_augment
-        mean_val = float(np.mean(val_losses)) if val_losses else float("nan")
+        if use_ddp:
+            t = torch.tensor([val_loss_sum, float(val_batches)], device=device, dtype=torch.float32)
+            dist.all_reduce(t, op=dist.ReduceOp.SUM)
+            val_loss_sum = float(t[0].item())
+            val_batches = int(t[1].item())
+        mean_val = val_loss_sum / max(val_batches, 1)
 
         lr_now = scheduler.get_last_lr()[0]
-        print(f"Epoch {epoch + 1:3d}/{args.epochs}  tr={mean_tr:.4f}  val={mean_val:.4f}  lr={lr_now:.2e}")
+        if rank == 0:
+            print(f"Epoch {epoch + 1:3d}/{args.epochs}  tr={mean_tr:.4f}  val={mean_val:.4f}  lr={lr_now:.2e}")
 
-        if use_wandb:
+        if use_wandb and rank == 0:
             log = {
                 "train/loss_epoch": mean_tr,
                 "val/loss": mean_val,
@@ -232,17 +303,20 @@ def train(args):
                     print(f"  [warn] viz failed: {exc}")
             wandb.log(log, step=step)
 
-        if mean_val < best_val:
+        if rank == 0 and mean_val < best_val:
             best_val = mean_val
             Path(args.out).parent.mkdir(parents=True, exist_ok=True)
-            model.save(args.out)
+            model_to_save.save(args.out)
             print(f"  ✓ saved -> {args.out}")
             if use_wandb:
                 wandb.run.summary["best_val_loss"] = best_val
 
-    if use_wandb:
+    if use_wandb and rank == 0:
         wandb.finish()
-    print(f"Done. Best val loss: {best_val:.4f}")
+    if rank == 0:
+        print(f"Done. Best val loss: {best_val:.4f}")
+    if use_ddp:
+        dist.destroy_process_group()
 
 
 if __name__ == "__main__":
@@ -267,4 +341,6 @@ if __name__ == "__main__":
     p.add_argument("--device", default="", help='Device to use: "cuda", "cuda:1", "cpu" (default: auto)')
     p.add_argument("--num_workers", type=int, default=2)
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--ddp", action="store_true",
+                   help="Enable DistributedDataParallel (requires torchrun).")
     train(p.parse_args())
