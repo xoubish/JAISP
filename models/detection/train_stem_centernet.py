@@ -194,7 +194,11 @@ def train(args):
         print(f"  Initialized detector weights from {args.init_checkpoint}")
 
     if use_ddp:
-        model = DDP(model, device_ids=[local_rank] if device.type == "cuda" else None)
+        model = DDP(
+            model,
+            device_ids=[local_rank] if device.type == "cuda" else None,
+            find_unused_parameters=True,
+        )
 
     model_to_save = model.module if use_ddp else model
     n_total = sum(p.numel() for p in model_to_save.parameters())

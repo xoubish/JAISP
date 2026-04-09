@@ -49,9 +49,21 @@ def _run_training_round(
     device: torch.device = None,
     wandb_project: str = None,
     wandb_name: str = None,
+    ddp_nproc: int = 0,
 ) -> None:
-    cmd = [
-        sys.executable, str(_HERE / "train_stem_centernet.py"),
+    use_ddp = ddp_nproc is not None and int(ddp_nproc) > 1
+    if use_ddp:
+        cmd = [
+            sys.executable, "-m", "torch.distributed.run",
+            "--nproc_per_node", str(ddp_nproc),
+            str(_HERE / "train_stem_centernet.py"),
+            "--ddp",
+        ]
+    else:
+        cmd = [
+            sys.executable, str(_HERE / "train_stem_centernet.py"),
+        ]
+    cmd += [
         "--encoder_ckpt", encoder_ckpt,
         "--rubin_dir", rubin_dir,
         "--out", out_path,
@@ -75,7 +87,7 @@ def _run_training_round(
         cmd += ["--wandb_project", wandb_project]
     if wandb_name:
         cmd += ["--wandb_run", wandb_name]
-    if device is not None:
+    if device is not None and not use_ddp:
         cmd += ["--device", str(device)]
 
     print(f'\n{"="*60}')
@@ -220,6 +232,8 @@ def main():
                    help="Existing stem-detector checkpoint to bootstrap from when start_round > 1")
     p.add_argument("--wandb_project", default=None)
     p.add_argument("--device", default="")
+    p.add_argument("--ddp_nproc", type=int, default=0,
+                   help="If >1, launch each training round with torchrun using this many processes.")
     args = p.parse_args()
 
     device = torch.device(args.device if args.device else ("cuda" if torch.cuda.is_available() else "cpu"))
@@ -279,6 +293,7 @@ def main():
             device=device,
             wandb_project=args.wandb_project,
             wandb_name=f"stem-round{round_num}",
+            ddp_nproc=args.ddp_nproc,
         )
         init_checkpoint = None
 
