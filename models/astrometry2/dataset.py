@@ -31,8 +31,11 @@ from source_matching import (
     _to_float32,
     build_detection_image,
     detect_sources,
+    estimate_source_snr,
+    expected_centroid_sigma_arcsec,
     match_sources_wcs,
     refine_centroids_in_band,
+    refine_centroids_psf_fit,
     safe_header_from_card_string,
 )
 
@@ -380,6 +383,18 @@ def _bilinear_sample(image: np.ndarray, x: np.ndarray, y: np.ndarray) -> np.ndar
     return out.astype(np.float32, copy=False)
 
 
+def _shift_patch(patch: np.ndarray, dx: float, dy: float) -> np.ndarray:
+    """Shift a 2D patch by (dx, dy) pixels using bilinear sampling."""
+    h, w = patch.shape
+    gx, gy = np.meshgrid(np.arange(w, dtype=np.float32), np.arange(h, dtype=np.float32))
+    return _bilinear_sample(patch, gx - float(dx), gy - float(dy)).reshape(h, w)
+
+
+def _shift_patch_stack(stack: np.ndarray, dx: float, dy: float) -> np.ndarray:
+    """Shift a [C, H, W] stack by (dx, dy) pixels."""
+    return np.stack([_shift_patch(stack[c], dx, dy) for c in range(stack.shape[0])], axis=0)
+
+
 def _patch_grid(center_xy: np.ndarray, patch_size: int) -> Tuple[np.ndarray, np.ndarray]:
     half = int(patch_size) // 2
     offs = np.arange(-half, half + 1, dtype=np.float32)
@@ -431,6 +446,43 @@ def _select_input_bands(target_band: str, context_bands: Sequence[str]) -> List[
     return out
 
 
+def _biased_sample_indices(
+    rng: np.random.RandomState,
+    n_total: int,
+    n_keep: int,
+    mags_arcsec: Optional[np.ndarray],
+    bias: float,
+    power: float,
+    floor_mas: float,
+) -> np.ndarray:
+    """Sample indices with optional bias toward larger magnitudes.
+
+    bias=0 -> uniform sampling. bias=1 -> fully magnitude-weighted sampling.
+    """
+    if n_keep >= n_total:
+        return np.arange(n_total)
+    if mags_arcsec is None or bias <= 0:
+        keep = rng.choice(n_total, n_keep, replace=False)
+        keep.sort()
+        return keep
+
+    bias = float(np.clip(bias, 0.0, 1.0))
+    mags_mas = np.clip(np.asarray(mags_arcsec, dtype=np.float32) * 1000.0, 0.0, None)
+    weights = mags_mas + float(max(0.0, floor_mas))
+    weights = np.power(weights, float(max(0.0, power)))
+    if not np.isfinite(weights).all() or float(weights.sum()) <= 0:
+        keep = rng.choice(n_total, n_keep, replace=False)
+        keep.sort()
+        return keep
+
+    p = weights / weights.sum()
+    if bias < 1.0:
+        p = bias * p + (1.0 - bias) / float(n_total)
+    keep = rng.choice(n_total, n_keep, replace=False, p=p)
+    keep.sort()
+    return keep
+
+
 # ---------------------------------------------------------------------------
 # Original single-band sample builder (preserved for backward compatibility)
 # ---------------------------------------------------------------------------
@@ -443,6 +495,9 @@ def build_patch_samples(
     *,
     patch_size: int = 33,
     max_patches_per_tile: int = 64,
+    offset_bias: float = 0.0,
+    offset_bias_power: float = 1.0,
+    offset_bias_floor_mas: float = 5.0,
     min_matches: int = 20,
     max_matches: int = 256,
     max_sep_arcsec: float = 0.12,
@@ -593,8 +648,16 @@ def build_patch_samples(
 
         keep = np.arange(vis_xy.shape[0])
         if keep.size > int(max_patches_per_tile):
-            keep = rng.choice(keep, int(max_patches_per_tile), replace=False)
-            keep.sort()
+            mags = np.hypot(offsets[:, 0], offsets[:, 1])
+            keep = _biased_sample_indices(
+                rng,
+                keep.size,
+                int(max_patches_per_tile),
+                mags,
+                offset_bias,
+                offset_bias_power,
+                offset_bias_floor_mas,
+            )
 
         tile_samples = []
         # Pre-compute per-band RMS images (sqrt of variance, clamped).
@@ -667,6 +730,9 @@ def build_patch_samples_multiband(
     include_nisp: bool = False,
     patch_size: int = 33,
     max_patches_per_tile: int = 64,
+    offset_bias: float = 0.0,
+    offset_bias_power: float = 1.0,
+    offset_bias_floor_mas: float = 5.0,
     min_matches: int = 20,
     max_matches: int = 256,
     max_sep_arcsec: float = 0.12,
@@ -838,12 +904,21 @@ def build_patch_samples_multiband(
         per_band_offsets = {}  # band_name -> (N, 2) arcsec
         per_band_valid = {}    # band_name -> (N,) bool
 
+        # Per-source SNR and expected label uncertainty (SITCOMTN-159).
+        # These are stored per target band so the loss can weight samples
+        # by their expected centroid precision.
+        per_band_snr = {}        # band_name -> [N] float32
+        per_band_label_sigma = {}  # band_name -> [N] float32 (arcsec)
+
         # Rubin target bands.
-        # Use a tight refinement radius (1 pixel = 0.2") to avoid injecting
-        # centroid noise on blurry 0.2"/px Rubin images.  The WCS-projected
-        # position is already accurate to ~10-15 mas; aggressive refinement
-        # with radius=3 adds ~40 mas of noise (confirmed empirically).
-        rubin_refine_radius = max(1, refine_radius // 3)
+        # Use PSF-fit centroiding (Gaussian 2D fit) for substantially better
+        # centroid precision than flux-weighted centroids, especially for
+        # bright sources (King 1983, validated by SITCOMTN-159).
+        # Rubin pixel scale is 0.2"/px; typical FWHM ~3px (0.6"-0.8" seeing).
+        RUBIN_PIXEL_SCALE = 0.2  # arcsec/px
+        RUBIN_FWHM_PX = 3.0     # typical Rubin PSF FWHM in pixels
+        RUBIN_WCS_SYSTEMATIC = 0.005  # 5 mas from SITCOMTN-159
+        rubin_refine_radius = max(2, refine_radius)
         for tband in rubin_targets:
             short = tband.split('_', 1)[1]
             bidx = RUBIN_BAND_ORDER.index(short)
@@ -860,10 +935,33 @@ def build_patch_samples_multiband(
             if not valid.any():
                 per_band_valid[tband] = valid
                 continue
-            rubin_xy_refined = refine_centroids_in_band(
+
+            # PSF-fit centroiding with SNR estimation.
+            rubin_xy_refined, rubin_snr, _ = refine_centroids_psf_fit(
                 rubin_band_img, rubin_xy_seed,
-                radius=rubin_refine_radius, flux_floor_sigma=refine_flux_floor_sigma,
+                radius=rubin_refine_radius,
+                flux_floor_sigma=refine_flux_floor_sigma,
+                fwhm_guess=RUBIN_FWHM_PX,
             )
+            # VIS-side SNR (higher resolution, tighter PSF).
+            vis_snr = estimate_source_snr(vis_img, vis_xy, aperture_radius=5)
+            # Combined label sigma: quadrature sum of Rubin + VIS centroid uncertainties.
+            rubin_centroid_sigma = expected_centroid_sigma_arcsec(
+                rubin_snr, RUBIN_PIXEL_SCALE, RUBIN_FWHM_PX, RUBIN_WCS_SYSTEMATIC,
+            )
+            vis_centroid_sigma = expected_centroid_sigma_arcsec(
+                vis_snr, VIS_PIXEL_SCALE_ARCSEC, fwhm_px=1.8, systematic_floor_arcsec=0.001,
+            )
+            label_sigma = np.sqrt(rubin_centroid_sigma ** 2 + vis_centroid_sigma ** 2)
+
+            # Store SNR and label sigma for all sources (zeros where invalid).
+            band_snr = np.ones(vis_xy.shape[0], dtype=np.float32)
+            band_snr[valid] = rubin_snr[valid]
+            per_band_snr[tband] = band_snr
+            band_label_sigma = np.full(vis_xy.shape[0], 0.01, dtype=np.float32)
+            band_label_sigma[valid] = label_sigma[valid]
+            per_band_label_sigma[tband] = band_label_sigma
+
             r_ra, r_dec = rwcs.wcs_pix2world(rubin_xy_refined[valid, 0], rubin_xy_refined[valid, 1], 0)
             v_ra, v_dec = vwcs.wcs_pix2world(vis_xy[valid, 0], vis_xy[valid, 1], 0)
             dra = (v_ra - r_ra) * np.cos(np.deg2rad(v_dec)) * 3600.0
@@ -886,15 +984,17 @@ def build_patch_samples_multiband(
 
         # NISP target bands: offset = VIS position - NISP position.
         # NISP sources are detected independently and matched to VIS.
-        # For simplicity, we use the existing VIS-matched positions and
-        # compute the NISP centroid offset in sky coords.
+        # MER mosaics: NISP at 0.1"/px, same as VIS.
+        NISP_PIXEL_SCALE = 0.1
+        NISP_FWHM_PX = 2.5  # typical NISP PSF FWHM in pixels
+        NISP_WCS_SYSTEMATIC = 0.002  # 2 mas systematic (same telescope as VIS)
         for tband in nisp_targets:
             nb = tband.split('_', 1)[1]  # 'Y', 'J', or 'H'
             if nb not in nisp_data:
                 continue
             nisp_img, nwcs = nisp_data[nb]
             nisp_xy_init = project_vis_to_band_xy(vis_xy, vwcs, nwcs)
-            nisp_radius = refine_radius  # MER mosaics: NISP at 0.1"/px, same as VIS
+            nisp_radius = refine_radius
             valid = signal_mask_in_band(
                 nisp_img,
                 nisp_xy_init,
@@ -904,11 +1004,26 @@ def build_patch_samples_multiband(
             if not valid.any():
                 per_band_valid[tband] = valid
                 continue
-            nisp_xy_refined = refine_centroids_in_band(
+            nisp_xy_refined, nisp_snr, _ = refine_centroids_psf_fit(
                 nisp_img, nisp_xy_init,
                 radius=nisp_radius,
                 flux_floor_sigma=refine_flux_floor_sigma,
+                fwhm_guess=NISP_FWHM_PX,
             )
+            vis_snr_nisp = estimate_source_snr(vis_img, vis_xy, aperture_radius=5)
+            nisp_centroid_sigma = expected_centroid_sigma_arcsec(
+                nisp_snr, NISP_PIXEL_SCALE, NISP_FWHM_PX, NISP_WCS_SYSTEMATIC,
+            )
+            vis_centroid_sigma_nisp = expected_centroid_sigma_arcsec(
+                vis_snr_nisp, VIS_PIXEL_SCALE_ARCSEC, fwhm_px=1.8, systematic_floor_arcsec=0.001,
+            )
+            label_sigma_nisp = np.sqrt(nisp_centroid_sigma ** 2 + vis_centroid_sigma_nisp ** 2)
+            band_snr = np.ones(vis_xy.shape[0], dtype=np.float32)
+            band_snr[valid] = nisp_snr[valid]
+            per_band_snr[tband] = band_snr
+            band_label_sigma = np.full(vis_xy.shape[0], 0.005, dtype=np.float32)
+            band_label_sigma[valid] = label_sigma_nisp[valid]
+            per_band_label_sigma[tband] = band_label_sigma
             n_ra, n_dec = nwcs.wcs_pix2world(nisp_xy_refined[valid, 0], nisp_xy_refined[valid, 1], 0)
             v_ra, v_dec = vwcs.wcs_pix2world(vis_xy[valid, 0], vis_xy[valid, 1], 0)
             dra = (v_ra - n_ra) * np.cos(np.deg2rad(v_dec)) * 3600.0
@@ -938,11 +1053,30 @@ def build_patch_samples_multiband(
         if int(valid_any.sum()) < int(min_matches):
             continue
 
+        source_mag = None
+        if offset_bias > 0:
+            source_mag = np.zeros((vis_xy.shape[0],), dtype=np.float32)
+            for tband, offsets in per_band_offsets.items():
+                valid = per_band_valid.get(tband)
+                if valid is None or not valid.any():
+                    continue
+                mag = np.hypot(offsets[:, 0], offsets[:, 1]).astype(np.float32)
+                source_mag = np.maximum(source_mag, mag * valid.astype(np.float32))
+
         # Subsample sources.
         keep = np.where(valid_any)[0]
         if keep.size > int(max_patches_per_tile):
-            keep = rng.choice(keep, int(max_patches_per_tile), replace=False)
-            keep.sort()
+            mags_keep = source_mag[keep] if source_mag is not None else None
+            sel = _biased_sample_indices(
+                rng,
+                keep.size,
+                int(max_patches_per_tile),
+                mags_keep,
+                offset_bias,
+                offset_bias_power,
+                offset_bias_floor_mas,
+            )
+            keep = keep[sel]
 
         tile_samples = []
         # Pre-compute per-band RMS images (sqrt of variance, clamped).
@@ -1024,12 +1158,18 @@ def build_patch_samples_multiband(
             for tband, offsets in per_band_offsets.items():
                 if not per_band_valid.get(tband, np.zeros((vis_xy.shape[0],), dtype=bool))[src_idx]:
                     continue
-                tile_samples.append({
+                sample = {
                     **sample_base,
                     'target_offset_arcsec': offsets[src_idx].astype(np.float32),
                     'target_band': tband,
                     'band_idx': BAND_TO_IDX[tband],
-                })
+                }
+                # Per-source SNR and label noise sigma (SITCOMTN-159).
+                if tband in per_band_snr:
+                    sample['source_snr'] = np.float32(per_band_snr[tband][src_idx])
+                if tband in per_band_label_sigma:
+                    sample['label_sigma_arcsec'] = np.float32(per_band_label_sigma[tband][src_idx])
+                tile_samples.append(sample)
 
         if tile_samples:
             samples.extend(tile_samples)
@@ -1060,9 +1200,19 @@ def build_patch_samples_multiband(
 # ---------------------------------------------------------------------------
 
 class MatchedPatchDataset(torch.utils.data.Dataset):
-    def __init__(self, samples: Sequence[Dict], augment: bool = False):
+    def __init__(
+        self,
+        samples: Sequence[Dict],
+        augment: bool = False,
+        jitter_arcsec: float = 0.0,
+        jitter_max_arcsec: float = 0.0,
+        jitter_prob: float = 1.0,
+    ):
         self.samples = list(samples)
         self.augment = bool(augment)
+        self.jitter_arcsec = float(jitter_arcsec)
+        self.jitter_max_arcsec = float(jitter_max_arcsec)
+        self.jitter_prob = float(jitter_prob)
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -1101,6 +1251,7 @@ class MatchedPatchDataset(torch.utils.data.Dataset):
         rubin_patch = s['rubin_patch'].copy()           # [C, H, W]
         vis_patch = s['vis_patch'].copy()               # [1, H, W]
         pix2sky = s['pixel_to_sky'].copy()              # [2, 2]
+        target_offset = s['target_offset_arcsec'].copy()
         has_rms = 'rubin_rms_patch' in s and 'vis_rms_patch' in s
 
         if has_rms:
@@ -1114,6 +1265,17 @@ class MatchedPatchDataset(torch.utils.data.Dataset):
             else:
                 (rubin_patch, vis_patch), pix2sky = \
                     self._augment_spatial(rubin_patch, vis_patch, pix2sky=pix2sky)
+
+        if self.jitter_arcsec > 0 and np.random.rand() < self.jitter_prob:
+            jitter = np.random.normal(scale=self.jitter_arcsec, size=2).astype(np.float32)
+            if self.jitter_max_arcsec > 0:
+                jitter = np.clip(jitter, -self.jitter_max_arcsec, self.jitter_max_arcsec)
+            inv = np.linalg.pinv(pix2sky).astype(np.float32)
+            dx_px, dy_px = (inv @ jitter.reshape(2, 1)).reshape(2).tolist()
+            rubin_patch = _shift_patch_stack(rubin_patch, dx_px, dy_px)
+            if has_rms:
+                rubin_rms = _shift_patch_stack(rubin_rms, dx_px, dy_px)
+            target_offset = (target_offset - jitter).astype(np.float32, copy=False)
 
         if not has_rms:
             # Legacy path: scalar MAD normalization per channel.
@@ -1129,7 +1291,7 @@ class MatchedPatchDataset(torch.utils.data.Dataset):
             'anchor_xy': torch.from_numpy(s['anchor_xy'].copy()),
             'rubin_patch': torch.from_numpy(rubin_patch),
             'vis_patch': torch.from_numpy(vis_patch),
-            'target_offset_arcsec': torch.from_numpy(s['target_offset_arcsec'].copy()),
+            'target_offset_arcsec': torch.from_numpy(target_offset),
             'pixel_to_sky': torch.from_numpy(pix2sky),
             'input_bands': list(s['input_bands']),
             'target_band': s['target_band'],
@@ -1139,6 +1301,11 @@ class MatchedPatchDataset(torch.utils.data.Dataset):
             out['vis_rms_patch'] = torch.from_numpy(vis_rms)
         if 'band_idx' in s:
             out['band_idx'] = int(s['band_idx'])
+        # Per-source label noise (SITCOMTN-159).
+        if 'source_snr' in s:
+            out['source_snr'] = torch.tensor(float(s['source_snr']), dtype=torch.float32)
+        if 'label_sigma_arcsec' in s:
+            out['label_sigma_arcsec'] = torch.tensor(float(s['label_sigma_arcsec']), dtype=torch.float32)
         return out
 
 
@@ -1158,6 +1325,10 @@ def collate_matched_patches(batch: List[Dict]) -> Dict:
     if 'rubin_rms_patch' in batch[0]:
         out['rubin_rms_patch'] = torch.stack([b['rubin_rms_patch'] for b in batch], dim=0)
         out['vis_rms_patch'] = torch.stack([b['vis_rms_patch'] for b in batch], dim=0)
+    if 'source_snr' in batch[0]:
+        out['source_snr'] = torch.stack([b['source_snr'] for b in batch], dim=0)
+    if 'label_sigma_arcsec' in batch[0]:
+        out['label_sigma_arcsec'] = torch.stack([b['label_sigma_arcsec'] for b in batch], dim=0)
     return out
 
 

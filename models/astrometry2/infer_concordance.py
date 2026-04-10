@@ -73,6 +73,7 @@ from astrometry2.source_matching import (
     detect_sources,
     match_sources_wcs,
     refine_centroids_in_band,
+    refine_centroids_psf_fit,
     safe_header_from_card_string,
 )
 
@@ -301,12 +302,14 @@ def predict_tile(
         )
         if not vis_keep.any():
             return None
-        vis_xy = refine_centroids_in_band(
+        vis_xy, _, _ = refine_centroids_psf_fit(
             vis_img,
             vis_seed_xy[vis_keep],
             radius=args.refine_radius,
             flux_floor_sigma=args.refine_flux_floor_sigma,
-        ).astype(np.float32)
+            fwhm_guess=1.8,  # VIS PSF FWHM in pixels
+        )
+        vis_xy = vis_xy.astype(np.float32)
         vis_anchor_xy = vis_xy.copy()
     else:
         rubin_det = build_detection_image(rubin_cube, detect_bands, clip_sigma=args.detect_clip_sigma)
@@ -326,7 +329,7 @@ def predict_tile(
     if target_band.startswith('rubin_'):
         target_idx = RUBIN_BAND_ORDER.index(target_band.split('_', 1)[1])
         rubin_target = np.nan_to_num(_to_float32(rubin_cube[target_idx]), nan=0.0)
-        rubin_refine_radius = max(1, int(args.refine_radius) // 3)
+        rubin_refine_radius = max(2, int(args.refine_radius))
         if _detr is not None:
             rubin_xy_seed = project_vis_to_band_xy(vis_xy, vwcs, rwcs)
             target_keep = signal_mask_in_band(
@@ -341,11 +344,13 @@ def predict_tile(
             rubin_xy_seed = rubin_xy_seed[target_keep]
         else:
             rubin_xy_seed = matched['rubin_xy']
-        rubin_xy_target = refine_centroids_in_band(
+        # PSF-fit centroiding (SITCOMTN-159 motivated).
+        rubin_xy_target, _, _ = refine_centroids_psf_fit(
             rubin_target,
             rubin_xy_seed,
             radius=rubin_refine_radius,
             flux_floor_sigma=args.refine_flux_floor_sigma,
+            fwhm_guess=3.0,
         )
         r_ra, r_dec = rwcs.wcs_pix2world(rubin_xy_target[:, 0], rubin_xy_target[:, 1], 0)
         v_ra, v_dec = vwcs.wcs_pix2world(vis_xy[:, 0], vis_xy[:, 1], 0)
@@ -358,7 +363,7 @@ def predict_tile(
             return None
         nisp_img, nwcs = nisp_data[nb]
         nisp_xy_init = project_vis_to_band_xy(vis_xy, vwcs, nwcs)
-        nisp_radius = int(args.refine_radius)  # MER mosaics: NISP at 0.1"/px, same as VIS
+        nisp_radius = int(args.refine_radius)
         target_keep = signal_mask_in_band(
             nisp_img,
             nisp_xy_init,
@@ -369,11 +374,13 @@ def predict_tile(
             return None
         vis_xy = vis_xy[target_keep]
         nisp_xy_init = nisp_xy_init[target_keep]
-        nisp_xy_refined = refine_centroids_in_band(
+        # PSF-fit centroiding for NISP too.
+        nisp_xy_refined, _, _ = refine_centroids_psf_fit(
             nisp_img,
             nisp_xy_init,
             radius=nisp_radius,
             flux_floor_sigma=args.refine_flux_floor_sigma,
+            fwhm_guess=2.5,
         )
         n_ra, n_dec = nwcs.wcs_pix2world(nisp_xy_refined[:, 0], nisp_xy_refined[:, 1], 0)
         v_ra, v_dec = vwcs.wcs_pix2world(vis_xy[:, 0], vis_xy[:, 1], 0)

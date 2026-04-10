@@ -34,7 +34,7 @@ from astrometry2.dataset import (
 )
 from astrometry2.infer_concordance import predict_tile
 from older_architectures.matcher import LocalAstrometryMatcher
-from astrometry2.viz import make_tile_diagnostic_figure
+from astrometry2.viz import make_tile_diagnostic_figure, make_band_montage
 
 try:
     import wandb
@@ -52,17 +52,49 @@ def compute_loss(
     target_offset_arcsec: torch.Tensor,
     pixel_to_sky: torch.Tensor,
     pixel_loss_weight: float,
+    label_sigma: torch.Tensor = None,
+    label_noise_floor: float = 0.0,
 ) -> Dict[str, torch.Tensor]:
+    """Rayleigh NLL loss with label-noise-aware effective sigma.
+
+    Motivated by SITCOMTN-159 (Wilson & Naylor 2025): Rubin single-visit
+    positions have a ~5 mas systematic floor not reflected in pipeline
+    uncertainties.  The training target (VIS-Rubin centroid offset) inherits
+    this noise, so the model should not try to fit below it.
+
+    Parameters
+    ----------
+    label_sigma : [B] per-sample label noise sigma in arcsec, from
+        expected_centroid_sigma_arcsec().  If None, uses label_noise_floor
+        as a constant floor.
+    label_noise_floor : scalar fallback floor (arcsec) when label_sigma
+        is not available.  Default 0 preserves backward compatibility;
+        set to 0.005 (5 mas) for SITCOMTN-159 motivated training.
+    """
     pred = out['pred_offset_arcsec']
     err = pred - target_offset_arcsec
     radial = torch.sqrt((err ** 2).sum(dim=1) + 1e-10)
-    sigma = torch.exp(out['log_sigma']).clamp_min(1e-4)
-    loss_main = (radial / sigma + out['log_sigma']).mean()
+    sigma_pred = torch.exp(out['log_sigma']).clamp_min(1e-4)
+
+    # Effective sigma includes both model uncertainty and label noise.
+    # This prevents the model from overfitting to noisy bright-end targets.
+    if label_sigma is not None:
+        label_var = label_sigma ** 2
+    elif label_noise_floor > 0:
+        label_var = torch.full_like(sigma_pred, label_noise_floor ** 2)
+    else:
+        label_var = torch.zeros_like(sigma_pred)
+
+    sigma_eff = torch.sqrt(sigma_pred ** 2 + label_var)
+    log_sigma_eff = torch.log(sigma_eff)
+
+    loss_main = (radial / sigma_eff + log_sigma_eff).mean()
+
     target_px = _target_pixel_shift(target_offset_arcsec, pixel_to_sky)
     # Weight pixel-space loss by predicted uncertainty so noisy sources are
     # down-weighted consistently with the sky-space NLL.  Detach sigma so
     # the gradient through loss_px doesn't drive sigma to grow artificially.
-    sigma_detached = torch.exp(out['log_sigma']).clamp_min(1e-4).detach()
+    sigma_detached = sigma_eff.detach()
     loss_px = (
         (
             torch.nn.functional.smooth_l1_loss(out['dx_px'], target_px[:, 0], reduction='none')
@@ -301,6 +333,62 @@ def make_field_preview(
         preview_args._detr_detector = getattr(args, '_detr_detector')
     out: Dict[str, object] = {}
     max_preview_tiles = int(getattr(args, 'preview_max_tiles', 8))
+    preview_cols = 5
+    if len(target_bands) > 1:
+        if not target_bands:
+            return {}
+        ref_band = 'rubin_r' if 'rubin_r' in target_bands else target_bands[0]
+        best = None
+        best_matches = -1
+        for tile_id, rubin_path, euclid_path in preview_pairs[:max_preview_tiles]:
+            try:
+                item = predict_tile(model, device, rubin_path, euclid_path, ref_band, input_bands, detect_bands, preview_args)
+            except Exception as exc:
+                print(f'[preview] skip {tile_id} {ref_band}: {exc}')
+                continue
+            if item is None:
+                continue
+            n_matches = int(item.get('summary', {}).get('matches', 0))
+            if n_matches > best_matches:
+                best = (tile_id, rubin_path, euclid_path)
+                best_matches = n_matches
+        if best is None:
+            return {}
+        tile_id, rubin_path, euclid_path = best
+
+        items = {}
+        for target_band in target_bands:
+            try:
+                item = predict_tile(model, device, rubin_path, euclid_path, target_band, input_bands, detect_bands, preview_args)
+            except Exception as exc:
+                print(f'[preview] skip {tile_id} {target_band}: {exc}')
+                continue
+            if item is None:
+                continue
+            items[target_band] = item
+
+        if not items:
+            return {}
+
+        montage_title = (
+            f"Epoch {epoch} | {split_name} representative tile | {tile_id} "
+            f"(bands={len(items)})"
+        )
+        montages = [
+            ("anchors", "NN predicted corrections at source anchors"),
+            ("field", "Solved field magnitude + direction"),
+            ("residual_hist", "Residual offset components"),
+            ("raw_vs_pred", "Raw WCS vs NN corrections"),
+        ]
+        for key, label in montages:
+            fig = make_band_montage(items, key, ncols=preview_cols, title=f"{montage_title} | {label}")
+            if fig is None:
+                continue
+            out[f'preview/montage/{key}'] = wandb.Image(fig)
+            import matplotlib.pyplot as plt
+            plt.close(fig)
+        return out
+
     for target_band in target_bands:
         best = None
         best_matches = -1
@@ -331,7 +419,11 @@ def make_field_preview(
     return out
 
 
-def run_epoch(split_name, loader, model, optimizer, device, grad_clip: float, pixel_loss_weight: float) -> Dict[str, float]:
+def run_epoch(
+    split_name, loader, model, optimizer, device,
+    grad_clip: float, pixel_loss_weight: float,
+    label_noise_floor: float = 0.0,
+) -> Dict[str, float]:
     is_train = optimizer is not None
     model.train(mode=is_train)
     agg = defaultdict(float)
@@ -357,9 +449,19 @@ def run_epoch(split_name, loader, model, optimizer, device, grad_clip: float, pi
             rms_kwargs['rubin_rms'] = batch['rubin_rms_patch'].float().to(device)
             rms_kwargs['vis_rms'] = batch['vis_rms_patch'].float().to(device)
 
+        # Per-source label noise from SITCOMTN-159 motivated centroid uncertainty.
+        label_sigma = None
+        if 'label_sigma_arcsec' in batch:
+            label_sigma = batch['label_sigma_arcsec'].float().to(device)
+
         with torch.set_grad_enabled(is_train):
             out = model(rubin, vis, pix2sky, band_idx=band_idx, **rms_kwargs)
-            losses = compute_loss(out, target, pix2sky, pixel_loss_weight=pixel_loss_weight)
+            losses = compute_loss(
+                out, target, pix2sky,
+                pixel_loss_weight=pixel_loss_weight,
+                label_sigma=label_sigma,
+                label_noise_floor=label_noise_floor,
+            )
             loss = losses['loss_total']
             if is_train:
                 loss.backward()
@@ -408,6 +510,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     p.add_argument('--patch-size', type=int, default=33)
     p.add_argument('--max-patches-per-tile', type=int, default=64)
+    p.add_argument('--offset-bias', type=float, default=0.5,
+                   help='Bias sampling toward larger raw offsets when subsampling patches. '
+                        '0 = uniform, 1 = fully magnitude-weighted (default: 0.5).')
+    p.add_argument('--offset-bias-power', type=float, default=1.0,
+                   help='Power applied to |offset| when building sampling weights (default: 1.0).')
+    p.add_argument('--offset-bias-floor-mas', type=float, default=5.0,
+                   help='Additive floor (mas) before weighting to avoid zero-probability (default: 5).')
     p.add_argument('--min-matches', type=int, default=20)
     p.add_argument('--max-matches', type=int, default=256)
     p.add_argument('--max-sep-arcsec', type=float, default=0.12)
@@ -437,11 +546,22 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--weight-decay', type=float, default=1e-4)
     p.add_argument('--grad-clip', type=float, default=1.0)
     p.add_argument('--pixel-loss-weight', type=float, default=1.0)
+    p.add_argument('--label-noise-floor', type=float, default=0.005,
+                   help='Label noise floor in arcsec (SITCOMTN-159: ~5 mas for Rubin single-visit). '
+                        'Added in quadrature to predicted sigma in the Rayleigh NLL loss to prevent '
+                        'overfitting to noisy bright-source labels. Set to 0 to disable. (default: 0.005)')
     p.add_argument('--val-frac', type=float, default=0.15)
     p.add_argument('--seed', type=int, default=42)
     p.add_argument('--device', type=str, default='')
     p.add_argument('--vis-every', type=int, default=1,
                    help='Render the fixed patch/tile previews every N epochs.')
+    p.add_argument('--jitter-arcsec', type=float, default=0.0,
+                   help='Gaussian jitter (arcsec) applied to Rubin patches during training '
+                        'to force learning tiny offsets. 0 disables (default: 0).')
+    p.add_argument('--jitter-max-arcsec', type=float, default=0.0,
+                   help='Clip jitter to +/- this arcsec (default: 0 = no clip).')
+    p.add_argument('--jitter-prob', type=float, default=1.0,
+                   help='Probability of applying jitter per sample (default: 1).')
     p.add_argument('--preview-grid-h', type=int, default=12)
     p.add_argument('--preview-grid-w', type=int, default=12)
     p.add_argument('--preview-smooth-lambda', type=float, default=1e-2)
@@ -502,6 +622,9 @@ def train(args):
         detect_bands=detect_bands,
         patch_size=args.patch_size,
         max_patches_per_tile=args.max_patches_per_tile,
+        offset_bias=args.offset_bias,
+        offset_bias_power=args.offset_bias_power,
+        offset_bias_floor_mas=args.offset_bias_floor_mas,
         min_matches=args.min_matches,
         max_matches=args.max_matches,
         max_sep_arcsec=args.max_sep_arcsec,
@@ -555,7 +678,13 @@ def train(args):
         n_target_bands = 1
         preview_target_bands = [target_band]
 
-    train_dataset = MatchedPatchDataset(train_samples, augment=True)
+    train_dataset = MatchedPatchDataset(
+        train_samples,
+        augment=True,
+        jitter_arcsec=args.jitter_arcsec,
+        jitter_max_arcsec=args.jitter_max_arcsec,
+        jitter_prob=args.jitter_prob,
+    )
     val_dataset = MatchedPatchDataset(val_samples, augment=False) if val_samples else None
     train_loader = make_loader(train_dataset, batch_size=args.batch_size, num_workers=args.num_workers, shuffle=True)
     val_loader = make_loader(val_dataset, batch_size=args.batch_size, num_workers=args.num_workers, shuffle=False) if val_dataset else None

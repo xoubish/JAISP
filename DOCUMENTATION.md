@@ -27,7 +27,11 @@ A self-supervised multi-instrument foundation model for precision cosmology with
 
 Rubin Observatory's LSST and ESA's Euclid will together produce the deepest, widest multi-wavelength imaging survey ever conducted. They observe the same sky, but through very different eyes: Rubin captures six optical bands (u through y) at 0.2 arcsec/pixel over a 512x512 tile grid, while Euclid provides a single ultra-sharp visible channel (VIS) at 0.1 arcsec/pixel on a ~1084x1084 grid, plus three near-infrared bands (Y, J, H) delivered as MER mosaics at the same 0.1 arcsec/pixel scale. Jointly analyzing these instruments enables science that neither can achieve alone -- sharper source detection by combining Euclid's resolution with Rubin's depth, sub-pixel astrometric alignment across surveys, and more precise photometric measurements that leverage all 10 wavelength channels simultaneously.
 
-The challenge is that these instruments have different pixel scales, point-spread functions, noise properties, and coordinate systems. JAISP addresses this by learning a single spatially precise shared representation from both instruments through self-supervised pretraining, then attaching lightweight task-specific heads for detection, astrometry, and photometry. The central insight -- arrived at after five failed iterations -- is that **pixel-space reconstruction** via a Masked Autoencoder (MAE), where the model hides one band and learns to reconstruct it from the remaining bands, forces the encoder to preserve the exact spatial layout needed by precision cosmology tasks. Latent-space objectives like JEPA and contrastive learning optimize for "feature similarity" but allow the network to discard sub-pixel spatial information, which is precisely what astrometry and photometry demand.
+The challenge is that these instruments have different pixel scales, point-spread functions, noise properties, and coordinate systems. Classical survey pipelines address this through a chain of parametric models: fit a Gaussian PSF, solve a polynomial WCS, propagate analytical uncertainties through each stage. Each link in this chain introduces model assumptions that may not hold -- the PSF isn't truly Gaussian, the WCS residuals aren't truly random, the uncertainty propagation assumes independence that doesn't exist. Recent analysis of the Rubin pipeline (Wilson & Naylor 2025, SITCOMTN-159) illustrates this concretely: single-visit astrometric uncertainties have a ~5 milliarcsecond systematic floor not captured by the pipeline's error model, and coadd uncertainties follow an unexplained power-law relationship with the actual position scatter rather than the expected quadrature model. These are exactly the kind of model-dependent artifacts that accumulate when each stage relies on analytical assumptions about the previous stage's output.
+
+**The core thesis of JAISP is that data-driven methods can surpass these model-dependent approaches.** A neural network that sees thousands of galaxies across 10 bands learns what PSFs actually look like, how centroids shift with wavelength due to differential chromatic refraction, how noise correlates with field position -- all implicitly, from the pixels themselves, without anyone specifying parametric forms. The model doesn't assume a Gaussian PSF; it learns the actual instrument response. It doesn't assume quadrature uncertainty propagation; it learns the true error distribution. As the dataset grows, the learned representations should converge on reality rather than on the assumptions of any particular analytical model.
+
+JAISP addresses this by learning a single spatially precise shared representation from both instruments through self-supervised pretraining, then attaching lightweight task-specific heads for detection, astrometry, and photometry. The central insight -- arrived at after five failed iterations -- is that **pixel-space reconstruction** via a Masked Autoencoder (MAE), where the model hides one band and learns to reconstruct it from the remaining bands, forces the encoder to preserve the exact spatial layout needed by precision cosmology tasks. Latent-space objectives like JEPA and contrastive learning optimize for "feature similarity" but allow the network to discard sub-pixel spatial information, which is precisely what astrometry and photometry demand.
 
 ### The Pipeline
 
@@ -48,6 +52,20 @@ The system works in two layers. First, a foundation model is trained once throug
 ```
 
 This two-layer design means the expensive foundation pretraining only happens once. Each downstream task gets the benefit of 10-band multi-instrument features without paying the cost of encoding from scratch.
+
+### Classical Scaffolding and the Path to End-to-End Learning
+
+An honest account of the current system: while the foundation model is genuinely data-driven, the downstream heads still lean on classical methods in places -- particularly for generating training labels. The astrometry matcher, for example, currently uses Gaussian PSF fitting to refine centroid positions for its training targets, and the detection head bootstraps from classical VIS peak-finding pseudo-labels. This is a practical necessity, not a philosophical choice. With ~200 training tiles, the downstream heads don't yet have enough data to learn everything from scratch, and the foundation encoder is frozen during downstream training so it can't adapt its features for each specific task.
+
+The intended progression, as the dataset and methods mature:
+
+1. **Current stage -- classical labels, learned prediction.** Classical centroiding and peak-finding generate training labels. The model learns to predict offsets, detect sources, and extract fluxes from the foundation encoder's learned features. This already outperforms purely classical approaches because the encoder has learned cross-instrument spatial correspondence that no classical pipeline captures.
+
+2. **Self-training -- model-refined labels.** The model's own predictions refine its training data. The CenterNet detection head already does this: round-1 trains on VIS pseudo-labels, round-2 uses the model's confident novel detections as new labels and demotes classical artifacts the model rejects. This same principle extends to astrometry (use the model's offset predictions to generate better centroid targets) and photometry (use learned PSF features instead of parametric PSF models).
+
+3. **End-to-end -- no classical stage.** Unfreeze the foundation encoder and let task-specific gradients flow back into the representation. The encoder specializes toward centroid-relevant features for astrometry, morphology-relevant features for detection, and SED-relevant features for photometry. No explicit PSF model, no parametric WCS correction, no hand-tuned uncertainty propagation. The model learns the instrument from the data.
+
+This is not speculative -- each transition is a concrete engineering step. The foundation model already encodes enough spatial precision for pixel-level reconstruction across instruments. The remaining work is propagating that precision through the downstream heads and eventually closing the loop to let the tasks inform the representation.
 
 ---
 
@@ -210,8 +228,8 @@ See the next section for the full v7 architecture.
 | v3 | DETR-JEPA | Object-level manifold matching | Abandoned: complexity, no precision gain |
 | v4 | Native-res JEPA | InformationMap + shift tolerance | Superseded: spatially imprecise |
 | v5 | Native-res JEPA | Strict position matching | Failed: JEPA can't enforce pixel precision |
-| v6 | Dense MAE | Pixel-space reconstruction | Works: 31.9 mas astrometry |
-| v7 | Mixed-res MAE | 2-stream (Rubin mean / Euclid concat), native resolution | **Current**: preserves per-band PSF structure |
+| v6 | Dense MAE | Pixel-space reconstruction | Works but VIS downsampled to Rubin grid |
+| v7 | Mixed-res MAE | 2-stream (Rubin mean / Euclid concat), native resolution | **Current**: preserves per-band PSF structure, RMS-aware loss |
 
 ### v7 Mixed-Resolution MAE (Current)
 
@@ -262,7 +280,7 @@ NISP Y/J/H data comes from Euclid MER mosaics, already resampled to 0.1"/px (sam
 
 Training uses mixed-precision (bfloat16 autocast) and supports multi-GPU via `torchrun` with DistributedDataParallel.
 
-**Best checkpoint** (`jaisp_v7_baseline`):
+**Current checkpoint** (`jaisp_v7_concat` / `v7_rms_aware_loss`):
 
 | Parameter | Value |
 |-----------|-------|
@@ -272,11 +290,11 @@ Training uses mixed-precision (bfloat16 autocast) and supports multi-GPU via `to
 | `transformer_heads` | 8 |
 | `fused_pixel_scale_arcsec` | 0.8 |
 | `cross_instrument_prob` | 1.0 |
-| Epoch | 86 |
-| Val loss | 1.4689 |
+| Epoch | 92 |
 | Total params | 13.3M |
+| Location | `models/checkpoints/jaisp_v7_concat/checkpoint_best.pt` |
 
-**`v7_rms_aware_loss` run** (epoch 92, val_loss 4.0493; [wandb](https://wandb.ai/AI-Astro/JAISP-Foundation-v7/runs/x9y9os7r)):
+This is the RMS-aware loss run ([wandb](https://wandb.ai/AI-Astro/JAISP-Foundation-v7/runs/x9y9os7r)), trained on 790 matched tile pairs with correct NISP MER pixel scales (0.1"/px) and RMS-adaptive InformationMap weighting. All downstream heads should be trained on this checkpoint.
 
 Reconstruction quality across bands: Rubin g/r/i/z achieve near-perfect fidelity (Pearson r >= 0.989). Rubin u and Euclid NISP bands are solid (r = 0.87-0.97). Euclid VIS is the weakest band (r = 0.87, std_ratio = 0.92), likely because reconstructing the highest-resolution channel from coarser inputs is the hardest prediction task. Mean Pearson r across all 10 bands is 0.955.
 
@@ -472,12 +490,18 @@ For each tile:
 
 #### Matcher Versions
 
-Two matcher versions are available, differing only in which foundation model's BandStems they reuse:
-
-- **V6** (`matcher_v6.py`): Uses frozen V6 Phase B BandStems. These were trained with cross-instrument masking where VIS was downsampled to Rubin resolution. Best result: 31.9 mas median astrometric precision.
-- **V7** (`matcher_v7.py`): Uses frozen V7 BandStems, where VIS was processed at native resolution. API-compatible drop-in replacement for V6. Additionally supports `--stream-stages N` to use frozen V7 stream encoder ConvNeXt stages after the stems for richer features.
+- **V7** (`matcher_v7.py`): Uses frozen V7 BandStems (from `jaisp_v7_concat`), where VIS is processed at native resolution. Supports `--stream-stages N` to use frozen V7 stream encoder ConvNeXt stages after the stems for richer features. This is the recommended matcher.
+- **V6** (`matcher_v6.py`): Archived. Uses V6 Phase B BandStems where VIS was downsampled to Rubin resolution. Kept for backward compatibility.
 
 Both versions support multiband mode (per-band learned embeddings for wavelength-specific chromatic correction) and separate learning rates (full LR for adapters and heads, 0.1x for stems and stream stages if unfrozen for fine-tuning).
+
+#### SITCOMTN-159 Motivated Improvements
+
+The astrometry pipeline incorporates findings from Wilson & Naylor (2025, SITCOMTN-159) on Rubin pipeline astrometric uncertainties:
+
+- **PSF-fit centroiding**: Replaces simple flux-weighted centroids with 2D Gaussian PSF fitting via `scipy.optimize.least_squares`. This gives centroid precision ~FWHM/(2.35×SNR) per axis (King 1983), substantially better than flux-weighted centroids for bright sources.
+- **Per-source SNR estimation**: Each matched source gets an SNR estimate from the PSF fit, used to compute expected centroid uncertainty.
+- **Label noise floor**: The Rayleigh NLL loss includes per-source label noise: `σ_eff = sqrt(σ_pred² + σ_label²)`. The label noise captures the ~5 mas systematic floor in Rubin single-visit positions (from WCS solution errors not reflected in pipeline uncertainties) plus the VIS centroid uncertainty. This prevents the model from overfitting to noisy bright-source labels. Controlled by `--label-noise-floor` (default 0.005 arcsec = 5 mas).
 
 #### Data Augmentation
 
@@ -504,7 +528,7 @@ Two solvers are available for fitting the smooth concordance field from per-sour
 | `matcher_v6.py` | V6-based patch matcher (frozen V6 stems + trainable adapters) |
 | `matcher_v7.py` | V7-based patch matcher (frozen V7 stems + optional stream stages + trainable adapters, per-pixel RMS support) |
 | `dataset.py` | Patch + RMS extraction, WCS matching, CenterNet detector integration, rotation/flip augmentation |
-| `source_matching.py` | Classical peak-finding, WCS-based source matching |
+| `source_matching.py` | Classical peak-finding, WCS-based source matching, PSF-fit centroiding, SNR estimation |
 | `field_solver.py` | Control-grid least-squares field solver |
 | `nn_field_solver.py` | MLP-based field solver |
 | `train_astro_v6.py` | Training script (V6 backbone) |
@@ -547,8 +571,10 @@ JAISP/
 |   +-- tiles_product.tar.gz           Source archive for the expanded flat tile set
 |
 +-- checkpoints/
-|   +-- jaisp_v7_baseline/             Historical 144-tile V7 checkpoint
-|   +-- jaisp_v7_tiles_all_ddp*/       Current / future 790-tile V7 training outputs
+|   +-- centernet_v7_rms_aware/        Current CenterNet (on jaisp_v7_concat)
+|   +-- stem_centernet_v7_rms_aware_200/ Current StemCenterNet
+|   +-- astro_v7_psffit/               Current astrometry matcher (training)
+|   +-- jaisp_v7_baseline/             Archived (pre-RMS-aware, wrong NISP scale)
 |
 +-- models/
 |   +-- jaisp_foundation_v7.py         V7 mixed-resolution MAE (current)
@@ -676,50 +702,50 @@ python models/detection/self_train_stem.py \
 
 ### 3. Astrometry Matcher
 
-The matcher is a patch-level model -- it only needs to learn "given a 33x33 patch pair, predict the offset." Training on ~200 tiles is sufficient; inference and field solving then run on all 790. Use `--val-frac 0.75` to train on ~200 tiles while holding out the rest for validation.
+The matcher is a patch-level model -- it only needs to learn "given a 33x33 patch pair, predict the offset." Training on ~200 tiles is sufficient; inference and field solving then run on all 790.
 
-Notes:
-- In multiband mode, the default now trains **all Rubin + NISP bands** (10 total). Use `--bands` to limit targets (e.g., `--bands u g r i z y` for Rubin-only).
+Key features:
+- **PSF-fit centroiding** (SITCOMTN-159): 2D Gaussian fitting replaces flux-weighted centroids, giving ~2x better centroid precision for bright sources.
+- **Label noise floor** (`--label-noise-floor`, default 5 mas): prevents overfitting to the ~5 mas systematic in Rubin single-visit WCS positions.
+- **Per-source SNR estimation**: each training sample carries an SNR-derived label uncertainty that modulates the Rayleigh NLL loss.
+- **Multiband mode**: default trains all Rubin + NISP bands (10 total). Use `--bands` to limit targets.
 
 ```bash
-# V7 backbone with CenterNet source detection (recommended)
-python models/astrometry2/train_astro_v7.py \
-    --v7-checkpoint       models/checkpoints/jaisp_v7_concat/checkpoint_best.pt \
-    --detector-checkpoint checkpoints/centernet_v7_rms_aware/centernet_best.pt \
-    --rubin-dir      data/rubin_tiles_all \
-    --euclid-dir     data/euclid_tiles_all \
-    --multiband \
-    --bands all,all_nisp \
-    --stream-stages 1 \
-    --val-frac 0.75 \
-    --epochs 60 \
-    --output-dir     checkpoints/astro_v7 \
-    --wandb-project  JAISP-Astrometry-v7
+cd models
 
-# V7 backbone with classical source detection (no detector needed)
-python models/astrometry2/train_astro_v7.py \
-    --v7-checkpoint  models/checkpoints/jaisp_v7_concat/checkpoint_best.pt \
-    --rubin-dir      data/rubin_tiles_all \
-    --euclid-dir     data/euclid_tiles_all \
+# Recommended: V7 backbone + CenterNet detector + PSF-fit centroids
+python astrometry2/train_astro_v7.py \
+    --v7-checkpoint       checkpoints/jaisp_v7_concat/checkpoint_best.pt \
+    --detector-checkpoint ../checkpoints/centernet_v7_rms_aware/centernet_best.pt \
+    --rubin-dir           ../data/rubin_tiles_200 \
+    --euclid-dir          ../data/euclid_tiles_200 \
     --multiband \
-    --bands all,all_nisp \
-    --stream-stages 1 \
-    --val-frac 0.75 \
-    --epochs 60 \
-    --output-dir     checkpoints/astro_v7_classical
+    --epochs 120 \
+    --output-dir checkpoints/astro_v7_psffit
+
+# Without CenterNet (classical source detection)
+python astrometry2/train_astro_v7.py \
+    --v7-checkpoint  checkpoints/jaisp_v7_concat/checkpoint_best.pt \
+    --rubin-dir      ../data/rubin_tiles_200 \
+    --euclid-dir     ../data/euclid_tiles_200 \
+    --multiband \
+    --epochs 120 \
+    --output-dir checkpoints/astro_v7_classical
 ```
 
 ### 4. Concordance Inference
 
 ```bash
+cd models
+
 # Generate concordance FITS with V7 matcher + CenterNet sources
-python models/astrometry2/infer_concordance.py \
-    --checkpoint         checkpoints/astro_v7/checkpoint_best.pt \
-    --v7-checkpoint      models/checkpoints/jaisp_v7_concat/checkpoint_best.pt \
-    --detector-checkpoint checkpoints/centernet_v7_rms_aware/centernet_best.pt \
-    --rubin-dir     data/rubin_tiles_all \
-    --euclid-dir    data/euclid_tiles_all \
-    --output        concordance_v7.fits \
+python astrometry2/infer_concordance.py \
+    --checkpoint          checkpoints/astro_v7_psffit/checkpoint_best.pt \
+    --v7-checkpoint       checkpoints/jaisp_v7_concat/checkpoint_best.pt \
+    --detector-checkpoint ../checkpoints/centernet_v7_rms_aware/centernet_best.pt \
+    --rubin-dir      ../data/rubin_tiles_all \
+    --euclid-dir     ../data/euclid_tiles_all \
+    --output         concordance_v7.fits \
     --all-bands
 ```
 
@@ -737,21 +763,36 @@ python models/photometry/train_psf_net.py \
 
 ## Checkpoints
 
-| Checkpoint / Artifact | Location | Description |
-|-----------------------|----------|-------------|
-| Historical V7 foundation baseline | `checkpoints/jaisp_v7_baseline/checkpoint_best.pt` | Legacy 144-tile V7 baseline (epoch 86, val_loss 1.4689) |
-| Previous flat-set V7 checkpoint | `checkpoints/jaisp_v7_tiles_all_ddp_online/checkpoint_best.pt` | Previous downstream backbone (before RMS-aware loss) |
-| **Current V7 foundation (RMS-aware)** | `models/checkpoints/jaisp_v7_concat/checkpoint_best.pt` | **Latest**: v7_rms_aware_loss run (epoch 92, val_loss 4.0493). Use this for all new downstream training. |
-| V7 detector (CenterNet bottleneck) | `checkpoints/centernet_v7_patch25_box16_round2/centernet_best.pt` | Trained on previous (non-RMS-aware) foundation; needs retraining on current checkpoint |
-| V7 detector (StemCenterNet, artifact-aware) | `checkpoints/stem_centernet_v7_patch25_box16_round2_mask20/stem_centernet_best.pt` | Trained on previous foundation; needs retraining on current checkpoint |
-| Cached features (previous) | `data/cached_features_v7_patch25_box16/` | Cached features from previous foundation checkpoint (stale) |
+### Current (use these)
+
+| Checkpoint | Location | Description |
+|------------|----------|-------------|
+| **V7 foundation (RMS-aware)** | `models/checkpoints/jaisp_v7_concat/checkpoint_best.pt` | v7_rms_aware_loss run (epoch 92). Trained on 790 tile pairs with correct NISP pixel scales and RMS-aware loss. **Use this for all downstream training.** |
+| **CenterNet detector** | `checkpoints/centernet_v7_rms_aware/centernet_best.pt` | Fused-bottleneck CenterNet, 2-round self-training on top of `jaisp_v7_concat`. |
+| **StemCenterNet detector** | `checkpoints/stem_centernet_v7_rms_aware_200/stem_centernet_best.pt` | Native-resolution stem detector on top of `jaisp_v7_concat`. |
+
+### Archived (historical reference only)
+
+These checkpoints are outdated — trained on wrong NISP pixel scales (0.3"/px assumed instead of 0.1"/px) or on older, weaker foundation models. Do not use for new downstream work.
+
+| Checkpoint | Location | Issue |
+|------------|----------|-------|
+| `jaisp_v7_baseline` | `checkpoints/jaisp_v7_baseline/` | Pre-RMS-aware, wrong NISP pixel scale |
+| `jaisp_v7_run1` | `models/checkpoints/jaisp_v7_run1/` | hidden_ch=128, weaker model |
+| `jaisp_v7_smoke` | `models/checkpoints/jaisp_v7_smoke/` | Smoke test only |
+| `jaisp_v6_phaseB2` | `models/checkpoints/jaisp_v6_phaseB2/` | V6 architecture, archived |
+| `centernet_v7_selftrain` | `models/checkpoints/centernet_v7_selftrain/` | Trained on `jaisp_v7_baseline` (wrong NISP), old neck architecture |
+| `centernet_v7_patch25_*` | `checkpoints/centernet_v7_patch25_*/` | Trained on pre-RMS-aware foundation |
+| `stem_centernet_v7_patch25_*` | `checkpoints/stem_centernet_v7_patch25_*/` | Trained on pre-RMS-aware foundation |
+| `astrometry_v6_phaseB2` | `models/checkpoints/astrometry_v6_phaseB2/` | V6 astrometry, outdated |
+| `detector_v1.pt`, `detector_v7.pt`, `centernet_v7.pt` | `models/checkpoints/` | Old standalone detector checkpoints |
 
 ---
 
 ## Current Status
 
-- **V7 foundation**: The current best checkpoint is `models/checkpoints/jaisp_v7_concat/checkpoint_best.pt` (epoch 92, val_loss 4.0493), trained with RMS-aware loss weighting on 790 matched tile pairs. Use this for all downstream training. Older checkpoints (`jaisp_v7_tiles_all_ddp_online`, `jaisp_v7_baseline`) are kept as historical references.
-- **Detection**: Three supported choices: classical VIS baseline, fused-bottleneck CenterNet, and native-resolution StemCenterNet. DETR code is archived for reference only. Both neural detectors need retraining on the current foundation checkpoint.
-- **Astrometry**: The V7 matcher supports frozen stream encoder stages (`--stream-stages N`) for richer features, per-pixel RMS normalization matching foundation pretraining, and 16-fold augmentation (4 rotations x 4 flips). Checkpoints include full metadata for reproducible inference. Recommended workflow: train on ~200 tiles (`--val-frac 0.75`), then run inference on all 790 tiles and fit the global concordance field. Early results on a 16-tile subset with CenterNet anchors: raw WCS 60 mas reduced to 25 mas per-source, 15 mas field residual.
-- **Photometry**: Functional but has not yet been rerun on the expanded flat dataset.
+- **V7 foundation**: `models/checkpoints/jaisp_v7_concat/checkpoint_best.pt` (epoch 92), trained with RMS-aware loss on 790 tiles with correct NISP MER pixel scales. This is the only foundation checkpoint to use.
+- **Detection**: CenterNet (`checkpoints/centernet_v7_rms_aware/`) and StemCenterNet (`checkpoints/stem_centernet_v7_rms_aware_200/`) are both trained on the current foundation. Classical VIS detection remains a fast baseline.
+- **Astrometry**: V7 matcher with PSF-fit centroiding (SITCOMTN-159 motivated), per-source SNR estimation, and label noise floor in the Rayleigh NLL loss. Training in progress on 200-tile subset.
+- **Photometry**: PSFNet functional. Not yet rerun on the expanded dataset.
 - This is an active research codebase. Architecture and training defaults evolve with experiments.

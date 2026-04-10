@@ -78,6 +78,9 @@ class CenterNetDetector(nn.Module):
         predict_profile: bool = False,
         # Legacy parameter — ignored, kept for call-site compatibility
         neck_layers: int = 3,
+        # Override channel widths for legacy checkpoints that used uniform channels.
+        _mid_ch: int = 0,
+        _vis_ch: int = 0,
     ):
         super().__init__()
         self.encoder = encoder
@@ -86,22 +89,17 @@ class CenterNetDetector(nn.Module):
         self.predict_profile = predict_profile
 
         # Decoder neck: reduce channels immediately, then 3x 2x upsample.
-        # Without skip connections, the upsampled stages just route bottleneck
-        # info to VIS resolution — 64 channels is plenty.
-        # Channels: encoder_dim → 128 → 64 → 64 → 64
-        # Spatial:  130        → 130  → 260 → 520 → 1040
-        # Peak memory (batch=4): ~1.1 GB activations at final stage.
-        vis_ch = head_ch // 4   # 64 when head_ch=256
-        mid_ch = head_ch // 2   # 128 when head_ch=256
+        vis_ch = _vis_ch if _vis_ch > 0 else head_ch // 4   # 64 when head_ch=256
+        mid_ch = _mid_ch if _mid_ch > 0 else head_ch // 2   # 128 when head_ch=256
         self.neck = nn.Sequential(
-            # Reduce channels at bottleneck scale (256 → 128)
+            # Reduce channels at bottleneck scale
             nn.Conv2d(encoder_dim, mid_ch, 3, padding=1, bias=False),
             nn.BatchNorm2d(mid_ch),
             nn.ReLU(inplace=True),
             # 3 × 2x upsampling → 8x total = VIS resolution
-            _UpBlock(mid_ch, vis_ch),   # 128→64,  130 → 260
-            _UpBlock(vis_ch, vis_ch),   # 64→64,   260 → 520
-            _UpBlock(vis_ch, vis_ch),   # 64→64,   520 → 1040
+            _UpBlock(mid_ch, vis_ch),
+            _UpBlock(vis_ch, vis_ch),
+            _UpBlock(vis_ch, vis_ch),
         )
 
         # Prediction heads operate at VIS resolution
@@ -239,16 +237,50 @@ class CenterNetDetector(nn.Module):
         device: Optional[torch.device] = None,
     ) -> 'CenterNetDetector':
         ckpt = torch.load(path, map_location='cpu', weights_only=True)
+        # Infer channel widths from saved weights when not stored in checkpoint.
+        # Legacy checkpoints used uniform channels (mid_ch == vis_ch == encoder_dim).
+        sd = ckpt['state_dict']
+        head_ch = ckpt.get('head_ch', 256)
+        mid_ch = 0
+        vis_ch = 0
+        if 'neck.0.weight' in sd and 'hm_head.0.weight' in sd:
+            mid_ch = int(sd['neck.0.weight'].shape[0])
+            vis_ch = int(sd['hm_head.0.weight'].shape[1])
         model = cls(
             encoder=encoder,
             encoder_dim=ckpt['encoder_dim'],
-            head_ch=ckpt.get('head_ch', 256),
+            head_ch=head_ch,
             predict_profile=ckpt.get('predict_profile', False),
+            _mid_ch=mid_ch,
+            _vis_ch=vis_ch,
         )
+        # Remap legacy flat-Sequential neck keys to _UpBlock keys.
+        # Legacy checkpoints stored neck as flat Sequential (neck.3, neck.4, ...),
+        # current code wraps upsamples in _UpBlock (neck.3.block.1, neck.3.block.2).
+        # Only remap if checkpoint uses legacy flat keys (no '.block.' in neck keys).
+        has_block_keys = any('.block.' in k for k in sd if k.startswith('neck.'))
+        if not has_block_keys:
+            flat_to_upblock = {3: (3, 1), 4: (3, 2), 6: (4, 1), 7: (4, 2), 9: (5, 1), 10: (5, 2)}
+            remapped = {}
+            for k, v in sd.items():
+                new_k = k
+                if k.startswith('neck.'):
+                    parts = k.split('.', 2)
+                    if len(parts) >= 2:
+                        try:
+                            flat_idx = int(parts[1])
+                        except ValueError:
+                            flat_idx = -1
+                        rest = '.' + parts[2] if len(parts) > 2 else ''
+                        if flat_idx in flat_to_upblock:
+                            ub_idx, sub_idx = flat_to_upblock[flat_idx]
+                            new_k = f'neck.{ub_idx}.block.{sub_idx}{rest}'
+                remapped[new_k] = v
+            sd = remapped
         # strict=False: checkpoints saved in head-only mode (encoder=None) won't
         # have encoder keys, so missing keys are expected when loading with a
         # real encoder for inference.
-        missing, _ = model.load_state_dict(ckpt['state_dict'], strict=False)
+        missing, _ = model.load_state_dict(sd, strict=False)
         neck_missing = [k for k in missing if not k.startswith('encoder.')]
         if neck_missing:
             print(f'  [warn] Missing non-encoder keys: {neck_missing}')

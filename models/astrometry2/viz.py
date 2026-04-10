@@ -1,7 +1,9 @@
 """Visualization helpers for the standalone astrometry2 pipeline."""
 
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Optional
+
+import math
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -351,6 +353,175 @@ def make_tile_diagnostic_figure(
         f"{tile_id}  |  {rubin_band} → euclid_VIS  |  astrometry preview",
         fontsize=11, y=0.995,
     )
+    return fig
+
+
+def _short_band_label(band: str) -> str:
+    if band.startswith("rubin_"):
+        return band.split("_", 1)[1]
+    if band.startswith("nisp_"):
+        return band.split("_", 1)[1]
+    return band
+
+
+def _prep_axes(n: int, ncols: int):
+    ncols = max(1, int(ncols))
+    nrows = int(math.ceil(n / float(ncols)))
+    fig, axes = plt.subplots(nrows, ncols, figsize=(ncols * 3.2, nrows * 3.0), constrained_layout=True)
+    axes = np.atleast_1d(axes).reshape(nrows, ncols)
+    return fig, axes, nrows, ncols
+
+
+def make_band_montage(
+    items: Dict[str, Dict],
+    plot_kind: str,
+    ncols: int = 5,
+    title: Optional[str] = None,
+) -> Optional[plt.Figure]:
+    """Create a montage with one subplot per band for a given plot type."""
+    bands = list(items.keys())
+    if not bands:
+        return None
+
+    fig, axes, nrows, ncols = _prep_axes(len(bands), ncols)
+    flat_axes = axes.ravel()
+
+    # Shared ranges across bands.
+    if plot_kind == "anchors":
+        all_pred = []
+        for item in items.values():
+            pred_offsets = np.asarray(item["pred_offsets"], dtype=np.float32)
+            all_pred.append(np.hypot(pred_offsets[:, 0], pred_offsets[:, 1]) * 1000.0)
+        vmax = float(np.percentile(np.concatenate(all_pred), 95)) if all_pred else 1.0
+        cmap = "plasma"
+    elif plot_kind == "field":
+        all_mag = []
+        for item in items.values():
+            mesh = item["mesh"]
+            dra = np.asarray(mesh["dra"], dtype=np.float32)
+            ddec = np.asarray(mesh["ddec"], dtype=np.float32)
+            all_mag.append(np.hypot(dra, ddec).ravel() * 1000.0)
+        vmax = float(np.percentile(np.concatenate(all_mag), 95)) if all_mag else 1.0
+        cmap = "magma"
+    elif plot_kind == "residual_hist":
+        all_vals = []
+        for item in items.values():
+            raw = np.asarray(item["raw_offsets"], dtype=np.float32) * 1000.0
+            pred = np.asarray(item["pred_offsets"], dtype=np.float32) * 1000.0
+            resid = raw - pred
+            all_vals.append(resid[:, 0]); all_vals.append(resid[:, 1])
+        all_vals = np.concatenate(all_vals) if all_vals else np.zeros((1,), dtype=np.float32)
+        lim = max(20.0, float(np.percentile(np.abs(all_vals), 98)))
+        bins = np.linspace(-lim, lim, 18)
+    elif plot_kind == "raw_vs_pred":
+        all_vals = []
+        for item in items.values():
+            raw = np.asarray(item["raw_offsets"], dtype=np.float32) * 1000.0
+            pred = np.asarray(item["pred_offsets"], dtype=np.float32) * 1000.0
+            all_vals.append(raw[:, 0]); all_vals.append(raw[:, 1])
+            all_vals.append(pred[:, 0]); all_vals.append(pred[:, 1])
+        all_vals = np.concatenate(all_vals) if all_vals else np.zeros((1,), dtype=np.float32)
+        lim = max(20.0, float(np.percentile(np.abs(all_vals), 99)))
+    else:
+        raise ValueError(f"Unknown plot_kind: {plot_kind}")
+
+    # Render each band.
+    mappable = None
+    for i, band in enumerate(bands):
+        ax = flat_axes[i]
+        item = items[band]
+
+        if plot_kind == "anchors":
+            vis = np.asarray(item["vis_image"], dtype=np.float32)
+            p1v, p99v = np.percentile(vis, [1, 99])
+            if not np.isfinite(p1v) or p1v >= p99v:
+                p1v, p99v = float(vis.min()), float(vis.max())
+            ax.imshow(vis, origin="lower", cmap="gray", vmin=p1v, vmax=p99v, aspect="auto")
+            vis_xy = np.asarray(item["vis_xy"], dtype=np.float32)
+            raw_anchor_xy = np.asarray(item.get("raw_anchor_xy", vis_xy), dtype=np.float32)
+            vis_anchor_xy = np.asarray(item.get("vis_anchor_xy", vis_xy), dtype=np.float32)
+            pred_offsets = np.asarray(item["pred_offsets"], dtype=np.float32) * 1000.0
+            plot_mag = np.hypot(pred_offsets[:, 0], pred_offsets[:, 1])
+            keep_raw = _downsample_indices(len(raw_anchor_xy), 600)
+            keep_vis = _downsample_indices(len(vis_anchor_xy), 600)
+            keep = _downsample_indices(len(vis_xy), 700)
+            if len(keep_raw) > 0:
+                ax.scatter(raw_anchor_xy[keep_raw, 0], raw_anchor_xy[keep_raw, 1],
+                           s=8, facecolors="none", edgecolors="deepskyblue",
+                           linewidths=0.5, alpha=0.35)
+            if len(keep_vis) > 0:
+                ax.scatter(vis_anchor_xy[keep_vis, 0], vis_anchor_xy[keep_vis, 1],
+                           s=6, facecolors="none", edgecolors="springgreen",
+                           linewidths=0.4, alpha=0.35)
+            sc = ax.scatter(vis_xy[keep, 0], vis_xy[keep, 1],
+                            c=plot_mag[keep], s=8, cmap=cmap, vmin=0, vmax=vmax,
+                            edgecolors="white", linewidths=0.2, alpha=0.9)
+            mappable = sc
+            ax.set_xlim(0, vis.shape[1]); ax.set_ylim(0, vis.shape[0])
+
+        elif plot_kind == "field":
+            mesh = item["mesh"]
+            dra = np.asarray(mesh["dra"], dtype=np.float32)
+            ddec = np.asarray(mesh["ddec"], dtype=np.float32)
+            x_mesh = np.asarray(mesh["x_mesh"], dtype=np.float32)
+            y_mesh = np.asarray(mesh["y_mesh"], dtype=np.float32)
+            mesh_mag_mas = np.hypot(dra, ddec) * 1000.0
+            vis_shape = item.get("vis_shape") or item["vis_image"].shape
+            extent = _mesh_extent(vis_shape)
+            im = ax.imshow(mesh_mag_mas, origin="lower", extent=extent, cmap=cmap,
+                           vmin=0, vmax=vmax, interpolation="bilinear", alpha=0.95, aspect="auto")
+            mappable = im
+            yy, xx = np.meshgrid(y_mesh, x_mesh, indexing="ij")
+            qstep = max(1, min(dra.shape[0], dra.shape[1]) // 10)
+            xx_q = xx[::qstep, ::qstep]
+            yy_q = yy[::qstep, ::qstep]
+            qu_dx, qu_dy = _sky_to_display_vectors(item, dra[::qstep, ::qstep], ddec[::qstep, ::qstep])
+            qu_div = max(1.0, float(np.percentile(np.hypot(qu_dx, qu_dy), 95)) / 18.0)
+            qu_u = qu_dx / qu_div
+            qu_v = qu_dy / qu_div
+            ax.quiver(
+                xx_q.ravel(), yy_q.ravel(), qu_u.ravel(), qu_v.ravel(),
+                angles="xy", scale_units="xy", scale=1,
+                width=0.0025, alpha=0.7, color="black",
+            )
+            ax.set_xlim(0, vis_shape[1]); ax.set_ylim(0, vis_shape[0])
+
+        elif plot_kind == "residual_hist":
+            raw = np.asarray(item["raw_offsets"], dtype=np.float32) * 1000.0
+            pred = np.asarray(item["pred_offsets"], dtype=np.float32) * 1000.0
+            resid = raw - pred
+            ax.hist(resid[:, 0], bins=bins, alpha=0.7, color="tab:blue", density=True)
+            ax.hist(resid[:, 1], bins=bins, alpha=0.7, color="tab:orange", density=True)
+            ax.axvline(0, color="gray", lw=0.7)
+
+        elif plot_kind == "raw_vs_pred":
+            raw = np.asarray(item["raw_offsets"], dtype=np.float32) * 1000.0
+            pred = np.asarray(item["pred_offsets"], dtype=np.float32) * 1000.0
+            keep = _downsample_indices(len(raw), 700)
+            ax.scatter(raw[keep, 0], pred[keep, 0], s=6, alpha=0.35, color="tab:blue")
+            ax.scatter(raw[keep, 1], pred[keep, 1], s=6, alpha=0.35, color="tab:orange")
+            ax.plot([-lim, lim], [-lim, lim], "k--", lw=0.8)
+            ax.set_xlim(-lim, lim); ax.set_ylim(-lim, lim)
+
+        # Title per band
+        ax.set_title(_short_band_label(band), fontsize=9)
+        ax.tick_params(labelsize=7)
+
+        # Reduce clutter for montage
+        ax.set_xlabel("")
+        ax.set_ylabel("")
+
+    # Turn off unused axes
+    for j in range(len(bands), len(flat_axes)):
+        flat_axes[j].axis("off")
+
+    # Add shared colorbar for map-like plots.
+    if plot_kind in ("anchors", "field") and mappable is not None:
+        cbar = fig.colorbar(mappable, ax=axes, fraction=0.02, pad=0.02)
+        cbar.set_label("|pred| (mas)" if plot_kind == "anchors" else "|field| (mas)")
+
+    if title:
+        fig.suptitle(title, fontsize=11)
     return fig
 
 

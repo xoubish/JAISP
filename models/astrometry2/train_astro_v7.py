@@ -167,6 +167,9 @@ def train(args):
         detect_bands=detect_bands,
         patch_size=args.patch_size,
         max_patches_per_tile=args.max_patches_per_tile,
+        offset_bias=args.offset_bias,
+        offset_bias_power=args.offset_bias_power,
+        offset_bias_floor_mas=args.offset_bias_floor_mas,
         min_matches=args.min_matches,
         max_matches=args.max_matches,
         max_sep_arcsec=args.max_sep_arcsec,
@@ -217,7 +220,13 @@ def train(args):
         n_target_bands = 1
         preview_target_bands = [target_band]
 
-    train_dataset = MatchedPatchDataset(train_samples, augment=True)
+    train_dataset = MatchedPatchDataset(
+        train_samples,
+        augment=True,
+        jitter_arcsec=args.jitter_arcsec,
+        jitter_max_arcsec=args.jitter_max_arcsec,
+        jitter_prob=args.jitter_prob,
+    )
     val_dataset   = MatchedPatchDataset(val_samples,   augment=False) if val_samples else None
     train_loader  = make_loader(train_dataset, batch_size=args.batch_size, num_workers=args.num_workers, shuffle=True)
     val_loader    = make_loader(val_dataset,   batch_size=args.batch_size, num_workers=args.num_workers, shuffle=False) if val_dataset else None
@@ -284,9 +293,11 @@ def train(args):
 
     for epoch in range(1, args.epochs + 1):
         t0 = time.time()
+        label_noise_floor = getattr(args, 'label_noise_floor', 0.005)
         train_metrics = run_epoch(
             'train', train_loader, model, optimizer, device,
             args.grad_clip, args.pixel_loss_weight,
+            label_noise_floor=label_noise_floor,
         )
         scheduler.step()
         train_metrics['lr'] = optimizer.param_groups[0]['lr']
@@ -297,6 +308,7 @@ def train(args):
                 val_metrics = run_epoch(
                     'val', val_loader, model, None, device,
                     args.grad_clip, args.pixel_loss_weight,
+                    label_noise_floor=label_noise_floor,
                 )
 
         score   = val_metrics.get('mae_total', train_metrics['mae_total'])
@@ -344,7 +356,7 @@ def train(args):
 
                 field_imgs = make_field_preview(
                     model, device, preview_pairs,
-                    preview_target_bands[:1],
+                    preview_target_bands,
                     [f'rubin_{b}' for b in ('u', 'g', 'r', 'i', 'z', 'y')][:n_rubin_bands],
                     detect_bands, args, epoch, preview_split,
                 )
