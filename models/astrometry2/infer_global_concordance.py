@@ -370,8 +370,20 @@ def collect_all_predictions_multiband(
             raw_ddec = (v_dec - t_dec) * 3600.0
             raw_offsets = np.stack([raw_dra, raw_ddec], axis=1).astype(np.float32)
 
+            # Drop large raw offsets (likely mismatches).
+            max_sep = float(getattr(args, 'max_sep_arcsec', 0.12))
+            if max_sep > 0:
+                raw_mag = np.hypot(raw_offsets[:, 0], raw_offsets[:, 1])
+                keep = raw_mag <= max_sep
+                if int(keep.sum()) < min_matches:
+                    continue
+                vis_xy = vis_xy[keep]
+                raw_offsets = raw_offsets[keep]
+                keep_idx = np.where(target_keep)[0][keep]
+            else:
+                keep_idx = np.where(target_keep)[0]
+
             # Subset the cached encoder features to kept sources
-            keep_idx = np.where(target_keep)[0]
             enc_sub = {k: v[keep_idx] if isinstance(v, torch.Tensor) else v for k, v in all_enc.items()}
 
             # Run MLP head with band embedding (cheap)
@@ -393,8 +405,8 @@ def collect_all_predictions_multiband(
             sigma = np.concatenate(sigmas, axis=0).astype(np.float32)
 
             r = results[target_band]
-            r['ra'].append(vis_ra[target_keep])
-            r['dec'].append(vis_dec[target_keep])
+            r['ra'].append(vis_ra[keep_idx])
+            r['dec'].append(vis_dec[keep_idx])
             r['pred'].append(pred_offsets)
             r['raw'].append(raw_offsets)
             r['sigma'].append(sigma)

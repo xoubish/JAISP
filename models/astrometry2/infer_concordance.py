@@ -381,6 +381,17 @@ def predict_tile(
         raw_ddec = (v_dec - n_dec) * 3600.0
         raw_offsets = np.stack([raw_dra, raw_ddec], axis=1).astype(np.float32)
 
+    # Drop large raw offsets (likely mismatches) before inference.
+    max_sep = float(args.max_sep_arcsec)
+    if max_sep > 0:
+        raw_mag = np.hypot(raw_offsets[:, 0], raw_offsets[:, 1])
+        keep = raw_mag <= max_sep
+        if int(keep.sum()) < int(args.min_matches):
+            return None
+        vis_xy = vis_xy[keep]
+        raw_offsets = raw_offsets[keep]
+        vis_anchor_xy = vis_xy.copy()
+
     rubin_patches = []
     vis_patches = []
     pix2sky_list = []

@@ -582,6 +582,15 @@ def build_patch_samples(
         ddec = (v_dec - r_dec) * 3600.0
         offsets = np.stack([dra, ddec], axis=1).astype(np.float32)
 
+        # Drop matches with large raw WCS offsets (likely mismatches).
+        raw_mag = np.hypot(offsets[:, 0], offsets[:, 1])
+        keep_mask = raw_mag <= float(max_sep_arcsec)
+        if int(keep_mask.sum()) < int(min_matches):
+            continue
+        vis_xy = vis_xy[keep_mask]
+        rubin_xy_target = rubin_xy_target[keep_mask]
+        offsets = offsets[keep_mask]
+
         keep = np.arange(vis_xy.shape[0])
         if keep.size > int(max_patches_per_tile):
             keep = rng.choice(keep, int(max_patches_per_tile), replace=False)
@@ -848,8 +857,8 @@ def build_patch_samples_multiband(
                 radius=rubin_refine_radius,
                 flux_floor_sigma=refine_flux_floor_sigma,
             )
-            per_band_valid[tband] = valid
             if not valid.any():
+                per_band_valid[tband] = valid
                 continue
             rubin_xy_refined = refine_centroids_in_band(
                 rubin_band_img, rubin_xy_seed,
@@ -861,6 +870,18 @@ def build_patch_samples_multiband(
             ddec = (v_dec - r_dec) * 3600.0
             offsets = np.zeros((vis_xy.shape[0], 2), dtype=np.float32)
             offsets[valid] = np.stack([dra, ddec], axis=1).astype(np.float32)
+            if max_sep_arcsec is not None and float(max_sep_arcsec) > 0:
+                mag = np.hypot(dra, ddec)
+                valid_keep = valid.copy()
+                valid_keep[valid] = mag <= float(max_sep_arcsec)
+            else:
+                valid_keep = valid
+            per_band_valid[tband] = valid_keep
+            if not valid_keep.any():
+                per_band_offsets[tband] = offsets
+                continue
+            if not np.all(valid_keep == valid):
+                offsets[~valid_keep] = 0.0
             per_band_offsets[tband] = offsets
 
         # NISP target bands: offset = VIS position - NISP position.
@@ -880,8 +901,8 @@ def build_patch_samples_multiband(
                 radius=nisp_radius,
                 flux_floor_sigma=refine_flux_floor_sigma,
             )
-            per_band_valid[tband] = valid
             if not valid.any():
+                per_band_valid[tband] = valid
                 continue
             nisp_xy_refined = refine_centroids_in_band(
                 nisp_img, nisp_xy_init,
@@ -894,6 +915,18 @@ def build_patch_samples_multiband(
             ddec = (v_dec - n_dec) * 3600.0
             offsets = np.zeros((vis_xy.shape[0], 2), dtype=np.float32)
             offsets[valid] = np.stack([dra, ddec], axis=1).astype(np.float32)
+            if max_sep_arcsec is not None and float(max_sep_arcsec) > 0:
+                mag = np.hypot(dra, ddec)
+                valid_keep = valid.copy()
+                valid_keep[valid] = mag <= float(max_sep_arcsec)
+            else:
+                valid_keep = valid
+            per_band_valid[tband] = valid_keep
+            if not valid_keep.any():
+                per_band_offsets[tband] = offsets
+                continue
+            if not np.all(valid_keep == valid):
+                offsets[~valid_keep] = 0.0
             per_band_offsets[tband] = offsets
 
         if not per_band_offsets:

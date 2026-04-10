@@ -129,7 +129,9 @@ def make_tile_diagnostic_figure(
 
     pred_mas = pred_offsets * 1000.0
     raw_mas = raw_offsets * 1000.0
+    resid_mas = raw_mas - pred_mas
     mesh_mag_mas = np.hypot(dra, ddec) * 1000.0
+    resid_mag_mas = np.hypot(resid_mas[:, 0], resid_mas[:, 1])
 
     # Evaluate the smooth field at each anchor — used for the summary stats only.
     resid_from_field_mas = np.zeros(len(vis_xy), dtype=np.float32)
@@ -158,7 +160,7 @@ def make_tile_diagnostic_figure(
     if not np.isfinite(p1v) or p1v >= p99v:
         p1v, p99v = float(vis.min()), float(vis.max())
     vis_extent = _mesh_extent(vis.shape)
-    comp_lim_mas = max(20.0, float(
+    comp_lim_mas = max(12.0, float(
         np.percentile(np.abs(np.concatenate([dra.ravel(), ddec.ravel()])), 95)) * 1000.0)
     dstep = int(round(float(x_mesh[1] - x_mesh[0]))) if len(x_mesh) > 1 else 1
 
@@ -172,13 +174,16 @@ def make_tile_diagnostic_figure(
     qu_u = qu_dx / qu_div
     qu_v = qu_dy / qu_div
 
-    keep_s = _downsample_indices(len(vis_xy), 800)
-    keep_l = _downsample_indices(len(vis_xy), 2000)
+    keep_s = _downsample_indices(len(vis_xy), 700)
+    keep_l = _downsample_indices(len(vis_xy), 1600)
 
-    fig, axes = plt.subplots(3, 3, figsize=(18, 13))
-    fig.subplots_adjust(hspace=0.42, wspace=0.30)
+    title_fs = 10
+    label_fs = 9
+    tick_fs = 8
 
-    # ── Row 1: The concordance product ─────────────────────────────────────
+    fig, axes = plt.subplots(2, 3, figsize=(14.5, 9.5), constrained_layout=True)
+
+    # ── Row 1: Anchor coverage + field magnitude + calibration ─────────────
 
     # (0,0) VIS + NN predicted offset magnitudes at source positions
     ax = axes[0, 0]
@@ -218,69 +223,39 @@ def make_tile_diagnostic_figure(
         bbox=dict(boxstyle="round,pad=0.25", facecolor="black", alpha=0.55),
     )
     ax.set_xlim(0, vis.shape[1]); ax.set_ylim(0, vis.shape[0])
-    ax.set_title("NN predicted offsets at source anchors", fontsize=9)
-    ax.set_xlabel("VIS x (px)", fontsize=8); ax.set_ylabel("VIS y (px)", fontsize=8)
+    ax.set_title("NN predicted corrections at source anchors", fontsize=title_fs)
+    ax.set_xlabel("VIS x (px)", fontsize=label_fs); ax.set_ylabel("VIS y (px)", fontsize=label_fs)
+    ax.tick_params(labelsize=tick_fs)
     ax.legend(fontsize=7, loc="lower right")
 
-    # (0,1) Solved ΔRA* field — the East-West component of the correction
+    # (0,1) Solved field magnitude + direction arrows (most useful summary)
     ax = axes[0, 1]
-    im = ax.imshow(dra * 1000.0, origin="lower", extent=vis_extent, cmap="coolwarm",
-                   vmin=-comp_lim_mas, vmax=comp_lim_mas, aspect="auto", interpolation="bilinear")
-    plt.colorbar(im, ax=ax, fraction=0.03, pad=0.02, label="mas")
-    ax.set_title("Solved ΔRA* field  (East-West correction)", fontsize=9)
-    ax.set_xlabel("VIS x (px)", fontsize=8); ax.set_ylabel("VIS y (px)", fontsize=8)
-
-    # (0,2) Solved ΔDec field — the North-South component of the correction
-    ax = axes[0, 2]
-    im = ax.imshow(ddec * 1000.0, origin="lower", extent=vis_extent, cmap="coolwarm",
-                   vmin=-comp_lim_mas, vmax=comp_lim_mas, aspect="auto", interpolation="bilinear")
-    plt.colorbar(im, ax=ax, fraction=0.03, pad=0.02, label="mas")
-    ax.set_title("Solved ΔDec field  (North-South correction)", fontsize=9)
-    ax.set_xlabel("VIS x (px)", fontsize=8); ax.set_ylabel("VIS y (px)", fontsize=8)
-
-    # ── Row 2: Quality checks ───────────────────────────────────────────────
-
-    # (1,0) Field direction arrows on white background, colored by magnitude
-    ax = axes[1, 0]
     ax.set_facecolor("white")
+    im = ax.imshow(mesh_mag_mas, origin="lower", extent=vis_extent, cmap="magma",
+                   vmin=0, vmax=float(np.percentile(mesh_mag_mas, 95)),
+                   interpolation="bilinear", alpha=0.95, aspect="auto")
+    plt.colorbar(im, ax=ax, fraction=0.03, pad=0.02, label="|field| (mas)")
     arrow_mag = np.hypot(qu_dx, qu_dy).ravel() / qu_div  # un-scaled magnitude
     vmax_arrow = float(np.percentile(np.hypot(dra, ddec) * 1000.0, 95))
-    q = ax.quiver(
+    ax.quiver(
         xx_q.ravel(), yy_q.ravel(), qu_u.ravel(), qu_v.ravel(),
         arrow_mag,
         cmap="plasma", clim=(0, max(vmax_arrow, 1.0)),
         angles="xy", scale_units="xy", scale=1,
-        width=0.003, alpha=0.9,
+        width=0.0032, alpha=0.85,
     )
-    plt.colorbar(q, ax=ax, fraction=0.03, pad=0.02, label="|offset| (mas)")
     ax.set_xlim(0, vis.shape[1]); ax.set_ylim(0, vis.shape[0])
-    ax.set_title("Solved field direction\n(arrow color = magnitude, display-scaled)", fontsize=9)
-    ax.set_xlabel("VIS x (px)", fontsize=8); ax.set_ylabel("VIS y (px)", fontsize=8)
+    ax.set_title("Solved field magnitude + direction", fontsize=title_fs)
+    ax.set_xlabel("VIS x (px)", fontsize=label_fs); ax.set_ylabel("VIS y (px)", fontsize=label_fs)
+    ax.tick_params(labelsize=tick_fs)
 
-    # (1,1) Sky-plane scatter of predicted offsets colored by σ.
-    # A tight cluster far from (0,0) means a systematic offset. A spread-out
-    # cloud means position-dependent variation. Color shows where σ is high.
-    ax = axes[1, 1]
-    vmax_s = float(np.percentile(sigma_mas, 95)) if len(sigma_mas) > 0 else 100.0
-    sc = ax.scatter(pred_mas[keep_l, 0], pred_mas[keep_l, 1],
-                    c=sigma_mas[keep_l], s=8, cmap="plasma", alpha=0.6,
-                    vmin=0, vmax=vmax_s)
-    plt.colorbar(sc, ax=ax, fraction=0.03, pad=0.02, label="σ (mas)")
-    lim2 = max(30.0, float(np.percentile(np.abs(pred_mas), 99)) * 1.2)
-    ax.axhline(0, color="lightgray", lw=0.8); ax.axvline(0, color="lightgray", lw=0.8)
-    ax.set_xlim(-lim2, lim2); ax.set_ylim(-lim2, lim2)
-    ax.set_aspect("equal")
-    ax.set_xlabel("ΔRA* (mas)  →  East", fontsize=9)
-    ax.set_ylabel("ΔDec (mas)  →  North", fontsize=9)
-    ax.set_title("Offset direction map (color = σ)\ntight cluster = consistent; spread = varying field", fontsize=9)
-
-    # (1,2) Uncertainty calibration: does high σ correlate with the NN
+    # (0,2) Uncertainty calibration: does high σ correlate with the NN
     # disagreeing more with the raw WCS measurement?
     # x = predicted σ,  y = |raw_offset − pred_offset|
     # Points near y=x → σ correctly tracks how much the NN deviates from raw.
     # Points above y=x → model is overconfident.
     # Points below y=x → model is underconfident.
-    ax = axes[1, 2]
+    ax = axes[0, 2]
     raw_pred_diff_mas = np.hypot(
         (raw_offsets[:, 0] - pred_offsets[:, 0]) * 1000.0,
         (raw_offsets[:, 1] - pred_offsets[:, 1]) * 1000.0,
@@ -295,31 +270,33 @@ def make_tile_diagnostic_figure(
     ax.plot([0, diag_max], [0, diag_max], "k--", lw=1.2, label="y = x  (perfect calibration)")
     ax.set_xlim(0, smax * 1.1); ax.set_ylim(0, rmax * 1.2)
     ax.legend(fontsize=8)
-    ax.set_xlabel("Predicted σ (mas)", fontsize=9)
-    ax.set_ylabel("|raw WCS − NN pred| (mas)", fontsize=9)
-    ax.set_title("Uncertainty calibration\n(does σ track disagreement with raw WCS?)", fontsize=9)
+    ax.set_xlabel("Predicted σ (mas)", fontsize=label_fs)
+    ax.set_ylabel("|raw WCS − NN pred| (mas)", fontsize=label_fs)
+    ax.set_title("Uncertainty calibration\n(does σ track |raw − pred|?)", fontsize=title_fs)
+    ax.tick_params(labelsize=tick_fs)
 
-    # ── Row 3: Model performance statistics ────────────────────────────────
+    # ── Row 2: Residual stats + summary ─────────────────────────────────────
 
-    # (2,0) Distribution of predicted offset components in mas.
-    # Both components should be centered near zero if residuals are small.
-    ax = axes[2, 0]
-    all_vals = np.concatenate([pred_mas[:, 0], pred_mas[:, 1]])
+    # (1,0) Distribution of residual offset components in mas.
+    # Both components should be centered near zero if corrections are good.
+    ax = axes[1, 0]
+    all_vals = np.concatenate([resid_mas[:, 0], resid_mas[:, 1]])
     lim_h = max(20.0, float(np.percentile(np.abs(all_vals), 98)))
     bins = np.linspace(-lim_h, lim_h, 20)
-    ax.hist(pred_mas[:, 0], bins=bins, alpha=0.7, label="ΔRA*", color="tab:blue", density=True)
-    ax.hist(pred_mas[:, 1], bins=bins, alpha=0.7, label="ΔDec", color="tab:orange", density=True)
+    ax.hist(resid_mas[:, 0], bins=bins, alpha=0.7, label="ΔRA*", color="tab:blue", density=True)
+    ax.hist(resid_mas[:, 1], bins=bins, alpha=0.7, label="ΔDec", color="tab:orange", density=True)
     ax.axvline(0, color="gray", lw=0.8)
-    ax.set_xlabel("Predicted offset component (mas)", fontsize=9)
-    ax.set_ylabel("Density", fontsize=9)
-    ax.set_title("Distribution of predicted offset components", fontsize=9)
+    ax.set_xlabel("Residual offset component (mas)", fontsize=label_fs)
+    ax.set_ylabel("Density", fontsize=label_fs)
+    ax.set_title("Distribution of residual offset components", fontsize=title_fs)
     ax.legend(fontsize=8)
+    ax.tick_params(labelsize=tick_fs)
 
-    # (2,1) Raw WCS measurements vs NN predictions.
+    # (1,1) Raw WCS measurements vs NN corrections.
     # Points near y=x → the NN is reproducing the WCS-matched measurements.
     # Scatter around y=x → NN is smoothing noisy WCS measurements (expected).
     # Systematic offset from y=x → NN is correcting a bias in the raw WCS.
-    ax = axes[2, 1]
+    ax = axes[1, 1]
     lim3 = max(20.0, float(np.percentile(np.abs(np.concatenate([
         raw_mas[keep_l, 0], raw_mas[keep_l, 1],
         pred_mas[keep_l, 0], pred_mas[keep_l, 1],
@@ -330,23 +307,25 @@ def make_tile_diagnostic_figure(
                color="tab:orange", label="ΔDec")
     ax.plot([-lim3, lim3], [-lim3, lim3], "k--", lw=1.0, label="y = x")
     ax.set_xlim(-lim3, lim3); ax.set_ylim(-lim3, lim3)
-    ax.set_xlabel("Raw WCS measurement (mas)", fontsize=9)
-    ax.set_ylabel("NN prediction (mas)", fontsize=9)
-    ax.set_title("Raw WCS measurements vs NN predictions\n(y ≈ x → NN confirms match; scatter → noise suppression)", fontsize=9)
+    ax.set_xlabel("Raw WCS measurement (mas)", fontsize=label_fs)
+    ax.set_ylabel("NN correction (mas)", fontsize=label_fs)
+    ax.set_title("Raw WCS vs NN corrections\n(y ≈ x → NN confirms match)", fontsize=title_fs)
     ax.legend(fontsize=8, loc="upper left")
+    ax.tick_params(labelsize=tick_fs)
 
-    # (2,2) Summary stats text
-    ax = axes[2, 2]
+    # (1,2) Summary stats text
+    ax = axes[1, 2]
     ax.axis("off")
     n = len(vis_xy)
     raw_n = len(raw_anchor_xy)
     vis_n = len(vis_anchor_xy)
     raw_med = float(np.median(np.hypot(raw_mas[:, 0], raw_mas[:, 1])))
     pred_med = float(np.median(np.hypot(pred_mas[:, 0], pred_mas[:, 1])))
+    resid_offset_med = float(np.median(resid_mag_mas))
     sigma_med = float(np.median(sigma_mas))
     field_p95 = float(np.percentile(mesh_mag_mas, 95))
-    resid_med = (float(np.median(resid_from_field_mas[valid_calib]))
-                 if valid_calib.sum() > 0 else float("nan"))
+    resid_field_med = (float(np.median(resid_from_field_mas[valid_calib]))
+                       if valid_calib.sum() > 0 else float("nan"))
     txt = (
         f"Tile:   {tile_id}\n"
         f"Band:   {rubin_band} → euclid_VIS\n"
@@ -355,9 +334,10 @@ def make_tile_diagnostic_figure(
         f"VIS-kept anchors:     {vis_n}\n"
         f"Target-kept anchors:  {n}\n\n"
         f"Raw |offset| median:\n  {raw_med:.1f} mas\n\n"
-        f"NN |offset| median:\n  {pred_med:.1f} mas\n\n"
+        f"NN correction |offset| median:\n  {pred_med:.1f} mas\n\n"
+        f"Residual |offset| median:\n  {resid_offset_med:.1f} mas\n\n"
         f"σ median:\n  {sigma_med:.1f} mas\n\n"
-        f"|pred − field| median:\n  {resid_med:.1f} mas\n\n"
+        f"|pred − field| median:\n  {resid_field_med:.1f} mas\n\n"
         f"Field |offset| p95:\n  {field_p95:.1f} mas\n\n"
         f"Mesh: {dra.shape[0]}×{dra.shape[1]} nodes\n"
         f"DSTEP: {dstep} VIS px ({dstep * 0.1:.1f}\")"
@@ -368,7 +348,7 @@ def make_tile_diagnostic_figure(
     ax.set_title("Summary", fontsize=9)
 
     fig.suptitle(
-        f"{tile_id}  |  {rubin_band} → euclid_VIS  |  standalone local matcher",
+        f"{tile_id}  |  {rubin_band} → euclid_VIS  |  astrometry preview",
         fontsize=11, y=0.995,
     )
     return fig
