@@ -30,16 +30,55 @@ from source_matching import (
     RUBIN_BAND_ORDER,
     _to_float32,
     build_detection_image,
+    compute_encoder_label_sigma,
     detect_sources,
     estimate_source_snr,
     expected_centroid_sigma_arcsec,
     match_sources_wcs,
+    refine_centroids_encoder,
     refine_centroids_in_band,
     refine_centroids_psf_fit,
     safe_header_from_card_string,
 )
 
 VIS_PIXEL_SCALE_ARCSEC = 0.1
+RUBIN_PIXEL_SCALE_ARCSEC = 0.2
+
+
+# ============================================================
+# V7 BandStem loader for encoder-based centroiding
+# ============================================================
+
+def load_v7_stems(v7_checkpoint: str, device='cpu'):
+    """Load frozen V7 BandStems from a foundation checkpoint.
+
+    Returns a dict mapping band names (e.g. 'rubin_r', 'euclid_VIS')
+    to frozen BandStem modules on the given device.
+    """
+    import torch
+    from jaisp_foundation_v7 import JAISPFoundationV7, ALL_BANDS
+
+    ckpt = torch.load(v7_checkpoint, map_location='cpu', weights_only=False)
+    cfg = ckpt.get('config', {})
+    v7 = JAISPFoundationV7(
+        band_names=cfg.get('band_names', ALL_BANDS),
+        stem_ch=cfg.get('stem_ch', 64),
+        hidden_ch=cfg.get('hidden_ch', 256),
+        blocks_per_stage=cfg.get('blocks_per_stage', 2),
+        transformer_depth=cfg.get('transformer_depth', 4),
+        transformer_heads=cfg.get('transformer_heads', 8),
+        fused_pixel_scale_arcsec=cfg.get('fused_pixel_scale_arcsec', 0.8),
+    )
+    v7.load_state_dict(ckpt['model'], strict=False)
+
+    encoder = v7.encoder if hasattr(v7, 'encoder') else v7
+    stems = {}
+    for name, stem in encoder.stems.items():
+        stem.eval()
+        for p in stem.parameters():
+            p.requires_grad = False
+        stems[name] = stem.to(device)
+    return stems
 
 
 # ============================================================
@@ -753,6 +792,8 @@ def build_patch_samples_multiband(
     detr_detector=None,
     detr_device=None,
     detr_conf_threshold: float = 0.3,
+    v7_stems: dict = None,
+    stems_device=None,
 ) -> List[Dict]:
     """Build training samples with multi-instrument input and per-band targets.
 
@@ -851,6 +892,9 @@ def build_patch_samples_multiband(
                 if img is not None:
                     nisp_data[nb] = (img, nwcs)
 
+        # Determine centroiding mode: encoder-based (when stems available) or PSF-fit.
+        use_encoder_centroids = v7_stems is not None and stems_device is not None
+
         # Source detection (DETR or classical).
         if detr_detector is not None:
             ax, ay = detect_sources_multiband(
@@ -872,12 +916,25 @@ def build_patch_samples_multiband(
             )
             if not vis_keep.any():
                 continue
-            vis_xy = refine_centroids_in_band(
-                vis_img,
-                vis_seed_xy[vis_keep],
-                radius=refine_radius,
-                flux_floor_sigma=refine_flux_floor_sigma,
-            ).astype(np.float32)
+            # CenterNet positions already come from the V7 encoder's offset head.
+            # When encoder stems are available, refine using the VIS BandStem
+            # feature-energy peak; otherwise trust CenterNet positions directly
+            # (they're already encoder-based — classical refinement would replace
+            # learned features with parametric assumptions).
+            vis_seed_kept = vis_seed_xy[vis_keep]
+            if use_encoder_centroids and 'euclid_VIS' in v7_stems:
+                vis_rms_img = _rms_from_var_or_image(
+                    _to_float32(edata['var_VIS']) if 'var_VIS' in edata else None, vis_img,
+                )
+                vis_xy, _, _ = refine_centroids_encoder(
+                    vis_img, vis_rms_img, vis_seed_kept,
+                    v7_stems['euclid_VIS'], stems_device,
+                    radius=refine_radius,
+                )
+            else:
+                # Trust CenterNet positions directly — no classical refinement.
+                vis_xy = vis_seed_kept.copy()
+            vis_xy = vis_xy.astype(np.float32)
             rubin_xy_seed_default = project_vis_to_band_xy(vis_xy, vwcs, rwcs)
         else:
             rubin_det = build_detection_image(rubin_cube, detect_bands_norm, clip_sigma=detect_clip_sigma)
@@ -904,20 +961,12 @@ def build_patch_samples_multiband(
         per_band_offsets = {}  # band_name -> (N, 2) arcsec
         per_band_valid = {}    # band_name -> (N,) bool
 
-        # Per-source SNR and expected label uncertainty (SITCOMTN-159).
-        # These are stored per target band so the loss can weight samples
-        # by their expected centroid precision.
-        per_band_snr = {}        # band_name -> [N] float32
+        # Per-source SNR and expected label uncertainty.
+        per_band_snr = {}          # band_name -> [N] float32
         per_band_label_sigma = {}  # band_name -> [N] float32 (arcsec)
 
         # Rubin target bands.
-        # Use PSF-fit centroiding (Gaussian 2D fit) for substantially better
-        # centroid precision than flux-weighted centroids, especially for
-        # bright sources (King 1983, validated by SITCOMTN-159).
-        # Rubin pixel scale is 0.2"/px; typical FWHM ~3px (0.6"-0.8" seeing).
-        RUBIN_PIXEL_SCALE = 0.2  # arcsec/px
-        RUBIN_FWHM_PX = 3.0     # typical Rubin PSF FWHM in pixels
-        RUBIN_WCS_SYSTEMATIC = 0.005  # 5 mas from SITCOMTN-159
+        RUBIN_WCS_SYSTEMATIC = 0.005  # 5 mas (SITCOMTN-159)
         rubin_refine_radius = max(2, refine_radius)
         for tband in rubin_targets:
             short = tband.split('_', 1)[1]
@@ -936,27 +985,37 @@ def build_patch_samples_multiband(
                 per_band_valid[tband] = valid
                 continue
 
-            # PSF-fit centroiding with SNR estimation.
-            rubin_xy_refined, rubin_snr, _ = refine_centroids_psf_fit(
-                rubin_band_img, rubin_xy_seed,
-                radius=rubin_refine_radius,
-                flux_floor_sigma=refine_flux_floor_sigma,
-                fwhm_guess=RUBIN_FWHM_PX,
-            )
-            # VIS-side SNR (higher resolution, tighter PSF).
-            vis_snr = estimate_source_snr(vis_img, vis_xy, aperture_radius=5)
-            # Combined label sigma: quadrature sum of Rubin + VIS centroid uncertainties.
-            rubin_centroid_sigma = expected_centroid_sigma_arcsec(
-                rubin_snr, RUBIN_PIXEL_SCALE, RUBIN_FWHM_PX, RUBIN_WCS_SYSTEMATIC,
-            )
-            vis_centroid_sigma = expected_centroid_sigma_arcsec(
-                vis_snr, VIS_PIXEL_SCALE_ARCSEC, fwhm_px=1.8, systematic_floor_arcsec=0.001,
-            )
-            label_sigma = np.sqrt(rubin_centroid_sigma ** 2 + vis_centroid_sigma ** 2)
+            # Centroid refinement: encoder-based (data-driven) or PSF-fit (fallback).
+            if use_encoder_centroids and tband in v7_stems:
+                rubin_rms_band = _rms_from_var_or_image(
+                    _to_float32(rubin_var[bidx]) if rubin_var is not None and bidx < rubin_var.shape[0] else None,
+                    rubin_band_img,
+                )
+                rubin_xy_refined, rubin_peak_snr, rubin_sharpness = refine_centroids_encoder(
+                    rubin_band_img, rubin_rms_band, rubin_xy_seed,
+                    v7_stems[tband], stems_device,
+                    radius=rubin_refine_radius,
+                )
+                label_sigma = compute_encoder_label_sigma(
+                    rubin_peak_snr, rubin_sharpness,
+                    RUBIN_PIXEL_SCALE_ARCSEC,
+                    systematic_floor_arcsec=RUBIN_WCS_SYSTEMATIC,
+                )
+            else:
+                rubin_xy_refined, rubin_snr, _ = refine_centroids_psf_fit(
+                    rubin_band_img, rubin_xy_seed,
+                    radius=rubin_refine_radius,
+                    flux_floor_sigma=refine_flux_floor_sigma,
+                    fwhm_guess=3.0,
+                )
+                label_sigma = expected_centroid_sigma_arcsec(
+                    rubin_snr, RUBIN_PIXEL_SCALE_ARCSEC, fwhm_px=3.0,
+                    systematic_floor_arcsec=RUBIN_WCS_SYSTEMATIC,
+                )
+                rubin_peak_snr = rubin_snr
 
-            # Store SNR and label sigma for all sources (zeros where invalid).
             band_snr = np.ones(vis_xy.shape[0], dtype=np.float32)
-            band_snr[valid] = rubin_snr[valid]
+            band_snr[valid] = rubin_peak_snr[valid]
             per_band_snr[tband] = band_snr
             band_label_sigma = np.full(vis_xy.shape[0], 0.01, dtype=np.float32)
             band_label_sigma[valid] = label_sigma[valid]
@@ -983,11 +1042,7 @@ def build_patch_samples_multiband(
             per_band_offsets[tband] = offsets
 
         # NISP target bands: offset = VIS position - NISP position.
-        # NISP sources are detected independently and matched to VIS.
-        # MER mosaics: NISP at 0.1"/px, same as VIS.
-        NISP_PIXEL_SCALE = 0.1
-        NISP_FWHM_PX = 2.5  # typical NISP PSF FWHM in pixels
-        NISP_WCS_SYSTEMATIC = 0.002  # 2 mas systematic (same telescope as VIS)
+        NISP_WCS_SYSTEMATIC = 0.002  # 2 mas (same telescope as VIS)
         for tband in nisp_targets:
             nb = tband.split('_', 1)[1]  # 'Y', 'J', or 'H'
             if nb not in nisp_data:
@@ -1004,22 +1059,39 @@ def build_patch_samples_multiband(
             if not valid.any():
                 per_band_valid[tband] = valid
                 continue
-            nisp_xy_refined, nisp_snr, _ = refine_centroids_psf_fit(
-                nisp_img, nisp_xy_init,
-                radius=nisp_radius,
-                flux_floor_sigma=refine_flux_floor_sigma,
-                fwhm_guess=NISP_FWHM_PX,
-            )
-            vis_snr_nisp = estimate_source_snr(vis_img, vis_xy, aperture_radius=5)
-            nisp_centroid_sigma = expected_centroid_sigma_arcsec(
-                nisp_snr, NISP_PIXEL_SCALE, NISP_FWHM_PX, NISP_WCS_SYSTEMATIC,
-            )
-            vis_centroid_sigma_nisp = expected_centroid_sigma_arcsec(
-                vis_snr_nisp, VIS_PIXEL_SCALE_ARCSEC, fwhm_px=1.8, systematic_floor_arcsec=0.001,
-            )
-            label_sigma_nisp = np.sqrt(nisp_centroid_sigma ** 2 + vis_centroid_sigma_nisp ** 2)
+
+            # Encoder-based or PSF-fit centroiding for NISP.
+            euclid_stem_name = f'euclid_{nb}'
+            if use_encoder_centroids and euclid_stem_name in v7_stems:
+                nisp_rms = _rms_from_var_or_image(
+                    _to_float32(edata[f'var_{nb}']) if f'var_{nb}' in edata else None,
+                    nisp_img,
+                )
+                nisp_xy_refined, nisp_peak_snr, nisp_sharpness = refine_centroids_encoder(
+                    nisp_img, nisp_rms, nisp_xy_init,
+                    v7_stems[euclid_stem_name], stems_device,
+                    radius=nisp_radius,
+                )
+                label_sigma_nisp = compute_encoder_label_sigma(
+                    nisp_peak_snr, nisp_sharpness,
+                    VIS_PIXEL_SCALE_ARCSEC,  # NISP MER at 0.1"/px
+                    systematic_floor_arcsec=NISP_WCS_SYSTEMATIC,
+                )
+            else:
+                nisp_xy_refined, nisp_snr, _ = refine_centroids_psf_fit(
+                    nisp_img, nisp_xy_init,
+                    radius=nisp_radius,
+                    flux_floor_sigma=refine_flux_floor_sigma,
+                    fwhm_guess=2.5,
+                )
+                label_sigma_nisp = expected_centroid_sigma_arcsec(
+                    nisp_snr, VIS_PIXEL_SCALE_ARCSEC, fwhm_px=2.5,
+                    systematic_floor_arcsec=NISP_WCS_SYSTEMATIC,
+                )
+                nisp_peak_snr = nisp_snr
+
             band_snr = np.ones(vis_xy.shape[0], dtype=np.float32)
-            band_snr[valid] = nisp_snr[valid]
+            band_snr[valid] = nisp_peak_snr[valid]
             per_band_snr[tband] = band_snr
             band_label_sigma = np.full(vis_xy.shape[0], 0.005, dtype=np.float32)
             band_label_sigma[valid] = label_sigma_nisp[valid]

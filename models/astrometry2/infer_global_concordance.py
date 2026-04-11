@@ -455,6 +455,14 @@ def solve_global_field(
     nn_steps: int = 2000,
     nn_lr: float = 1e-3,
     nn_weight_decay: float = 1e-4,
+    # PINN-specific
+    pinn_lambda_curl: float = 1.0,
+    pinn_lambda_lapl: float = 0.1,
+    pinn_lambda_band: float = 0.1,
+    pinn_n_collocation: int = 10000,
+    band_indices: np.ndarray = None,
+    band_to_idx: dict = None,
+    target_band: str = None,
 ) -> dict:
     """
     Fit a single smooth concordance field over the full mosaic in sky coords.
@@ -469,16 +477,23 @@ def solve_global_field(
         Reject sources whose predicted offset magnitude exceeds this value in
         arcsec before solving (default 0.3" = 300 mas).  Set to np.inf to
         disable.
-    solver : {'grid', 'nn'}
+    solver : {'grid', 'nn', 'pinn'}
         'grid' — regularised control-grid least-squares (fast, default).
         'nn'   — small MLP trained with Adam + weight-decay smoothness prior.
-                 No grid resolution to choose; SiLU activations give a
-                 differentiable interpolant.  Use nn_* parameters to tune.
+        'pinn' — physics-informed NN with curl-free, Laplacian smoothness,
+                 and band-consistency constraints via autograd.
     nn_hidden_dim : neurons per hidden layer (default 64)
     nn_layers     : number of hidden layers (default 4)
     nn_steps      : Adam training steps (default 2000)
     nn_lr         : initial learning rate (default 1e-3)
     nn_weight_decay : L2 weight-decay — higher = smoother field (default 1e-4)
+    pinn_lambda_curl : [pinn] weight for curl-free constraint
+    pinn_lambda_lapl : [pinn] weight for Laplacian smoothness
+    pinn_lambda_band : [pinn] weight for band consistency
+    pinn_n_collocation : [pinn] collocation points for physics losses
+    band_indices : [N] integer band index per source (for PINN band consistency)
+    band_to_idx : dict mapping band name → integer index
+    target_band : current target band name (for PINN mesh evaluation)
 
     Returns
     -------
@@ -528,7 +543,37 @@ def solve_global_field(
     dstep_px = max(1, int(round(dstep_arcsec)))   # 1 px = 1 arcsec in this frame
 
     # ── Solve ─────────────────────────────────────────────────────────────────
-    if solver == 'nn':
+    if solver == 'pinn':
+        from pinn_field_solver import fit_pinn_field, evaluate_pinn_mesh
+        print(f'  PINN solver: {nn_hidden_dim}×{nn_layers} layers, '
+              f'{nn_steps} steps, curl={pinn_lambda_curl}, lapl={pinn_lambda_lapl}, '
+              f'band={pinn_lambda_band}, colloc={pinn_n_collocation}')
+        field, pinn_meta = fit_pinn_field(
+            pos_arcsec      = pos_shifted,
+            offsets_arcsec  = pred.astype(np.float32),
+            weights         = weights.astype(np.float32),
+            band_indices    = band_indices,
+            hidden_dim      = nn_hidden_dim,
+            n_layers        = nn_layers,
+            n_steps         = nn_steps,
+            lr              = nn_lr,
+            lambda_curl     = pinn_lambda_curl,
+            lambda_lapl     = pinn_lambda_lapl,
+            lambda_band     = pinn_lambda_band,
+            n_collocation   = pinn_n_collocation,
+        )
+        mesh = evaluate_pinn_mesh(
+            model              = field,
+            meta               = pinn_meta,
+            field_h            = field_h,
+            field_w            = field_w,
+            dstep              = dstep_px,
+            pos_arcsec_anchors = pos_shifted,
+            band_idx           = band_to_idx.get(target_band) if band_to_idx else None,
+        )
+        grid_shape = (nn_layers, nn_hidden_dim)
+        anchor_radius = float('nan')
+    elif solver == 'nn':
         from nn_field_solver import fit_nn_field, evaluate_nn_mesh
         print(f'  NN solver: {nn_hidden_dim}×{nn_layers} layers, '
               f'{nn_steps} steps, wd={nn_weight_decay}')
@@ -863,18 +908,28 @@ def build_parser() -> argparse.ArgumentParser:
                    help='Reject sources with |pred offset| > this value before solving '
                         '(arcsec, default 0.3 = 300 mas). Set to a large value to disable.')
     # ── Solver choice ──────────────────────────────────────────────────────────
-    p.add_argument('--solver', choices=['grid', 'nn'], default='grid',
-                   help='Field solver: "grid" = control-grid (default), "nn" = MLP.')
+    p.add_argument('--solver', choices=['grid', 'nn', 'pinn'], default='grid',
+                   help='Field solver: "grid" = control-grid (default), "nn" = MLP, '
+                        '"pinn" = physics-informed NN (curl-free + Laplacian smoothness).')
     p.add_argument('--nn-hidden-dim', type=int, default=64,
-                   help='[nn solver] neurons per hidden layer (default 64)')
+                   help='[nn/pinn solver] neurons per hidden layer (default 64)')
     p.add_argument('--nn-layers', type=int, default=4,
-                   help='[nn solver] number of hidden layers (default 4)')
+                   help='[nn/pinn solver] number of hidden layers (default 4)')
     p.add_argument('--nn-steps', type=int, default=2000,
-                   help='[nn solver] Adam training steps (default 2000)')
+                   help='[nn/pinn solver] Adam training steps (default 2000)')
     p.add_argument('--nn-lr', type=float, default=1e-3,
-                   help='[nn solver] initial learning rate (default 1e-3)')
+                   help='[nn/pinn solver] initial learning rate (default 1e-3)')
     p.add_argument('--nn-weight-decay', type=float, default=1e-4,
-                   help='[nn solver] L2 weight decay — higher = smoother field (default 1e-4)')
+                   help='[nn/pinn solver] L2 weight decay — higher = smoother field (default 1e-4)')
+    # PINN-specific parameters
+    p.add_argument('--pinn-lambda-curl', type=float, default=1.0,
+                   help='[pinn solver] weight for curl-free constraint (default 1.0)')
+    p.add_argument('--pinn-lambda-lapl', type=float, default=0.1,
+                   help='[pinn solver] weight for Laplacian smoothness (default 0.1)')
+    p.add_argument('--pinn-lambda-band', type=float, default=0.1,
+                   help='[pinn solver] weight for band consistency (default 0.1)')
+    p.add_argument('--pinn-n-collocation', type=int, default=10000,
+                   help='[pinn solver] collocation points for physics losses (default 10000)')
     p.add_argument('--cache-predictions', type=str, default='',
                    help='Path to save/load cached per-band predictions (.npz). '
                         'If the file exists, skip detection+encoding and load from cache. '
@@ -1015,19 +1070,24 @@ def main():
         print(f'Fitting global field for {target_band}...')
         result = solve_global_field(
             sources,
-            dstep_arcsec    = args.dstep_arcsec,
-            grid_h          = getattr(args, 'grid_h_global', 32),
-            grid_w          = getattr(args, 'grid_w_global', 32),
-            smooth_lambda   = args.smooth_lambda,
-            anchor_lambda   = args.anchor_lambda,
-            auto_grid       = getattr(args, 'auto_grid', False),
-            clip_arcsec     = getattr(args, 'clip_arcsec', 0.3),
-            solver          = getattr(args, 'solver', 'grid'),
-            nn_hidden_dim   = getattr(args, 'nn_hidden_dim', 64),
-            nn_layers       = getattr(args, 'nn_layers', 4),
-            nn_steps        = getattr(args, 'nn_steps', 2000),
-            nn_lr           = getattr(args, 'nn_lr', 1e-3),
-            nn_weight_decay = getattr(args, 'nn_weight_decay', 1e-4),
+            dstep_arcsec       = args.dstep_arcsec,
+            grid_h             = getattr(args, 'grid_h_global', 32),
+            grid_w             = getattr(args, 'grid_w_global', 32),
+            smooth_lambda      = args.smooth_lambda,
+            anchor_lambda      = args.anchor_lambda,
+            auto_grid          = getattr(args, 'auto_grid', False),
+            clip_arcsec        = getattr(args, 'clip_arcsec', 0.3),
+            solver             = getattr(args, 'solver', 'grid'),
+            nn_hidden_dim      = getattr(args, 'nn_hidden_dim', 64),
+            nn_layers          = getattr(args, 'nn_layers', 4),
+            nn_steps           = getattr(args, 'nn_steps', 2000),
+            nn_lr              = getattr(args, 'nn_lr', 1e-3),
+            nn_weight_decay    = getattr(args, 'nn_weight_decay', 1e-4),
+            pinn_lambda_curl   = getattr(args, 'pinn_lambda_curl', 1.0),
+            pinn_lambda_lapl   = getattr(args, 'pinn_lambda_lapl', 0.1),
+            pinn_lambda_band   = getattr(args, 'pinn_lambda_band', 0.1),
+            pinn_n_collocation = getattr(args, 'pinn_n_collocation', 10000),
+            target_band        = target_band,
         )
 
         pred = sources['pred_offsets']

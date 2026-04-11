@@ -151,12 +151,14 @@ def make_preview(model, sample: Dict, device: torch.device, epoch: int, split_na
     import matplotlib.pyplot as plt
     import matplotlib.gridspec as gridspec
 
-    model.eval()
+    # Unwrap DataParallel if needed for attribute access.
+    raw_model = model.module if hasattr(model, 'module') else model
+    raw_model.eval()
     with torch.no_grad():
         rubin = sample['rubin_patch'].unsqueeze(0).to(device)
         vis = sample['vis_patch'].unsqueeze(0).to(device)
         pix2sky = sample['pixel_to_sky'].unsqueeze(0).to(device)
-        out = model(rubin, vis, pix2sky)
+        out = raw_model(rubin, vis, pix2sky)
 
     pred_mas = out['pred_offset_arcsec'][0].cpu().numpy() * 1000.0
     gt_mas = sample['target_offset_arcsec'].numpy() * 1000.0
@@ -171,7 +173,7 @@ def make_preview(model, sample: Dict, device: torch.device, epoch: int, split_na
     # Patches are already background-subtracted + noise-normalized (from __getitem__).
     rubin_np = sample['rubin_patch'].numpy()[0]   # first Rubin channel
     vis_np = sample['vis_patch'].numpy()[0]
-    r = model.search_radius
+    r = raw_model.search_radius
 
     fig = plt.figure(figsize=(15, 8))
     gs = gridspec.GridSpec(2, 3, figure=fig, hspace=0.42, wspace=0.32)
@@ -272,7 +274,7 @@ def make_preview(model, sample: Dict, device: torch.device, epoch: int, split_na
         f'σ (predicted): {sigma_mas:.1f} mas\n'
         f'|err|/σ: {calib:.2f}  [{calib_note}]\n\n'
         f'Confidence:  {conf:.3f}\n'
-        f'Temperature: {float(model.temperature.detach().item()):.4f}\n\n'
+        f'Temperature: {float(raw_model.temperature.detach().item()):.4f}\n\n'
         f'Coarse (cost vol): ({coarse_dx:+.2f}, {coarse_dy:+.2f}) px\n'
         f'MLP residual:      ({mlp_dx:+.2f}, {mlp_dy:+.2f}) px'
     )
@@ -481,8 +483,9 @@ def run_epoch(
     out = {k: v / denom for k, v in agg.items()}
     out['batches'] = n_batches
     out['samples'] = n_samples
-    if hasattr(model, 'temperature'):
-        out['temp'] = float(model.temperature.detach().item())
+    raw = model.module if hasattr(model, 'module') else model
+    if hasattr(raw, 'temperature'):
+        out['temp'] = float(raw.temperature.detach().item())
     return out
 
 

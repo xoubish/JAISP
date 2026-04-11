@@ -60,6 +60,7 @@ from astrometry2.dataset import (
     build_patch_samples,
     build_patch_samples_multiband,
     discover_tile_pairs,
+    load_v7_stems,
     make_loader,
     normalize_rubin_band,
     normalize_rubin_bands,
@@ -127,6 +128,15 @@ def build_v7_parser() -> argparse.ArgumentParser:
                         '0 = stem only (V6-equivalent). 1 = adds one ConvNeXt downsample '
                         'stage per stream, giving richer features at half spatial resolution. '
                         '(default: 0)')
+    g.add_argument('--resume', action='store_true',
+                   help='Resume training from checkpoint_latest.pt in the output directory.')
+    g.add_argument('--encoder-centroids', action='store_true',
+                   help='Enable encoder-based centroiding using V7 BandStem feature peaks. '
+                        'Experimental — off by default because the BandStem was trained for '
+                        'reconstruction, not localization. PSF-fit centroiding is more reliable '
+                        'for label generation. The proper data-driven path is self-training.')
+    g.add_argument('--no-dp', action='store_true',
+                   help='Disable DataParallel even when multiple GPUs are available.')
 
     p.set_defaults(
         hidden_channels=64,
@@ -155,6 +165,23 @@ def train(args):
             args.detector_checkpoint, args.v7_checkpoint, device)
     # Keep the preview path on the exact same detector as dataset building.
     args._detr_detector = detr_detector
+
+    # ---- V7 BandStems for encoder-based centroiding -----------------------
+    # NOTE: encoder-based centroiding via BandStem feature-energy peaks is
+    # available but OFF by default.  The BandStem was trained for reconstruction,
+    # not localization, so its energy peaks don't reliably coincide with source
+    # centroids.  PSF-fit centroiding gives better labels for now.
+    # The proper data-driven path is self-training: train the matcher on PSF-fit
+    # labels, then use the matcher's own predictions (via cost volume) as refined
+    # labels for retraining.  Use --encoder-centroids to enable.
+    if getattr(args, 'encoder_centroids', False):
+        print(f'Loading V7 BandStems for encoder-based centroiding...')
+        v7_stems = load_v7_stems(args.v7_checkpoint, device=device)
+        stems_device = device
+        print(f'  Loaded {len(v7_stems)} band stems: {sorted(v7_stems.keys())}')
+    else:
+        v7_stems = None
+        stems_device = None
 
     # ---- Dataset ---------------------------------------------------------
     detect_bands = normalize_rubin_bands(args.detect_bands) or [
@@ -193,6 +220,11 @@ def train(args):
         detection_kwargs['detr_detector'] = detr_detector
         detection_kwargs['detr_device'] = device
         detection_kwargs['detr_conf_threshold'] = args.detector_conf_threshold
+
+    # Inject V7 BandStems for encoder-based centroiding
+    if v7_stems is not None:
+        detection_kwargs['v7_stems'] = v7_stems
+        detection_kwargs['stems_device'] = stems_device
 
     if getattr(args, 'multiband', False):
         multiband_kwargs = dict(
@@ -251,14 +283,23 @@ def train(args):
         n_stream_stages  = getattr(args, 'stream_stages', 0),
     )
 
+    # Multi-GPU via DataParallel when device is 'cuda' (use all GPUs) or
+    # when explicitly requested.  The underlying model is always accessible
+    # via raw_model for checkpoint saving and parameter grouping.
+    raw_model = model
+    if torch.cuda.device_count() > 1 and str(device).startswith('cuda') and not getattr(args, 'no_dp', False):
+        gpu_ids = list(range(torch.cuda.device_count()))
+        model = torch.nn.DataParallel(raw_model, device_ids=gpu_ids)
+        print(f'DataParallel on {len(gpu_ids)} GPUs: {gpu_ids}')
+
     # Separate LRs: adapter/heads get full LR; frozen-origin params (stems +
     # stream stages) get 0.1× if unfrozen to avoid destabilizing pretrained weights.
-    frozen_origin_params  = list(model.rubin_encoder.band_stems.parameters())
-    frozen_origin_params += list(model.vis_encoder.vis_stem.parameters())
-    frozen_origin_params += list(model.rubin_encoder.stream_stages.parameters())
-    frozen_origin_params += list(model.vis_encoder.stream_stages.parameters())
+    frozen_origin_params  = list(raw_model.rubin_encoder.band_stems.parameters())
+    frozen_origin_params += list(raw_model.vis_encoder.vis_stem.parameters())
+    frozen_origin_params += list(raw_model.rubin_encoder.stream_stages.parameters())
+    frozen_origin_params += list(raw_model.vis_encoder.stream_stages.parameters())
     frozen_origin_ids = {id(p) for p in frozen_origin_params}
-    other_params      = [p for p in model.parameters() if id(p) not in frozen_origin_ids and p.requires_grad]
+    other_params      = [p for p in raw_model.parameters() if id(p) not in frozen_origin_ids and p.requires_grad]
     stem_trainable    = [p for p in frozen_origin_params if p.requires_grad]
 
     param_groups = [{'params': other_params, 'lr': args.lr}]
@@ -270,6 +311,25 @@ def train(args):
     optimizer = torch.optim.AdamW(param_groups, weight_decay=args.weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-6)
 
+    # ---- Resume from checkpoint ------------------------------------------
+    start_epoch = 1
+    best_score = float('inf')
+    resume_id = None
+    resume_ckpt = out_dir / 'checkpoint_latest.pt'
+    if getattr(args, 'resume', False) and resume_ckpt.exists():
+        print(f'Resuming from {resume_ckpt}')
+        ckpt = torch.load(resume_ckpt, map_location=device, weights_only=False)
+        raw_model.load_state_dict(ckpt['model'])
+        if 'optimizer' in ckpt:
+            optimizer.load_state_dict(ckpt['optimizer'])
+        start_epoch = ckpt.get('epoch', 0) + 1
+        best_score = ckpt.get('val_score', float('inf'))
+        resume_id = ckpt.get('wandb_id', None)
+        # Advance scheduler to the correct epoch
+        for _ in range(start_epoch - 1):
+            scheduler.step()
+        print(f'  Resumed at epoch {start_epoch}, best_score={best_score*1000:.2f} mas')
+
     # ---- W&B -------------------------------------------------------------
     preview_sample = val_dataset[0] if (val_dataset and len(val_dataset) > 0) else train_dataset[0]
     preview_split  = 'val'          if (val_dataset and len(val_dataset) > 0) else 'train'
@@ -278,20 +338,22 @@ def train(args):
     wandb_run = None
     if getattr(args, 'wandb_mode', 'online') != 'disabled' and wandb is not None:
         try:
-            wandb_run = wandb.init(
+            wandb_kwargs = dict(
                 project = args.wandb_project,
                 name    = getattr(args, 'wandb_run_name', None) or f'v7_adapt{args.adapter_blocks}',
                 config  = vars(args),
                 mode    = getattr(args, 'wandb_mode', 'online'),
                 dir     = str(out_dir),
             )
+            if resume_id:
+                wandb_kwargs['id'] = resume_id
+                wandb_kwargs['resume'] = 'must'
+            wandb_run = wandb.init(**wandb_kwargs)
         except Exception as exc:
             print(f'W&B init failed: {exc}')
 
     # ---- Training loop ---------------------------------------------------
-    best_score = float('inf')
-
-    for epoch in range(1, args.epochs + 1):
+    for epoch in range(start_epoch, args.epochs + 1):
         t0 = time.time()
         label_noise_floor = getattr(args, 'label_noise_floor', 0.005)
         train_metrics = run_epoch(
@@ -326,7 +388,7 @@ def train(args):
 
         save_meta = {
             'epoch': epoch,
-            'model': model.state_dict(),
+            'model': raw_model.state_dict(),
             'optimizer': optimizer.state_dict(),
             'args': dict(vars(args)),
             'rubin_channels': n_rubin_bands,
@@ -335,6 +397,7 @@ def train(args):
             'target_band': target_band,
             'target_bands': sorted(set(s['target_band'] for s in train_samples)),
             'include_nisp': getattr(args, 'include_nisp', False),
+            'wandb_id': wandb_run.id if wandb_run is not None else None,
         }
         if score < best_score:
             best_score = score

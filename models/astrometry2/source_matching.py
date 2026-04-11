@@ -538,6 +538,163 @@ def expected_centroid_sigma_arcsec(
 
 
 # ============================================================
+# Encoder-based centroiding (fully data-driven)
+# ============================================================
+
+def refine_centroids_encoder(
+    image: np.ndarray,
+    rms: np.ndarray,
+    seed_xy: np.ndarray,
+    band_stem,
+    device,
+    radius: int = 5,
+    temperature: float = 0.1,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Encoder-based centroid refinement using V7 BandStem feature-space peaks.
+
+    Instead of fitting a parametric PSF (Gaussian or otherwise), this uses the
+    frozen foundation model's per-band CNN features to find sub-pixel source
+    positions.  The BandStem has learned each band's PSF, noise properties, and
+    source morphology through self-supervised pretraining — the feature-energy
+    peak IS the PSF-aware centroid, without any parametric assumption.
+
+    Parameters
+    ----------
+    image : [H, W] single-band image
+    rms : [H, W] per-pixel RMS noise map
+    seed_xy : [N, 2] initial (x, y) positions
+    band_stem : frozen V7 BandStem module (takes image, rms → [B,C,H,W])
+    device : torch device
+    radius : half-size of soft-argmax window around each seed
+    temperature : softmax temperature — lower = sharper peak, higher = smoother
+
+    Returns
+    -------
+    refined_xy : [N, 2] improved positions
+    peak_snr : [N] feature-space SNR (peak energy / local background energy)
+    peak_sharpness : [N] sharpness of the feature peak (0-1, 1 = delta function).
+        Useful as a label quality weight: sharp peak = isolated point source
+        = reliable centroid; broad peak = extended/blended = less reliable.
+    """
+    import torch
+
+    img = np.asarray(image, dtype=np.float32)
+    rms_arr = np.asarray(rms, dtype=np.float32)
+    H, W = img.shape
+    N = seed_xy.shape[0]
+    out = np.asarray(seed_xy, dtype=np.float32).copy()
+    peak_snr = np.ones(N, dtype=np.float32)
+    peak_sharpness = np.zeros(N, dtype=np.float32)
+    r = max(2, int(radius))
+
+    # Run frozen BandStem on the full image → [1, C, H, W] feature map.
+    img_t = torch.from_numpy(img[None, None]).to(device)    # [1, 1, H, W]
+    rms_t = torch.from_numpy(rms_arr[None, None]).to(device)  # [1, 1, H, W]
+
+    with torch.no_grad():
+        features = band_stem(img_t, rms_t)  # [1, C, H, W]
+
+    # Feature energy: L2 norm across channels at each pixel.
+    energy = (features[0] ** 2).sum(dim=0).cpu().numpy()  # [H, W]
+
+    # For each source, find the feature-energy peak + parabolic sub-pixel refinement.
+    for i in range(N):
+        xf, yf = float(seed_xy[i, 0]), float(seed_xy[i, 1])
+        x0 = int(round(xf))
+        y0 = int(round(yf))
+        xa = max(0, x0 - r)
+        xb = min(W, x0 + r + 1)
+        ya = max(0, y0 - r)
+        yb = min(H, y0 + r + 1)
+        if xb - xa < 3 or yb - ya < 3:
+            continue
+
+        local_energy = energy[ya:yb, xa:xb]
+        if local_energy.max() <= 0:
+            continue
+
+        # Find the peak pixel in the local window.
+        py_local, px_local = np.unravel_index(np.argmax(local_energy), local_energy.shape)
+        py_global = py_local + ya
+        px_global = px_local + xa
+
+        # Parabolic sub-pixel refinement: fit a 1D parabola to the
+        # 3 pixels straddling the peak in each axis independently.
+        # For f(x) at x=-1,0,+1 with values a,b,c: vertex = (a-c) / (2*(a-2b+c))
+        dx_sub = 0.0
+        dy_sub = 0.0
+        if 1 <= px_local < local_energy.shape[1] - 1:
+            a = float(local_energy[py_local, px_local - 1])
+            b = float(local_energy[py_local, px_local])
+            c = float(local_energy[py_local, px_local + 1])
+            denom = 2.0 * (a - 2.0 * b + c)
+            if abs(denom) > 1e-10:
+                dx_sub = float(np.clip((a - c) / denom, -0.5, 0.5))
+        if 1 <= py_local < local_energy.shape[0] - 1:
+            a = float(local_energy[py_local - 1, px_local])
+            b = float(local_energy[py_local, px_local])
+            c = float(local_energy[py_local + 1, px_local])
+            denom = 2.0 * (a - 2.0 * b + c)
+            if abs(denom) > 1e-10:
+                dy_sub = float(np.clip((a - c) / denom, -0.5, 0.5))
+
+        out[i, 0] = float(px_global) + dx_sub
+        out[i, 1] = float(py_global) + dy_sub
+
+        # Peak SNR: peak energy / median local energy.
+        med_energy = float(np.median(local_energy))
+        peak_energy = float(local_energy.max())
+        peak_snr[i] = max(peak_energy / max(med_energy, 1e-10), 1.0)
+
+        # Peak sharpness: curvature at the peak (second derivative).
+        # High curvature = isolated point source = reliable centroid.
+        # Normalize to [0, 1] via sigmoid of log-curvature.
+        curv_x = float(local_energy[py_local, max(px_local-1, 0)]
+                        - 2 * local_energy[py_local, px_local]
+                        + local_energy[py_local, min(px_local+1, local_energy.shape[1]-1)])
+        curv_y = float(local_energy[max(py_local-1, 0), px_local]
+                        - 2 * local_energy[py_local, px_local]
+                        + local_energy[min(py_local+1, local_energy.shape[0]-1), px_local])
+        curvature = abs(curv_x) + abs(curv_y)
+        peak_sharpness[i] = float(1.0 / (1.0 + np.exp(-np.log(max(curvature, 1e-10) / max(peak_energy, 1e-10) + 1e-10))))
+
+    return out, peak_snr, peak_sharpness
+
+
+def compute_encoder_label_sigma(
+    peak_snr: np.ndarray,
+    peak_sharpness: np.ndarray,
+    pixel_scale_arcsec: float,
+    systematic_floor_arcsec: float = 0.005,
+) -> np.ndarray:
+    """Estimate centroid uncertainty from encoder feature peak properties.
+
+    Unlike the analytical King (1983) formula, this derives uncertainty from
+    the learned feature-space peak quality.  A sharp, high-SNR peak means
+    the encoder is confident about the source position; a broad, low-SNR peak
+    means the position is uncertain (blended, faint, or extended source).
+
+    Parameters
+    ----------
+    peak_snr : [N] feature-space SNR from refine_centroids_encoder()
+    peak_sharpness : [N] peak sharpness (0-1) from refine_centroids_encoder()
+    pixel_scale_arcsec : arcsec per pixel
+    systematic_floor_arcsec : WCS systematic floor (default 5 mas)
+
+    Returns
+    -------
+    sigma_arcsec : [N] estimated centroid uncertainty in arcsec
+    """
+    # Empirical model: uncertainty ~ pixel_scale / (sharpness * snr).
+    # A perfectly sharp peak at high SNR → limited by systematic floor.
+    # A broad peak at low SNR → limited by pixel scale.
+    snr_safe = np.maximum(np.asarray(peak_snr, dtype=np.float32), 1.0)
+    sharpness_safe = np.maximum(np.asarray(peak_sharpness, dtype=np.float32), 0.01)
+    statistical = pixel_scale_arcsec / (sharpness_safe * snr_safe)
+    return np.sqrt(statistical ** 2 + systematic_floor_arcsec ** 2).astype(np.float32)
+
+
+# ============================================================
 # Optional PSFNet-enhanced centroiding
 # ============================================================
 
