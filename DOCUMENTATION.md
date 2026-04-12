@@ -102,16 +102,88 @@ This overlap has several benefits:
 
 The downside is that tile count overstates statistical independence. In the legacy 144-tile ECDFS subset, 50% overlap means there are only roughly ~36 truly independent sky areas. The expanded flat set improves sample count substantially, but overlap still matters when designing train/val/test splits or making final downstream performance claims.
 
-### Tile Size Rationale
+### Tile Size, Fused Scale, and Resolution Tradeoffs
 
-The current 512x512 Rubin tile size (102" x 102" on sky) is a deliberate choice balancing several factors:
+The current 512x512 Rubin tile size (102" x 102" on sky) was chosen to balance transformer cost, source density, and spatial context. But tile size interacts with another critical parameter -- `fused_pixel_scale_arcsec` -- in ways that matter for per-object alignment and galaxy morphology. This section documents the tradeoff space.
 
-- **Transformer cost**: The V7 fused-scale bottleneck produces ~130x130 tokens (~17,000 per tile). Full self-attention is quadratic in token count, so doubling tile dimensions would increase attention cost ~9x. The current size is near the practical limit for dense self-attention without requiring sparse or windowed attention mechanisms.
-- **Source density**: At 3-sigma detection in ECDFS, a 512x512 tile contains ~500 sources -- a good density for both detection training (enough targets per tile) and astrometry (enough anchors for the per-tile concordance fit).
-- **Spatial context**: 102" spans ~50 PSF widths, which is more than enough context for learning source morphology, spectral relationships, and cross-instrument correspondence. Astronomical sources don't require arcminute-scale spatial context.
-- **Astrometry field fitting**: While larger tiles would provide more baseline for per-tile concordance fits, this is not a constraint in practice because the global concordance solver already combines measurements from all tiles across the full survey footprint. The per-tile fit is just a local step; spatial coverage comes from having many tiles, not from making individual tiles larger.
+#### How tile size flows through the architecture
 
-As the dataset grows, the plan is to add more tiles at the same size rather than increase tile dimensions. More tiles provides more diverse training samples (different source populations, noise realizations, PSF conditions) without increasing per-sample computational cost. This is a more efficient use of additional data than larger tiles would be.
+```
+Rubin tile: T × T pixels at 0.2"/px    →  sky coverage = T × 0.2"
+Euclid tile: ~(T×2) × (T×2) at 0.1"/px →  same sky coverage
+                    ↓
+BandStems (native resolution, no downsampling)
+                    ↓
+StreamEncoders (stride-2 ConvNeXt stages)
+                    ↓
+Bottleneck tokens: T × 0.2 / fused_scale  per axis
+                    ↓
+Transformer: O(n²) in total token count
+```
+
+The bottleneck token count -- and therefore transformer cost -- is controlled by **both** tile size and fused scale jointly:
+
+| Tile (Rubin px) | Sky | Fused scale | Bottleneck tokens | Attention cost | Sources/tile |
+|---|---|---|---|---|---|
+| 256×256 | 51" | 0.8"/px | ~64×64 = 4K | 1× (baseline) | ~125 |
+| **512×512 (current)** | **102"** | **0.8"/px** | **~128×128 = 16K** | **16×** | **~500** |
+| 1024×1024 | 204" | 0.8"/px | ~256×256 = 65K | **260×** | ~2000 |
+| 256×256 | 51" | **0.4"/px** | ~128×128 = 16K | 16× (same as current) | ~125 |
+| 512×512 | 102" | 0.4"/px | ~256×256 = 65K | 260× (too expensive) | ~500 |
+
+The key insight: **256×256 tiles at 0.4"/px fused scale gives the same computational cost as the current setup but with 2× finer bottleneck spatial resolution.**
+
+#### What tile size affects per component
+
+**Foundation model (transformer bottleneck)**: This is where tile size matters most. The transformer's self-attention mixes spatial information across all tokens in a tile. Larger tiles give the transformer more context -- more sources, more PSF variation, more of the WCS distortion pattern. But astronomical sources are local: a typical galaxy at z~0.5 is ~5" = 25 Rubin pixels = 50 VIS pixels. The transformer doesn't need arcminute context to reconstruct a galaxy's missing band -- it needs the galaxy plus enough surrounding sky to estimate noise. With 4× more tiles from the same data, smaller tiles provide more sample diversity, which can compensate for less per-tile context.
+
+**Detection (CenterNet/StemCenterNet)**: Detection is fundamentally local -- each source is detected by its immediate neighborhood in the feature map. Tile size affects sources per tile but not what the model learns about individual sources. No meaningful impact from tile size changes.
+
+**Astrometry (concordance field)**: The smooth concordance field varies on degree scales (~5 mas across ECDFS). The global PINN/grid solver combines all tiles and doesn't care about tile boundaries. Per-tile field solving benefits from more sources (larger tiles), but the global solver is tile-size-agnostic. Tile overlap matters more than tile size here -- shared sources in overlap regions enforce continuity.
+
+**Latent position head (per-object alignment)**: The head extracts local features at each source position: a 5×5 window from the bottleneck (~4" at 0.8"/px) and a 17×17 window from the VIS stem (~1.7" at 0.1"/px). **Changing tile size does not change the resolution of these local features.** What it changes is how much context the transformer had when computing the bottleneck features -- but the extracted window is always the same size. The fused scale, however, directly changes how much spatial detail the bottleneck encodes: at 0.4"/px instead of 0.8"/px, the 5×5 window would cover ~2" with 2× finer spatial structure.
+
+**Galaxy morphology**: A galaxy easily fits within any tile size ≥256×256 Rubin pixels. The foundation model learns galaxy morphology from the reconstruction loss ("given 9 bands, predict the 10th at pixel level"), which is purely local. Tile size does not limit this. What limits galaxy morphology learning is the bottleneck resolution -- at 0.8"/px, fine galaxy structure (spiral arms, colour gradients, tidal features) is compressed to a few bottleneck pixels. Finer fused scale preserves more of this structure through the transformer.
+
+#### Why fused scale matters more than tile size
+
+The fused scale (`fused_pixel_scale_arcsec`) sets the angular resolution of the bottleneck -- the finest spatial detail the transformer can reason about. At the current 0.8"/px:
+
+- Each bottleneck pixel covers 8 VIS pixels (4 Rubin pixels)
+- A compact galaxy (2" effective radius) is ~5 bottleneck pixels across
+- Sub-pixel centroiding in the bottleneck means ~400 mas precision (before the VIS stem path refines it)
+
+At 0.4"/px:
+
+- Each bottleneck pixel covers 4 VIS pixels (2 Rubin pixels)
+- The same galaxy is ~10 bottleneck pixels across
+- The transformer sees 2× finer spatial structure, which helps for morphology-dependent tasks (chromatic centroid shifts, deblending, galaxy shape measurement)
+- Sub-pixel centroiding in the bottleneck improves to ~200 mas precision
+
+The cost is quadratic in tokens: at 0.4"/px with 512×512 tiles, the bottleneck would be 256×256 = 65K tokens -- prohibitively expensive for dense attention. But at 0.4"/px with 256×256 tiles, the bottleneck is 128×128 = 16K tokens -- identical cost to current.
+
+#### Planned experiment: 256×256 tiles at 0.4"/px fused scale
+
+To test whether finer bottleneck resolution improves per-object alignment and galaxy morphology learning:
+
+1. **Re-tile the data** at 256×256 Rubin pixels with 128px stride (50% overlap), giving ~3160 tiles from the same ECDFS footprint (4× current).
+2. **Train V7 foundation** with `fused_pixel_scale_arcsec=0.4`. The Rubin StreamEncoder would need depth=1 (256→128 at 0.4"/px) and the Euclid StreamEncoder depth=2 (~542→271→135 at ~0.4"/px). Token count is ~128×128 = 16K, same as current.
+3. **Evaluate**: Compare reconstruction quality, latent position head convergence, and detection performance against the current 512/0.8 baseline.
+
+The hypothesis: 4× more tiles (more diversity) + 2× finer bottleneck (better spatial detail) should improve downstream tasks that depend on fine spatial structure -- particularly per-object alignment for galaxies with colour gradients, where the chromatic centroid shift operates at sub-arcsecond scales.
+
+The tradeoff: less transformer context per tile (51" vs 102" sky coverage), which could hurt tasks that benefit from large-scale spatial awareness. In practice, few astronomical tasks require >50" of spatial context for per-source predictions.
+
+#### Current tile size (kept as default)
+
+The 512×512 / 0.8"/px configuration remains the default and all current checkpoints use it. It provides:
+
+- ~500 sources per tile -- good density for detection training and astrometry
+- 102" spatial context -- ~50 PSF widths, ample for source morphology
+- ~17K tokens -- near the practical limit for dense attention on a single GPU
+- Established baselines for all downstream heads
+
+As the dataset grows, adding more tiles at any size provides more diverse training samples (different source populations, noise realizations, PSF conditions) without increasing per-sample cost.
 
 ### Rubin NPZ files (`data/rubin_tiles_all/tile_x*_y*.npz`)
 
@@ -232,7 +304,8 @@ See the next section for the full v7 architecture.
 | v4 | Native-res JEPA | InformationMap + shift tolerance | Superseded: spatially imprecise |
 | v5 | Native-res JEPA | Strict position matching | Failed: JEPA can't enforce pixel precision |
 | v6 | Dense MAE | Pixel-space reconstruction | Works but VIS downsampled to Rubin grid |
-| v7 | Mixed-res MAE | 2-stream (Rubin mean / Euclid concat), native resolution | **Current**: preserves per-band PSF structure, RMS-aware loss |
+| v7 | Mixed-res MAE | 2-stream (Rubin mean / Euclid concat), native resolution | **Current production**: preserves per-band PSF structure, RMS-aware loss |
+| v8 | Fine-scale MAE | v7 architecture + configurable fused scale + random crop | **Experimental**: 2× finer bottleneck (0.4"/px), same token count via 256×256 crops |
 
 ### v7 Mixed-Resolution MAE (Current)
 
@@ -300,6 +373,49 @@ Training uses mixed-precision (bfloat16 autocast) and supports multi-GPU via `to
 This is the RMS-aware loss run ([wandb](https://wandb.ai/AI-Astro/JAISP-Foundation-v7/runs/x9y9os7r)), trained on 790 matched tile pairs with correct NISP MER pixel scales (0.1"/px) and RMS-adaptive InformationMap weighting. All downstream heads should be trained on this checkpoint.
 
 Reconstruction quality across bands: Rubin g/r/i/z achieve near-perfect fidelity (Pearson r >= 0.989). Rubin u and Euclid NISP bands are solid (r = 0.87-0.97). Euclid VIS is the weakest band (r = 0.87, std_ratio = 0.92), likely because reconstructing the highest-resolution channel from coarser inputs is the hardest prediction task. Mean Pearson r across all 10 bands is 0.955.
+
+### v8 Fine-Scale MAE (Experimental)
+
+**Files**: `models/jaisp_foundation_v8.py`, `models/jaisp_dataset_v8.py`, `models/train_jaisp_foundation_v8.py`
+
+V8 is an experimental fork of V7 that tests whether a finer bottleneck resolution improves downstream tasks -- particularly per-object alignment for galaxies with colour gradients. The architecture is identical to V7 except:
+
+1. **Configurable fused scale**: `fused_pixel_scale_arcsec` defaults to **0.4"/px** instead of 0.8"/px, giving 2× finer spatial resolution in the bottleneck.
+2. **Auto-computed stream depths**: Stream encoder depths are derived automatically from the fused scale (Rubin depth=1, Euclid depth=2 at 0.4"/px) instead of hardcoded.
+3. **Random crop training**: Uses 256×256 random crops from the existing 512×512 Rubin tiles (and corresponding ~542×542 Euclid crops). This keeps the bottleneck at ~128×128 = 17K tokens -- **identical cost to v7** -- while providing 2× finer features.
+
+The random cropping also serves as data augmentation: each 512×512 tile can yield many different 256×256 crops across epochs, effectively increasing training diversity without re-tiling the data.
+
+| Config | V7 (production) | V8 (experimental) |
+|--------|-----|-----|
+| Fused scale | 0.8"/px | 0.4"/px |
+| Rubin input | 512×512 (full tile) | 256×256 (random crop) |
+| Euclid input | ~1084×1084 | ~542×542 (random crop) |
+| Rubin stream depth | 2 | 1 |
+| Euclid stream depth | 3 | 2 |
+| Bottleneck tokens | ~128×128 = 16K | ~128×128 = 16K |
+| Bottleneck resolution | 800 mas/pixel | 400 mas/pixel |
+| Total params | 13.3M | 9.1M |
+| Sky context per tile | 102" | 51" |
+
+```bash
+# Single GPU
+cd models && python train_jaisp_foundation_v8.py \
+    --rubin_dir ../data/rubin_tiles_all --euclid_dir ../data/euclid_tiles_all \
+    --output_dir ./checkpoints/jaisp_v8_fine \
+    --fused_pixel_scale_arcsec 0.4 --crop_size_rubin 256 \
+    --hidden_ch 256 --epochs 100 --lr 3e-4 --accum_steps 4 \
+    --wandb_name v8_fused04_crop256
+
+# Multi-GPU
+cd models && torchrun --nproc_per_node=2 train_jaisp_foundation_v8.py \
+    --rubin_dir ../data/rubin_tiles_all --euclid_dir ../data/euclid_tiles_all \
+    --output_dir ./checkpoints/jaisp_v8_fine \
+    --fused_pixel_scale_arcsec 0.4 --crop_size_rubin 256 \
+    --epochs 100 --lr 3e-4 --accum_steps 2
+```
+
+The hypothesis: 2× finer bottleneck features will improve downstream per-object alignment (galaxies with colour gradients have chromatic centroid shifts at sub-arcsecond scales that v7's 0.8"/px bottleneck may compress away) and galaxy morphology reconstruction, at the cost of half the sky context per tile (51" vs 102"). V7 remains the production model; V8 results will determine whether the finer scale justifies retraining all downstream heads.
 
 ---
 
@@ -597,6 +713,7 @@ Three solvers are available for fitting the smooth concordance field from per-so
 | `train_local_matcher.py` | Local matcher training script |
 | `latent_position_head.py` | Latent-space canonical position head for per-object multi-band alignment |
 | `train_latent_position.py` | Training script for the latent position head |
+| `eval_latent_position.py` | Cross-instrument eval: align all 9 bands to VIS, per-band metrics |
 | `viz.py` | Diagnostic visualizations |
 
 #### Latent Position Head (Per-Object Multi-Band Alignment)
@@ -620,6 +737,30 @@ python models/astrometry2/train_latent_position.py \
     --epochs 30 --lr 3e-4 --jitter-arcsec 0.03 --jitter-max-arcsec 0.1 \
     --output-dir models/checkpoints/latent_position_head
 ```
+
+**Training result** (200 tiles, 30 epochs, jitter σ=30 mas, [wandb](https://wandb.ai/AI-Astro/JAISP-LatentPosition/runs/nosv9ii9)):
+
+| Metric | Train | Val |
+|--------|-------|-----|
+| MAE total | 17.9 mas | 17.7 mas |
+| p68 | 20.0 mas | 19.6 mas |
+| Median sigma | 13.3 mas | 13.2 mas |
+| Frac < 100 mas | 99.8% | 99.8% |
+
+The head recovers jittered positions to **17.7 mas** on val -- well below the 30 mas jitter and below the 20 mas target. Train/val are nearly identical (no overfitting). The mean jitter magnitude is ~37.5 mas, so the head recovers ~53% of the applied offset; the residual ~18 mas represents the spatial resolution floor of the bottleneck features at 0.8"/px.
+
+**Cross-instrument evaluation**: To test on real (non-synthetic) offsets, the eval script aligns all 9 non-VIS bands (6 Rubin + 3 NISP) independently to the VIS reference frame:
+
+```bash
+cd models && python astrometry2/eval_latent_position.py \
+    --rubin-dir  ../data/rubin_tiles_all \
+    --euclid-dir ../data/euclid_tiles_all \
+    --v7-checkpoint checkpoints/jaisp_v7_concat/checkpoint_best.pt \
+    --head-checkpoint checkpoints/latent_position_head/best.pt \
+    --output-dir checkpoints/latent_position_head/eval_cross_instrument
+```
+
+For each source, this centroids in each band's native pixels, projects to VIS frame, and asks the head to refine toward the VIS centroid. Reports per-band raw offset MAE vs head-corrected MAE, showing which bands benefit most from the multi-band latent correction.
 
 ### 3. PSF + Forced Photometry
 
@@ -661,11 +802,14 @@ JAISP/
 |   +-- jaisp_v7_baseline/             Archived (pre-RMS-aware, wrong NISP scale)
 |
 +-- models/
-|   +-- jaisp_foundation_v7.py         V7 mixed-resolution MAE (current)
-|   +-- jaisp_foundation_v6.py         V6 single-grid MAE (library, used by V7)
+|   +-- jaisp_foundation_v7.py         V7 mixed-resolution MAE (production)
+|   +-- jaisp_foundation_v8.py         V8 fine-scale MAE (experimental, 0.4"/px)
+|   +-- jaisp_foundation_v6.py         V6 single-grid MAE (library, used by V7/V8)
 |   +-- jaisp_dataset_v7.py            V7 mixed-resolution split helpers
+|   +-- jaisp_dataset_v8.py            V8 random crop + split helpers
 |   +-- jaisp_dataset_v6.py            V6 data loader (library, used by downstream)
 |   +-- train_jaisp_foundation_v7.py   V7 training entrypoint
+|   +-- train_jaisp_foundation_v8.py   V8 training entrypoint (fine-scale + random crop)
 |   +-- eval_foundation_v7.py          V7 evaluation/diagnostics
 |   |
 |   +-- detection/                     Source detection head
@@ -698,6 +842,7 @@ JAISP/
 |   |   +-- train_astro_v7.py          V7 training script (CenterNet or classical sources)
 |   |   +-- train_local_matcher.py     Local matcher training script
 |   |   +-- train_latent_position.py   Latent position head training script
+|   |   +-- eval_latent_position.py    9-band → VIS cross-instrument alignment eval
 |   |   +-- infer_concordance.py       Per-tile inference -> FITS export
 |   |   +-- infer_global_concordance.py  Global multi-tile concordance fitting
 |   |   +-- apply_concordance.py       Apply fitted concordance fields to data

@@ -151,6 +151,7 @@ Tiles on disk
 | `sky_cube.py` | `SkyCubeExtractor` — given RA/Dec returns an aligned 10-band [10, H, W] sky cube with concordance applied |
 | `latent_position_head.py` | `LatentPositionHead` — latent-space canonical position head for per-object multi-band alignment |
 | `train_latent_position.py` | Training script for the latent position head (tile-level, jitter-based self-supervision) |
+| `eval_latent_position.py` | Cross-instrument eval: align all 9 non-VIS bands to VIS, per-band metrics and diagnostics |
 | `viz.py` | Diagnostic figures: per-tile offset maps, global field plots, coverage maps |
 
 `source_matching.py` is in this directory (`astrometry2/`).

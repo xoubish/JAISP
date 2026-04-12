@@ -96,8 +96,23 @@ Returns a dict:
 
 Where `N` is number of source positions and `B` is number of bands in the tile tensor.
 
+## PSF-Template Centroiding (Bridge to Astrometry)
+
+PSFNet can also serve as a centroiding engine for the astrometry pipeline, replacing the Gaussian-fit centroiding in `source_matching.refine_centroids_psf_fit`. The function `refine_centroids_psf_template` in `psf_net.py` does iterative Gauss-Newton fitting with the PSFNet-predicted PSF as the template, giving better centroid precision because the template matches the actual (non-Gaussian, spatially varying) PSF shape.
+
+This is conceptually equivalent to the ePSF fitting in Libralato et al. (2024, arXiv:2411.02487) — but using a learned model instead of empirical stacking, and applicable to all 10 bands with a single model.
+
+```python
+from models.photometry.psf_net import load_psf_net, refine_centroids_psf_template
+
+psf_net = load_psf_net('checkpoints/psf_net_v1.pt', device='cuda')
+refined_xy, snr, fwhm = refine_centroids_psf_template(
+    vis_image, seed_positions, psf_net,
+    band_name='euclid_VIS', tile_hw=(1084, 1084),
+)
+```
+
 ## Practical Notes
 
 - Bands follow `BAND_ORDER` in `psf_net.py` for multi-band training/inference consistency.
 - Input `rms` maps should be strictly positive; code clamps very small values for numerical stability.
-- The `--concordance` argument in `train_psf_net.py` is currently reserved and not required for the default training path.

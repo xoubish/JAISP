@@ -372,16 +372,26 @@ def make_preview_figure(
     ax = axes[1, 0]
     p1, p99 = np.percentile(vis_img_np, [1, 99])
     ax.imshow(vis_img_np, origin='lower', cmap='gray', vmin=p1, vmax=p99)
-    scale = 5.0  # arrow scale: 1 mas = 5 pixels visual length
+    # Convert offsets to VIS pixel units for display, then magnify for visibility.
+    # This avoids the "giant arrows" confusion from plotting mas directly.
+    pix2sky = batch['pixel_to_sky'].cpu().numpy()            # [N, 2, 2] arcsec / px
+    target_arcsec = batch['target_offset_arcsec'].cpu().numpy()
+    inv = np.linalg.pinv(pix2sky)
+    gt_px = np.einsum('nij,nj->ni', inv, target_arcsec)      # [N, 2] px
+    pred_px = np.stack([
+        out['dx_px'].detach().cpu().numpy(),
+        out['dy_px'].detach().cpu().numpy(),
+    ], axis=1)
+    magnify = float(getattr(args, 'quiver_magnify', 10.0))
     ax.quiver(positions[:, 0], positions[:, 1],
-              gt[:, 0] * scale, gt[:, 1] * scale,
+              gt_px[:, 0] * magnify, gt_px[:, 1] * magnify,
               color='tab:blue', alpha=0.6, scale=1, scale_units='xy',
-              width=0.002, headwidth=3, label='GT offset')
+              width=0.002, headwidth=3, label='GT offset (px)')
     ax.quiver(positions[:, 0], positions[:, 1],
-              pred[:, 0] * scale, pred[:, 1] * scale,
+              pred_px[:, 0] * magnify, pred_px[:, 1] * magnify,
               color='tab:red', alpha=0.6, scale=1, scale_units='xy',
-              width=0.002, headwidth=3, label='Predicted')
-    ax.set_title(f'Offset quiver on VIS  |  {tile_id}')
+              width=0.002, headwidth=3, label='Predicted (px)')
+    ax.set_title(f'Offset quiver on VIS  |  {tile_id}  (arrows {magnify:.0f}× magnified)')
     ax.legend(fontsize=7, loc='upper right')
     ax.set_xlim(0, vis_img_np.shape[1])
     ax.set_ylim(0, vis_img_np.shape[0])
@@ -570,6 +580,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--device', type=str, default='')
     p.add_argument('--vis-every', type=int, default=3,
                    help='Log diagnostic preview figure every N epochs (default: 3).')
+    p.add_argument('--quiver-magnify', type=float, default=10.0,
+                   help='Visual magnification for quiver arrows in the preview plot '
+                        '(in pixel units; default: 10×).')
 
     # Logging.
     p.add_argument('--wandb-project', type=str, default='JAISP-LatentPosition')
