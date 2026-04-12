@@ -1,4 +1,6 @@
-# JAISP Masked Reconstruction Head v2 — Resolution-Aware
+# JAISP Masked Reconstruction Head v2 — Resolution-Aware (ARCHIVED -- v5 era)
+
+> **Note**: This module used the v5 JEPA backbone which has been superseded by the v7 mixed-resolution MAE. See `models/jaisp_foundation_v7.py` for the current architecture. Kept for historical reference.
 
 This folder adds a resolution-aware reconstruction pipeline to predict masked pixels in a target band from:
 - the masked target image itself (with stem skip connections at native resolution), and

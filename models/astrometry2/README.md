@@ -27,21 +27,31 @@ The learned uncertainty (log_sigma) then weights the control-grid field solver, 
 
 ## Current results
 
-On 144 ECDFS tiles:
+### V7 matcher on 790 ECDFS tiles (current)
+
+Analysis of 790 tiles revealed that the actual concordance field signal is very small (~5-7 mas) while per-source centroid noise is ~47 mas at typical SNR 10-30. The 40-50 mas MAE is almost entirely centroid measurement noise, not unmodeled concordance field. The WCS alignment between Rubin and Euclid for ECDFS is already excellent.
+
+| Regime | Rubin median (mas) | NISP median (mas) | Notes |
+|--------|-------------------|-------------------|-------|
+| Raw WCS | 53-71 | 41-42 | No correction |
+| NN per-source | 5-50 | 17-18 | V7 matcher, per-source |
+| Grid solver field | ~2-12 | ~5 | Smooth field correction |
+| PINN solver field | ~2-7 | ~3-4 | Better 95th percentile |
+
+The NN per-source predictions are effective, but the smooth field solvers show only ~0-1% improvement in the median because the underlying field is small. The real bottleneck is per-source centroid noise (King 1983: sigma ~ FWHM/SNR), not the concordance field amplitude.
+
+### Latent position head (new, experimental)
+
+For per-object alignment to <20 mas across all 10 bands (e.g. for forced photometry), a new **latent-space canonical position head** uses the frozen V7 encoder's fused bottleneck + VIS stem features to predict chromatically-informed source positions. See the "Latent position head" section below.
+
+### Historical V6 results (144-tile ECDFS subset, archived)
 
 | Model | val MAE | p68 | frac < 0.1" | Notes |
 |-------|---------|-----|-------------|-------|
 | Raw WCS | ~47 mas | — | — | No correction |
 | astrometry2 baseline CNN | ~38 mas | — | — | Single-band, random-init VIS encoder |
-| v6 Phase A stems | ~60 mas | — | — | Frozen Rubin stems, random VIS CNN — cost volume mismatched |
-| **v6 Phase B all-bands** | **31.9 mas** | **34.6 mas** | **96.1%** | Frozen Rubin + VIS stems from joint Phase B training |
-
-The Phase B improvement is the key result: both the Rubin and VIS encoders now share a cross-instrument feature space learned during Phase B masked-band reconstruction, so the cost volume compares representations that were trained to be spatially consistent with each other. Phase A v6 was actually worse than baseline because the VIS encoder was a random CNN being compared against frozen Rubin stems — incompatible feature spaces.
-
-Target: sub-20 mas (limited by source density and tile count, not model capacity).
-NISP-to-VIS offsets (same telescope) are 38–41 mas for comparison, confirming the cross-telescope residual is real and correctable.
-
-The main bottleneck is data volume: ~50 matched sources per tile across 144 tiles. More tiles or deeper detection would directly improve field solver conditioning and astrometric precision.
+| v6 Phase A stems | ~60 mas | — | — | Frozen Rubin stems, random VIS CNN |
+| **v6 Phase B all-bands** | **31.9 mas** | **34.6 mas** | **96.1%** | Frozen Rubin + VIS stems from joint Phase B |
 
 ---
 
@@ -139,9 +149,11 @@ Tiles on disk
 | `infer_global_concordance.py` | Collect predictions from all tiles and fit a single global field (no tile boundaries); supports `--solver grid` and `--solver nn` |
 | `apply_concordance.py` | `ConcordanceMap` — load per-tile FITS and apply corrections at any sky position |
 | `sky_cube.py` | `SkyCubeExtractor` — given RA/Dec returns an aligned 10-band [10, H, W] sky cube with concordance applied |
+| `latent_position_head.py` | `LatentPositionHead` — latent-space canonical position head for per-object multi-band alignment |
+| `train_latent_position.py` | Training script for the latent position head (tile-level, jitter-based self-supervision) |
 | `viz.py` | Diagnostic figures: per-tile offset maps, global field plots, coverage maps |
 
-`source_matching.py` lives in `../astrometry/` and is shared with the older pipeline.
+`source_matching.py` is in this directory (`astrometry2/`).
 
 ---
 
@@ -240,61 +252,66 @@ Aim for `p68_total < 20 mas` on the validation set.
 
 ## Training
 
-### Baseline matcher (single-band, no foundation model)
+### V7 matcher (recommended)
+
+Uses frozen V7 BandStems from the RMS-aware foundation checkpoint. Supports multiband mode (all Rubin + NISP bands), CenterNet or classical source detection, and PSF-fit centroiding.
 
 ```bash
-python train_local_matcher.py \
-  --rubin-dir  ../../data/rubin_tiles_ecdfs \
-  --euclid-dir ../../data/euclid_tiles_ecdfs \
-  --rubin-band r \
-  --output-dir ../checkpoints/astrometry2_r \
-  --epochs 30 --batch-size 64
-```
-
-### v6 Phase B matcher — single band
-
-Requires a Phase B foundation checkpoint (`jaisp_v6_phaseB*/checkpoint_best.pt`).
-Uses frozen v6 BandStems for both Rubin and VIS encoders — both live in the same cross-instrument feature space learned during Phase B.
-
-```bash
-python train_astro_v6.py \
-  --v6-checkpoint ../checkpoints/jaisp_v6_phaseB/checkpoint_best.pt \
-  --rubin-dir     ../../data/rubin_tiles_ecdfs \
-  --euclid-dir    ../../data/euclid_tiles_ecdfs \
-  --output-dir    ../checkpoints/astrometry_v6 \
-  --epochs 30 --batch-size 64 \
-  --wandb-project JAISP-Astrometry-v6
-```
-
-### v6 Phase B matcher — all Rubin bands (recommended with more data)
-
-Train a single model for all 6 Rubin bands simultaneously using `--multiband`.
-A shared encoder sees all bands; a learned band embedding handles per-band DCR corrections.
-Each Rubin band gets its own DRA/DDE/COV concordance field in the output FITS.
-
-```bash
-# 1. Train multiband matcher
-python train_astro_v6.py \
-  --v6-checkpoint ../checkpoints/jaisp_v6_phaseB/checkpoint_best.pt \
-  --rubin-dir     ../../data/rubin_tiles_ecdfs \
-  --euclid-dir    ../../data/euclid_tiles_ecdfs \
-  --output-dir    ../checkpoints/astrometry_v6_multiband \
+# V7 matcher + CenterNet detector + all bands (recommended)
+python train_astro_v7.py \
+  --v7-checkpoint       ../checkpoints/jaisp_v7_concat/checkpoint_best.pt \
+  --detector-checkpoint ../../checkpoints/centernet_v7_rms_aware/centernet_best.pt \
+  --rubin-dir           ../../data/rubin_tiles_200 \
+  --euclid-dir          ../../data/euclid_tiles_200 \
   --multiband \
-  --epochs 30 --batch-size 64 \
-  --wandb-project JAISP-Astrometry-v6 \
-  --wandb-run-name v6_multiband
+  --epochs 120 \
+  --output-dir ../checkpoints/astro_v7_psffit
 
-# 2. Export concordance FITS for all 6 Rubin bands in one run
+# V7 matcher without CenterNet (classical source detection)
+python train_astro_v7.py \
+  --v7-checkpoint  ../checkpoints/jaisp_v7_concat/checkpoint_best.pt \
+  --rubin-dir      ../../data/rubin_tiles_200 \
+  --euclid-dir     ../../data/euclid_tiles_200 \
+  --multiband \
+  --epochs 120 \
+  --output-dir ../checkpoints/astro_v7_classical
+
+# Export concordance FITS for all bands
 python infer_concordance.py \
-  --rubin-dir    ../../data/rubin_tiles_ecdfs \
-  --euclid-dir   ../../data/euclid_tiles_ecdfs \
-  --checkpoint   ../checkpoints/astrometry_v6_multiband/checkpoint_best.pt \
+  --checkpoint          ../checkpoints/astro_v7_psffit/checkpoint_best.pt \
+  --v7-checkpoint       ../checkpoints/jaisp_v7_concat/checkpoint_best.pt \
+  --detector-checkpoint ../../checkpoints/centernet_v7_rms_aware/centernet_best.pt \
+  --rubin-dir      ../../data/rubin_tiles_all \
+  --euclid-dir     ../../data/euclid_tiles_all \
+  --output         concordance_v7.fits \
+  --all-bands --auto-grid
+```
+
+### Latent position head (per-object alignment)
+
+For per-object alignment across all 10 bands (e.g. forced photometry), the latent position head uses the frozen V7 encoder's fused bottleneck + VIS stem features to predict chromatically-informed canonical source positions.
+
+```bash
+python train_latent_position.py \
+  --rubin-dir  ../../data/rubin_tiles_200 \
+  --euclid-dir ../../data/euclid_tiles_200 \
+  --v7-checkpoint ../checkpoints/jaisp_v7_concat/checkpoint_best.pt \
+  --epochs 30 --lr 3e-4 \
+  --jitter-arcsec 0.03 --jitter-max-arcsec 0.1 \
+  --output-dir ../checkpoints/latent_position_head
+```
+
+### V6 matcher (archived)
+
+V6 commands are preserved for reference. Use V7 for new work.
+
+```bash
+python train_astro_v6.py \
   --v6-checkpoint ../checkpoints/jaisp_v6_phaseB/checkpoint_best.pt \
-  --output       ../checkpoints/astrometry_v6_multiband/concordance_all_bands.fits \
-  --all-bands \
-  --auto-grid \
-  --plot-dir     ../checkpoints/astrometry_v6_multiband/plots \
-  --summary-json ../checkpoints/astrometry_v6_multiband/summary.json
+  --rubin-dir     ../../data/rubin_tiles_200 \
+  --euclid-dir    ../../data/euclid_tiles_200 \
+  --output-dir    ../checkpoints/astrometry_v6 \
+  --epochs 30 --batch-size 64
 ```
 
 The output FITS contains `{tile_id}.{band}.DRA`, `{tile_id}.{band}.DDE`, `{tile_id}.{band}.COV`
@@ -390,17 +407,17 @@ in sky coordinates — no tile edges, no boundary artefacts.
 
 ```bash
 python infer_global_concordance.py \
-    --rubin-dir  ../../data/rubin_tiles_ecdfs \
-    --euclid-dir ../../data/euclid_tiles_ecdfs \
-    --checkpoint ../checkpoints/astrometry_v6_phaseB2/checkpoint_best.pt \
-    --v6-checkpoint ../checkpoints/jaisp_v6_phaseB2/checkpoint_best.pt \
-    --output     ../checkpoints/astrometry_v6_phaseB2/global_concordance_r.fits \
+    --rubin-dir  ../../data/rubin_tiles_all \
+    --euclid-dir ../../data/euclid_tiles_all \
+    --checkpoint ../checkpoints/astro_v7_psffit/checkpoint_best.pt \
+    --v7-checkpoint ../checkpoints/jaisp_v7_concat/checkpoint_best.pt \
+    --output     ../checkpoints/astro_v7_psffit/global_concordance.fits \
     --dstep-arcsec 1.0 \
     --clip-arcsec 0.3 \
     --auto-grid \
     --solver nn \
-    --plot       ../checkpoints/astrometry_v6_phaseB2/global_concordance_plot.png \
-    --summary-json ../checkpoints/astrometry_v6_phaseB2/global_summary.json
+    --plot       ../checkpoints/astro_v7_psffit/global_concordance_plot.png \
+    --summary-json ../checkpoints/astro_v7_psffit/global_summary.json
 ```
 
 ### Solver options
@@ -441,20 +458,21 @@ reliable = cov < 150   # arcsec
 
 The control-grid solver requires choosing a grid resolution: too coarse → can't resolve real spatial structure; too fine → underdetermined, spiky.  The MLP sidesteps this entirely.  Weight decay acts as a continuous smoothness prior — the same mechanism as Tikhonov regularization but without an explicit grid.  SiLU activations produce a field that is smooth to all orders, avoiding the piecewise-linear artefacts that can appear at control-grid cell boundaries.  Smoothness is tuned via `--nn-weight-decay` alone.
 
-With the current data (~5000 sources over 48 tiles) both solvers produce comparable results.  The NN advantage will grow as data volume increases and the field develops real small-scale structure that a fixed grid resolution cannot resolve without also fitting noise.
+With the current data (~50,000+ sources over 790 tiles) both solvers produce comparable results.  The NN advantage will grow as data volume increases and the field develops real small-scale structure that a fixed grid resolution cannot resolve without also fitting noise.
 
 ---
 
 ## Export per-tile concordance FITS
 
 ```bash
-/home/shemmati/venvs/superres/bin/python models/astrometry2/infer_concordance.py \
-  --rubin-dir data/rubin_tiles_ecdfs \
-  --euclid-dir data/euclid_tiles_ecdfs \
-  --checkpoint models/checkpoints/astrometry2_r/best_matcher.pt \
-  --output models/checkpoints/astrometry2_r/concordance_r.fits \
-  --plot-dir models/checkpoints/astrometry2_r/plots \
-  --auto-grid
+python models/astrometry2/infer_concordance.py \
+  --rubin-dir data/rubin_tiles_all \
+  --euclid-dir data/euclid_tiles_all \
+  --checkpoint models/checkpoints/astro_v7_psffit/checkpoint_best.pt \
+  --v7-checkpoint models/checkpoints/jaisp_v7_concat/checkpoint_best.pt \
+  --output models/checkpoints/astro_v7_psffit/concordance.fits \
+  --all-bands --auto-grid \
+  --plot-dir models/checkpoints/astro_v7_psffit/plots
 ```
 
 The output FITS file has three HDUs per tile:
@@ -504,10 +522,10 @@ The patch size (33×33) and search radius (±3 pixels) are fixed by the trained 
 
 ## Planned improvements
 
-**Multiband concordance**: Re-train with `--multiband` once more tile data arrives, then export per-band global concordance with `--all-bands`. Each Rubin band has its own DCR-driven offset pattern; a shared model with band embeddings handles this efficiently.
+**Latent position head validation**: Evaluate the latent-space canonical position head on star vs galaxy populations separately to quantify the chromatic alignment gain. Stars should approach ~16 mas (noise averaging limit); galaxies are the primary beneficiary of chromatically-informed positioning.
 
-**Deeper source detection**: Lowering detection thresholds or using forced photometry at known catalog positions would increase the number of matched sources per tile, directly improving field solver conditioning in sparse regions. Target: 200+ sources/tile → enables a finer NN field or a denser control grid.
+**Per-object alignment for photometry**: Use the latent position head's canonical positions as input to the forced photometry pipeline, measuring whether the multi-band-informed positions improve photometric precision compared to single-band centroiding.
 
-**Unfreeze stems after warmup**: The current v6 matcher freezes the Phase B stems throughout training. A two-stage schedule — freeze for the first N epochs to stabilize the adapter, then unfreeze with a lower LR — may improve astrometric precision by allowing the stems to specialize toward centroid localization.
+**Unfreeze stems after warmup**: The current V7 matcher freezes the foundation stems throughout training. A two-stage schedule — freeze for the first N epochs to stabilize the adapter, then unfreeze with a lower LR — may improve astrometric precision.
 
-**True super-resolution in sky_cube.py**: `SkyCubeExtractor` currently uses bicubic resampling (order=3) to bring Rubin from 0.2"/px to VIS resolution (0.1"/px). This is geometric resampling — no new information. The v6 Phase B decoder conditioned on `euclid_VIS` would produce a physically motivated super-resolution; wire it in as an optional `mode='sr'` path once the decoder is validated.
+**True super-resolution in sky_cube.py**: `SkyCubeExtractor` currently uses bicubic resampling (order=3) to bring Rubin from 0.2"/px to VIS resolution (0.1"/px). The V7 decoder conditioned on `euclid_VIS` would produce a physically motivated super-resolution; wire it in as an optional `mode='sr'` path once validated.

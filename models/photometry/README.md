@@ -62,8 +62,8 @@ From repo root:
 ```bash
 # Train PSFNet
 python models/photometry/train_psf_net.py \
-  --rubin_dir data/rubin_tiles_ecdfs \
-  --euclid_dir data/euclid_tiles_ecdfs \
+  --rubin_dir data/rubin_tiles_200 \
+  --euclid_dir data/euclid_tiles_200 \
   --out models/checkpoints/psf_net_v1.pt \
   --epochs 20
 ```

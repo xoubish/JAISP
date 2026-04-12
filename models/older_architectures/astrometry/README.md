@@ -1,4 +1,6 @@
-# JAISP Astrometry Concordance
+# JAISP Astrometry Concordance (ARCHIVED -- v5/v6 era)
+
+> **Note**: This is the original astrometry module using the v5/v6 foundation backbone. The current astrometry pipeline is in `models/astrometry2/` using the V7 matcher. Kept for historical reference.
 
 This folder now has two explicit paths:
 

@@ -16,6 +16,7 @@ A self-supervised multi-instrument foundation model for precision cosmology with
 4. [Downstream Heads](#downstream-heads)
    - [Detection](#1-detection)
    - [Astrometry Concordance](#2-astrometry-concordance)
+   - [Latent Position Head](#latent-position-head-per-object-multi-band-alignment)
    - [PSF + Forced Photometry](#3-psf--forced-photometry)
 5. [Project Structure](#project-structure)
 6. [Quick Start](#quick-start)
@@ -28,6 +29,8 @@ A self-supervised multi-instrument foundation model for precision cosmology with
 Rubin Observatory's LSST and ESA's Euclid will together produce the deepest, widest multi-wavelength imaging survey ever conducted. They observe the same sky, but through very different eyes: Rubin captures six optical bands (u through y) at 0.2 arcsec/pixel over a 512x512 tile grid, while Euclid provides a single ultra-sharp visible channel (VIS) at 0.1 arcsec/pixel on a ~1084x1084 grid, plus three near-infrared bands (Y, J, H) delivered as MER mosaics at the same 0.1 arcsec/pixel scale. Jointly analyzing these instruments enables science that neither can achieve alone -- sharper source detection by combining Euclid's resolution with Rubin's depth, sub-pixel astrometric alignment across surveys, and more precise photometric measurements that leverage all 10 wavelength channels simultaneously.
 
 The challenge is that these instruments have different pixel scales, point-spread functions, noise properties, and coordinate systems. Classical survey pipelines address this through a chain of parametric models: fit a Gaussian PSF, solve a polynomial WCS, propagate analytical uncertainties through each stage. Each link in this chain introduces model assumptions that may not hold -- the PSF isn't truly Gaussian, the WCS residuals aren't truly random, the uncertainty propagation assumes independence that doesn't exist. Recent analysis of the Rubin pipeline (Wilson & Naylor 2025, SITCOMTN-159) illustrates this concretely: single-visit astrometric uncertainties have a ~5 milliarcsecond systematic floor not captured by the pipeline's error model, and coadd uncertainties follow an unexplained power-law relationship with the actual position scatter rather than the expected quadrature model. These are exactly the kind of model-dependent artifacts that accumulate when each stage relies on analytical assumptions about the previous stage's output.
+
+The classical state of the art for Euclid astrometry is demonstrated by Libralato et al. (2024, arXiv:2411.02487), who achieve 0.7 mas precision on VIS through iterative effective PSF modelling and geometric distortion calibration -- but this requires individual unresampled exposures, bright point sources (globular cluster stars at SNR > 100), Gaia DR3 as an external reference, and processes each filter independently with empirical colour corrections applied post-hoc. These conditions are rarely met in extragalactic survey fields.
 
 **The core thesis of JAISP is that data-driven methods can surpass these model-dependent approaches.** A neural network that sees thousands of galaxies across 10 bands learns what PSFs actually look like, how centroids shift with wavelength due to differential chromatic refraction, how noise correlates with field position -- all implicitly, from the pixels themselves, without anyone specifying parametric forms. The model doesn't assume a Gaussian PSF; it learns the actual instrument response. It doesn't assume quadrature uncertainty propagation; it learns the true error distribution. As the dataset grows, the learned representations should converge on reality rather than on the assumptions of any particular analytical model.
 
@@ -417,7 +420,7 @@ For the stem path, round-2 promotion uses a lighter bright-star veto mask (`prom
 | `loss_off` | L1 | Only at GT source positions | 1.0 | Sub-pixel offset refinement |
 | `loss_flux` | L1 | Only at GT source positions | 0.1 | Flux estimation (lower weight: pseudo-labels are noisy) |
 
-Historical detection development used 130 training tiles and 14 validation tiles from the 144-tile ECDFS subset, with random 90-degree rotations and flips (8 variants cached per tile). The pipeline is designed to scale to the expanded 790-tile flat dataset.
+Detection development originally used 130 training tiles and 14 validation tiles from a 144-tile ECDFS subset. The current recommended training uses a 200-tile subset (`data/rubin_tiles_200`, `data/euclid_tiles_200`) with 8 augmentation variants cached per tile. The full 790-tile flat dataset is available but 200 tiles is sufficient for detection accuracy.
 
 #### Files
 
@@ -455,6 +458,43 @@ Analysis of 790 ECDFS tiles revealed that the actual concordance field signal is
 - For fields with larger concordance signals (different sky regions, different epochs), the signal-to-noise ratio per source will be better, and the pipeline more effective.
 
 The centroid noise follows the King (1983) / SITCOMTN-159 scaling: σ ∝ FWHM/SNR. Bright unsaturated stars at SNR > 100 give ~5 mas precision; faint galaxies at SNR < 10 give ~100+ mas. Proper SNR-based weighting is critical.
+
+#### Context: Euclid instrument astrometric precision (Libralato et al. 2024)
+
+Libralato et al. (2024, A&A, arXiv:2411.02487) demonstrated the astrometric floor of the Euclid instruments using ERO observations of the globular cluster NGC 6397. Through iterative effective PSF (ePSF) modelling and geometric distortion (GD) calibration on individual unresampled exposures, they achieved **0.7 mas (0.007 pixel) 1D precision for VIS** and **~3 mas (0.01 pixel) for NISP**, for bright well-measured stars just below saturation. This represents the state of the art for classical point-source astrometry with Euclid.
+
+Their approach relies on several conditions that differ fundamentally from the JAISP setting:
+
+| Aspect | Libralato et al. 2024 | JAISP |
+|--------|----------------------|-------|
+| **Images** | Individual unresampled exposures (4 dithers) | MER coadded mosaics (resampled to common grid) |
+| **Sources** | Bright point sources in a globular cluster (SNR > 100) | Faint galaxies + stars in ECDFS (typical SNR 10-30) |
+| **PSF modelling** | Iterative ePSF (pixel response × instrumental PSF), 4× oversampled, spatially varying 3×3 (VIS) or 5×5 (NISP) grid per detector | BandStem CNN learns implicit PSF representation from data |
+| **Reference frame** | Gaia DR3 positions (propagated via proper motions) as external anchor | No external reference; self-consistent cross-instrument matching |
+| **Instruments** | Euclid only (VIS + NISP), single-epoch | Rubin (6 bands, ground-based) + Euclid (4 bands, space-based), coadds |
+| **Bands** | One filter at a time; colour-dependent systematics corrected empirically post-hoc | All 10 bands simultaneously via foundation model |
+| **Distortion** | Explicit 3rd-order polynomial GD per detector, calibrated against Gaia | Smooth concordance field fitted from per-source NN predictions |
+
+**Key implications for JAISP:**
+
+1. **Our ~50 mas scatter is not instrument-limited.** Euclid VIS can reach 0.7 mas on bright stars. Our 30-50 mas scatter on faint galaxies from coadded mosaics is dominated by (a) source faintness (SNR 10-30 vs >100), (b) extended morphology (galaxies vs point sources), and (c) resampling of the coadded mosaics which destroys sub-pixel phase information that individual exposures preserve. The theoretical King-formula floor at SNR=20 with FWHM=1.56 px is ~33 mas per axis, consistent with what we observe.
+
+2. **Colour-dependent centroid systematics are confirmed.** Libralato et al. found a clear systematic in proper motions as a function of (BP-RP) colour (their Appendix C), attributed to the broad VIS filter (550-900 nm) causing colour-dependent PSF variations. This validates our latent position head approach: chromatic centroid shifts are real at the sub-mas level even for point sources, and worse for galaxies with colour gradients. Using the fused 10-band bottleneck to predict positions should handle this naturally, since the bottleneck encodes the full SED.
+
+3. **PSFNet could improve centroid training labels.** Their ePSF fitting achieves much better centroid precision than parametric Gaussian fitting. Our current `refine_centroids_psf_fit` uses a simple 2D Gaussian model with a fixed FWHM guess. If we instead used PSFNet (which learns spatially-varying, band-specific PSF shapes from isolated stars) as the centroiding template, we could get more accurate training labels for both the astrometry matcher and the latent position head. This is particularly relevant for stars, where the PSF template mismatch between the assumed Gaussian and the actual (non-Gaussian, spatially varying) PSF is a significant error source. See the discussion under "PSFNet-informed centroiding" below.
+
+4. **The self-calibration paradigm applies.** Libralato et al. iterate: measure positions → refine ePSF → refine GD → re-measure. JAISP's latent position head could participate in a similar loop: train on current centroids → predict better positions → use those as new training labels → retrain. This is the same self-training principle already used for detection.
+
+#### PSFNet-informed centroiding (planned)
+
+The JAISP photometry module already includes PSFNet (`models/photometry/psf_net.py`), a spatially-varying PSF model that predicts normalised PSF stamps conditioned on (x, y, band). Currently used only for matched-filter flux estimation, PSFNet could also improve astrometric centroiding:
+
+- **Current centroiding**: `refine_centroids_psf_fit` in `source_matching.py` fits a 2D Gaussian with a fixed FWHM guess. This is suboptimal because the actual PSF is non-Gaussian (especially in the wings), spatially varying, and band-dependent.
+- **PSFNet centroiding**: Given a trained PSFNet, we could replace the Gaussian template with the PSFNet prediction at each source's (x, y, band). The centroid fit becomes: minimise `sum_ij w_ij * (data_ij - flux * PSF(x+dx, y+dy))^2` over (dx, dy, flux), where PSF comes from PSFNet. This is conceptually equivalent to Libralato et al.'s ePSF fitting but using a learned model instead of an empirical stacking procedure.
+- **Expected gain**: Primarily for stars (point sources) where the PSF template is the dominant error source. For bright stars at SNR > 50, replacing the Gaussian with PSFNet could reduce centroid errors from ~10 mas to ~5 mas. For galaxies, the gain is smaller because the source morphology (not the PSF model) dominates the centroid uncertainty.
+- **Impact on latent position head**: Better centroids → better training labels → the head has a higher-quality target to learn from, which should improve convergence and final precision.
+
+This is a natural next step after the current latent position head training validates the approach. The implementation would add an optional `--psf-checkpoint` argument to the astrometry training scripts that replaces Gaussian centroiding with PSFNet template fitting.
 
 #### Two approaches
 
@@ -555,7 +595,31 @@ Three solvers are available for fitting the smooth concordance field from per-so
 | `apply_concordance.py` | Apply fitted concordance fields to data |
 | `sky_cube.py` | Aligned 10-band sky cube extraction with concordance correction |
 | `train_local_matcher.py` | Local matcher training script |
+| `latent_position_head.py` | Latent-space canonical position head for per-object multi-band alignment |
+| `train_latent_position.py` | Training script for the latent position head |
 | `viz.py` | Diagnostic visualizations |
+
+#### Latent Position Head (Per-Object Multi-Band Alignment)
+
+The per-patch NN matcher and field solver address the smooth concordance field (~5-7 mas). But for per-object science -- forced photometry, SED fitting, shape measurement -- you need each source's position aligned to better than ~20 mas across all 10 bands. The ~50 mas per-source centroid scatter is the bottleneck, and it has both random (noise) and systematic (chromatic) components.
+
+The **latent position head** (`latent_position_head.py`) attacks this by using the frozen V7 encoder's full multi-band representation to predict chromatically-informed canonical source positions:
+
+1. Run the frozen V7 encoder on the full tile (once) to get the fused bottleneck (0.8"/px, 256 ch) and raw VIS BandStem features (0.1"/px, 64 ch).
+2. For each detected source, extract local windows from both feature maps via bilinear `grid_sample`.
+3. Process through a small trainable head (ConvNeXt + Conv + MLP, 687K params) to predict a position refinement `(dx, dy, log_sigma)` in VIS pixel space, converted to sky arcsec via the local Jacobian.
+
+The bottleneck path captures chromatic morphology from all 10 bands (star vs galaxy, color gradients, DCR). The VIS stem path provides fine spatial precision. The combination can potentially place source positions more accurately than any single-band centroiding.
+
+**Training**: Uses jitter-based self-supervision. VIS PSF-fit centroids serve as ground truth; controlled Gaussian jitter (~30 mas) creates approximate input positions. The head learns to recover the true centroid from the latent features. At inference, any rough initial position can be refined.
+
+```bash
+python models/astrometry2/train_latent_position.py \
+    --rubin-dir data/rubin_tiles_200 --euclid-dir data/euclid_tiles_200 \
+    --v7-checkpoint models/checkpoints/jaisp_v7_concat/checkpoint_best.pt \
+    --epochs 30 --lr 3e-4 --jitter-arcsec 0.03 --jitter-max-arcsec 0.1 \
+    --output-dir models/checkpoints/latent_position_head
+```
 
 ### 3. PSF + Forced Photometry
 
@@ -581,10 +645,13 @@ JAISP/
 +-- requirements.txt                   Python dependencies
 |
 +-- data/
-|   +-- rubin_tiles_all/               Current flat Rubin training tiles (*.npz)
-|   +-- euclid_tiles_all/              Current flat Euclid training tiles (*.npz)
-|   +-- rubin_tiles_ecdfs/             Legacy ECDFS Rubin tiles (*.npz)
-|   +-- euclid_tiles_ecdfs/            Legacy ECDFS Euclid tiles (*.npz)
+|   +-- rubin_tiles_all/               Full flat Rubin training tiles (790 tiles, *.npz)
+|   +-- euclid_tiles_all/              Full flat Euclid training tiles (790 tiles, *.npz)
+|   +-- rubin_tiles_200/               200-tile subset (symlinks, used for downstream training)
+|   +-- euclid_tiles_200/              200-tile subset (symlinks, used for downstream training)
+|   +-- cached_features_v7_rms_aware/  Precomputed V7 encoder features for detection
+|   +-- rubin_tiles_ecdfs/             Legacy ECDFS Rubin tiles (144 tiles, archived)
+|   +-- euclid_tiles_ecdfs/            Legacy ECDFS Euclid tiles (144 tiles, archived)
 |   +-- tiles_product.tar.gz           Source archive for the expanded flat tile set
 |
 +-- checkpoints/
@@ -620,6 +687,7 @@ JAISP/
 |   +-- astrometry2/                   Rubin<->Euclid concordance
 |   |   +-- matcher_v7.py              V7 patch matcher (stem + optional stream stages)
 |   |   +-- matcher_v6.py              V6 patch matcher
+|   |   +-- latent_position_head.py    Latent-space canonical position head (per-object alignment)
 |   |   +-- dataset.py                 Patch dataset + per-pixel RMS + detector integration
 |   |   +-- source_matching.py         Classical detection utilities
 |   |   +-- field_solver.py            Control-grid least-squares field solver
@@ -629,6 +697,7 @@ JAISP/
 |   |   +-- train_astro_v6.py          V6 training script
 |   |   +-- train_astro_v7.py          V7 training script (CenterNet or classical sources)
 |   |   +-- train_local_matcher.py     Local matcher training script
+|   |   +-- train_latent_position.py   Latent position head training script
 |   |   +-- infer_concordance.py       Per-tile inference -> FITS export
 |   |   +-- infer_global_concordance.py  Global multi-tile concordance fitting
 |   |   +-- apply_concordance.py       Apply fitted concordance fields to data
@@ -768,12 +837,25 @@ python astrometry2/infer_concordance.py \
     --all-bands
 ```
 
-### 5. PSF Training
+### 5. Latent Position Head (Per-Object Alignment)
+
+```bash
+python models/astrometry2/train_latent_position.py \
+    --rubin-dir  data/rubin_tiles_200 \
+    --euclid-dir data/euclid_tiles_200 \
+    --v7-checkpoint models/checkpoints/jaisp_v7_concat/checkpoint_best.pt \
+    --epochs 30 --lr 3e-4 \
+    --jitter-arcsec 0.03 --jitter-max-arcsec 0.1 \
+    --output-dir models/checkpoints/latent_position_head \
+    --wandb-project JAISP-LatentPosition
+```
+
+### 6. PSF Training
 
 ```bash
 python models/photometry/train_psf_net.py \
-    --rubin_dir  data/rubin_tiles_all \
-    --euclid_dir data/euclid_tiles_all \
+    --rubin_dir  data/rubin_tiles_200 \
+    --euclid_dir data/euclid_tiles_200 \
     --out checkpoints/psf_net_v1.pt \
     --epochs 20
 ```
@@ -789,10 +871,12 @@ python models/photometry/train_psf_net.py \
 | **V7 foundation (RMS-aware)** | `models/checkpoints/jaisp_v7_concat/checkpoint_best.pt` | v7_rms_aware_loss run (epoch 92). Trained on 790 tile pairs with correct NISP pixel scales and RMS-aware loss. **Use this for all downstream training.** |
 | **CenterNet detector** | `checkpoints/centernet_v7_rms_aware/centernet_best.pt` | Fused-bottleneck CenterNet, 2-round self-training on top of `jaisp_v7_concat`. |
 | **StemCenterNet detector** | `checkpoints/stem_centernet_v7_rms_aware_200/stem_centernet_best.pt` | Native-resolution stem detector on top of `jaisp_v7_concat`. |
+| **Astrometry V7 matcher** | `models/checkpoints/astro_v7_psffit/checkpoint_best.pt` | V7 multiband matcher with PSF-fit centroids, trained on 200 tiles. |
+| **Latent position head** | `models/checkpoints/latent_position_head/best.pt` | Per-object multi-band alignment head (experimental, train with `train_latent_position.py`). |
 
 ### Archived (historical reference only)
 
-These checkpoints are outdated — trained on wrong NISP pixel scales (0.3"/px assumed instead of 0.1"/px) or on older, weaker foundation models. Do not use for new downstream work.
+These checkpoints are outdated -- trained on wrong NISP pixel scales (0.3"/px assumed instead of 0.1"/px) or on older, weaker foundation models. Do not use for new downstream work.
 
 | Checkpoint | Location | Issue |
 |------------|----------|-------|

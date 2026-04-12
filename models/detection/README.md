@@ -36,7 +36,7 @@ An earlier version used a DETR-style transformer decoder with learned object
 queries and Hungarian matching. This was abandoned because:
 
 - **DETR needs large datasets** -- the original trained for 500 epochs on 118k images.
-  With 130 tiles, query collapse (all predictions at one location) persisted for many epochs.
+  With our tile counts, query collapse (all predictions at one location) persisted for many epochs.
 - **Overkill for point sources** -- DETR solves duplicate/NMS problems that don't exist
   for astronomical sources at the bottleneck resolution.
 - **Slow convergence** -- DETR took 25+ epochs to reach val loss 1.02; CenterNet
@@ -89,11 +89,11 @@ needs to run once. Multiple augmentation variants are cached per tile.
 
 ```bash
 python models/detection/precompute_features.py \
-    --rubin_dir    data/rubin_tiles_all \
-    --euclid_dir   data/euclid_tiles_all \
-    --encoder_ckpt checkpoints/jaisp_v7_tiles_all_ddp_online/checkpoint_best.pt \
-    --out_dir      data/cached_features_v7_tiles_all \
-    --n_augments   4 \
+    --rubin_dir    data/rubin_tiles_200 \
+    --euclid_dir   data/euclid_tiles_200 \
+    --encoder_ckpt models/checkpoints/jaisp_v7_concat/checkpoint_best.pt \
+    --out_dir      data/cached_features_v7_rms_aware \
+    --n_augments   8 \
     --device       cuda
 ```
 
@@ -114,12 +114,12 @@ comparison against the classical baseline is just round 1:
 
 ```bash
 python models/detection/self_train.py \
-    --feature_dir  data/cached_features_v7_tiles_all \
-    --rubin_dir    data/rubin_tiles_all \
-    --euclid_dir   data/euclid_tiles_all \
-    --out_dir      checkpoints/centernet_v7_tiles_all_round1 \
-    --rounds 1 \
-    --epochs 60 \
+    --feature_dir  data/cached_features_v7_rms_aware \
+    --rubin_dir    data/rubin_tiles_200 \
+    --euclid_dir   data/euclid_tiles_200 \
+    --out_dir      checkpoints/centernet_v7_rms_aware \
+    --rounds 2 \
+    --epochs 100 \
     --batch_size 4 \
     --wandb_project jaisp-detection
 ```
@@ -133,10 +133,10 @@ If you prefer to skip precomputation and run the encoder live each step:
 
 ```bash
 python models/detection/train_centernet.py \
-    --rubin_dir    data/rubin_tiles_all \
-    --euclid_dir   data/euclid_tiles_all \
-    --encoder_ckpt checkpoints/jaisp_v7_tiles_all_ddp_online/checkpoint_best.pt \
-    --out          checkpoints/centernet_v7_tiles_all_live.pt \
+    --rubin_dir    data/rubin_tiles_200 \
+    --euclid_dir   data/euclid_tiles_200 \
+    --encoder_ckpt models/checkpoints/jaisp_v7_concat/checkpoint_best.pt \
+    --out          checkpoints/centernet_v7_live.pt \
     --epochs 60 \
     --batch_size 1 \
     --wandb_project jaisp-detection
@@ -158,7 +158,7 @@ from detection.centernet_detector import CenterNetDetector
 from detection.detector import JAISPEncoderWrapper
 
 # Load foundation model
-ckpt = torch.load('checkpoints/jaisp_v7_tiles_all_ddp_online/checkpoint_best.pt',
+ckpt = torch.load('models/checkpoints/jaisp_v7_concat/checkpoint_best.pt',
                    map_location='cpu')
 cfg = ckpt.get('config', {})
 foundation = JAISPFoundationV7(
@@ -169,7 +169,7 @@ foundation.load_state_dict(ckpt['model'], strict=False)
 
 # Load CenterNet detector
 encoder = JAISPEncoderWrapper(foundation, freeze=True)
-detector = CenterNetDetector.load('checkpoints/centernet_v7_tiles_all_round1/centernet_best.pt',
+detector = CenterNetDetector.load('checkpoints/centernet_v7_rms_aware/centernet_best.pt',
                                    encoder=encoder, device='cuda')
 detector.eval()
 
