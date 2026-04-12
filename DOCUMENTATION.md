@@ -446,7 +446,21 @@ Historical detection development used 130 training tiles and 14 validation tiles
 
 Astrometry concordance measures and corrects the smooth spatial distortion between Rubin and Euclid coordinate systems. Even after standard WCS calibration, there are residual sub-arcsecond offsets that vary smoothly across a tile. These must be corrected for joint analysis -- stacking images, measuring galaxy shapes for weak lensing, or combining photometry across instruments.
 
-The approach works at the individual source level: detect sources in one or both instruments, extract small image patches around each source, predict the precise pixel offset between the Rubin and VIS positions of each source, and then fit a smooth spatial field from all these per-source measurements. With multiband mode, each of the 10 bands gets its own per-source offset prediction (capturing band-specific chromatic effects like differential chromatic refraction), conditioned by a learned band embedding.
+#### Key diagnostic finding (2026-04-11)
+
+Analysis of 790 ECDFS tiles revealed that the actual concordance field signal is **very small (~5 mas)** while per-source centroid noise is **~47 mas** at typical matched-source SNR of 10-30. The 40-50 mas MAE previously reported was almost entirely centroid measurement noise, not unmodeled concordance field. The WCS alignment between Rubin and Euclid for ECDFS is already excellent. This has important implications:
+
+- The per-patch NN matcher cannot beat centroid noise at these SNRs -- its predictions have the same ~50 mas scatter as raw centroid offsets.
+- The smooth field solver is the component that actually matters, because it averages over many noisy sources to recover the sub-noise signal.
+- For fields with larger concordance signals (different sky regions, different epochs), the signal-to-noise ratio per source will be better, and the pipeline more effective.
+
+The centroid noise follows the King (1983) / SITCOMTN-159 scaling: σ ∝ FWHM/SNR. Bright unsaturated stars at SNR > 100 give ~5 mas precision; faint galaxies at SNR < 10 give ~100+ mas. Proper SNR-based weighting is critical.
+
+#### Two approaches
+
+**Per-patch NN matcher** (original): Detect sources, extract 33×33 patches, predict per-source offsets with a neural cost-volume matcher, then fit a smooth field. Best when per-source centroid precision is comparable to the concordance amplitude (SNR > 50).
+
+**Direct PINN** (`fit_direct_pinn.py`, new): Skip the NN matcher entirely. Use raw centroid-based offsets weighted by King-formula SNR and fit a physics-informed neural network directly. The PINN's smoothness + curl-free + Laplacian constraints act as the denoiser. Best when centroid noise dominates (SNR < 50), which is the common case for the current ECDFS data. Runs on all tiles simultaneously with no tile boundaries.
 
 #### Pipeline
 
@@ -516,10 +530,11 @@ The first stage of the pipeline -- detecting sources -- can use either:
 
 #### Field Solvers
 
-Two solvers are available for fitting the smooth concordance field from per-source offset measurements:
+Three solvers are available for fitting the smooth concordance field from per-source offset measurements:
 
 - **Control grid** (`field_solver.py`): Fits bilinear basis functions on a regular grid using weighted least squares. Includes finite-difference smoothness regularization and adaptive per-node anchor weights that prevent edge drift in regions with sparse source coverage. The grid resolution is automatically reduced for tiles with few matches to avoid underdetermined systems.
 - **Neural network** (`nn_field_solver.py`): A 4-layer MLP that maps normalized (x, y) tile coordinates to (dRA, dDec) offsets, trained via Adam for 2000 steps. Has no grid resolution hyperparameter, is infinitely differentiable, and scales naturally to any source density.
+- **PINN** (`pinn_field_solver.py`): Physics-Informed Neural Network that encodes physical constraints via automatic differentiation: curl-free constraint (optical distortion fields are irrotational), Laplacian smoothness, and band consistency (achromatic geometric field + small per-band chromatic residual). Recommended for the global field fit where these physics priors are well motivated.
 
 #### Files
 
@@ -531,6 +546,8 @@ Two solvers are available for fitting the smooth concordance field from per-sour
 | `source_matching.py` | Classical peak-finding, WCS-based source matching, PSF-fit centroiding, SNR estimation |
 | `field_solver.py` | Control-grid least-squares field solver |
 | `nn_field_solver.py` | MLP-based field solver |
+| `pinn_field_solver.py` | Physics-Informed NN field solver (curl-free, Laplacian, band consistency) |
+| `fit_direct_pinn.py` | Direct PINN concordance from raw centroids (bypasses NN matcher) |
 | `train_astro_v6.py` | Training script (V6 backbone) |
 | `train_astro_v7.py` | Training script (V7 backbone, CenterNet or classical sources, saves full checkpoint metadata) |
 | `infer_concordance.py` | Per-tile inference -> FITS export |
@@ -607,6 +624,8 @@ JAISP/
 |   |   +-- source_matching.py         Classical detection utilities
 |   |   +-- field_solver.py            Control-grid least-squares field solver
 |   |   +-- nn_field_solver.py         MLP field solver
+|   |   +-- pinn_field_solver.py      PINN field solver (physics-informed)
+|   |   +-- fit_direct_pinn.py        Direct PINN from raw centroids
 |   |   +-- train_astro_v6.py          V6 training script
 |   |   +-- train_astro_v7.py          V7 training script (CenterNet or classical sources)
 |   |   +-- train_local_matcher.py     Local matcher training script
