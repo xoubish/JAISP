@@ -749,7 +749,7 @@ python models/astrometry2/train_latent_position.py \
 
 The head recovers jittered positions to **17.7 mas** on val -- well below the 30 mas jitter and below the 20 mas target. Train/val are nearly identical (no overfitting). The mean jitter magnitude is ~37.5 mas, so the head recovers ~53% of the applied offset; the residual ~18 mas represents the spatial resolution floor of the bottleneck features at 0.8"/px.
 
-**Cross-instrument evaluation**: To test on real (non-synthetic) offsets, the eval script aligns all 9 non-VIS bands (6 Rubin + 3 NISP) independently to the VIS reference frame:
+**Cross-instrument evaluation** (790 tiles, all bands → VIS, SNR ≥ 5, raw offset < 200 mas):
 
 ```bash
 cd models && python astrometry2/eval_latent_position.py \
@@ -757,10 +757,28 @@ cd models && python astrometry2/eval_latent_position.py \
     --euclid-dir ../data/euclid_tiles_all \
     --v7-checkpoint checkpoints/jaisp_v7_concat/checkpoint_best.pt \
     --head-checkpoint checkpoints/latent_position_head/best.pt \
-    --output-dir checkpoints/latent_position_head/eval_cross_instrument
+    --output-dir checkpoints/latent_position_head/eval_cross_instrument_clipped \
+    --clip-mas 200 --min-snr 5
 ```
 
-For each source, this centroids in each band's native pixels, projects to VIS frame, and asks the head to refine toward the VIS centroid. Reports per-band raw offset MAE vs head-corrected MAE, showing which bands benefit most from the multi-band latent correction.
+For each source, the eval centroids in each of the 9 non-VIS bands' native pixels, projects to the VIS frame, and asks the head to refine toward the VIS PSF-fit centroid. Sources with raw offset > 200 mas (bad centroids / wrong matches) or band SNR < 5 are excluded.
+
+**Results** (630K source×band measurements across 790 tiles):
+
+| Band | N sources | Raw median | Head median | MAE improvement |
+|------|-----------|-----------|-------------|-----------------|
+| rubin_u | 12,347 | 119 mas | 46 mas | 51% |
+| rubin_g | 60,148 | 54 mas | **15 mas** | 52% |
+| rubin_r | 70,022 | 46 mas | **14 mas** | 51% |
+| rubin_i | 62,232 | 41 mas | **13 mas** | 50% |
+| rubin_z | 42,980 | 42 mas | **14 mas** | 50% |
+| rubin_y | 17,126 | 62 mas | 20 mas | 51% |
+| nisp_Y | 116,572 | 41 mas | **13 mas** | 51% |
+| nisp_J | 126,352 | 42 mas | **13 mas** | 50% |
+| nisp_H | 122,341 | 42 mas | **13 mas** | 51% |
+| **All** | **630,120** | **44 mas** | **13.5 mas** | **51%** |
+
+The head achieves **13.5 mas median** alignment across all 9 bands — well below the 20 mas target. The improvement is remarkably consistent (~51%) across all bands and both instruments. NISP and Rubin g/r/i/z converge to the same ~13 mas floor, indicating the model uses the fused multi-band bottleneck representation rather than single-band features. The ~13 mas floor is the spatial resolution limit of the v7 bottleneck at 0.8"/px (~0.016 bottleneck pixels). The v8 fine-scale experiment (0.4"/px) will test whether this floor can be pushed lower.
 
 ### 3. PSF + Forced Photometry
 
