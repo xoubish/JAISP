@@ -6,9 +6,8 @@ Stars are identified as compact, high-S/N sources (high central pixel fraction).
 Usage
 -----
     python train_psf_net.py \
-        --rubin_dir   data/rubin_tiles_ecdfs \
-        --euclid_dir  data/euclid_tiles_ecdfs \
-        --concordance checkpoints/astrometry_v6_phaseB2/concordance_r.fits \
+        --rubin_dir   data/rubin_tiles_200 \
+        --euclid_dir  data/euclid_tiles_200 \
         --out         checkpoints/psf_net_v1.pt \
         --epochs      20 \
         --stamp_size  21 \

@@ -31,6 +31,7 @@ BAND_ORDER = [
     'rubin_u', 'rubin_g', 'rubin_r', 'rubin_i', 'rubin_z', 'rubin_y',
     'euclid_VIS', 'euclid_Y', 'euclid_J', 'euclid_H',
 ]
+BAND_TO_IDX = {b: i for i, b in enumerate(BAND_ORDER)}
 
 # Approximate PSF FWHM in pixels for each band at native resolution
 # (Rubin at 0.2"/px, Euclid at 0.1"/px)
@@ -245,3 +246,207 @@ class PSFNet(nn.Module):
             losses.append((resid ** 2 / var[:, bi]).mean())
 
         return torch.stack(losses).mean()
+
+
+# ======================================================================
+# PSF-template centroiding (bridge to astrometry)
+# ======================================================================
+
+def refine_centroids_psf_template(
+    image: np.ndarray,
+    seed_xy: np.ndarray,
+    psf_net: 'PSFNet',
+    band_name: str,
+    tile_hw: tuple,
+    device: torch.device = None,
+    radius: int = 5,
+    n_iter: int = 3,
+    flux_floor_sigma: float = 1.5,
+) -> tuple:
+    """PSF-template centroid refinement using a trained PSFNet.
+
+    Replaces the Gaussian-fit centroiding in source_matching.refine_centroids_psf_fit
+    with PSFNet's learned spatially-varying PSF as the fit template. This gives
+    better centroid precision because the template matches the actual PSF shape
+    (non-Gaussian wings, spatial variation, band-dependent structure).
+
+    Uses iterative Levenberg-Marquardt fitting: for each source, minimise
+        chi2 = sum_ij w_ij * (data_ij - flux * PSF(x+dx, y+dy))^2
+    over (dx, dy, flux), where PSF comes from PSFNet at the source's tile position.
+
+    Parameters
+    ----------
+    image : [H, W] single-band image
+    seed_xy : [N, 2] initial (x, y) positions (float, sub-pixel)
+    psf_net : trained PSFNet instance (eval mode)
+    band_name : e.g. 'rubin_r', 'euclid_VIS'
+    tile_hw : (H, W) of the full tile (for normalizing positions to [0,1])
+    device : torch device for PSFNet inference
+    radius : half-size of fitting box
+    n_iter : number of refinement iterations
+    flux_floor_sigma : minimum local SNR to attempt fit
+
+    Returns
+    -------
+    refined_xy : [N, 2] refined positions
+    snr : [N] peak SNR estimates
+    psf_fwhm : [N] effective FWHM from the PSF template (for uncertainty estimation)
+    """
+    from scipy.optimize import least_squares
+
+    if device is None:
+        device = next(psf_net.parameters()).device
+
+    H_tile, W_tile = tile_hw
+    img = np.asarray(image, dtype=np.float32)
+    H, W = img.shape
+    seed_xy = np.asarray(seed_xy, dtype=np.float32).copy()
+    N = seed_xy.shape[0]
+
+    band_idx_val = BAND_TO_IDX.get(band_name, 0)
+
+    # Global noise estimate for flux floor check
+    med = float(np.median(img))
+    mad = float(np.median(np.abs(img - med)))
+    global_sig = max(1.4826 * mad, 1e-10)
+
+    refined = seed_xy.copy()
+    snr_out = np.ones(N, dtype=np.float32)
+    fwhm_out = np.full(N, 3.0, dtype=np.float32)
+
+    # Get PSF stamps for all sources at once
+    psf_net.eval()
+    with torch.no_grad():
+        x_norm = torch.from_numpy(seed_xy[:, 0] / max(W_tile - 1, 1)).float().to(device)
+        y_norm = torch.from_numpy(seed_xy[:, 1] / max(H_tile - 1, 1)).float().to(device)
+        band_idx_t = torch.full((N,), band_idx_val, dtype=torch.long, device=device)
+        psf_stamps = psf_net(x_norm, y_norm, band_idx_t).cpu().numpy()  # [N, S, S]
+
+    S = psf_net.stamp_size
+    half_s = S // 2
+
+    # Estimate FWHM from PSF stamps (for uncertainty reporting)
+    for i in range(N):
+        psf_1d = psf_stamps[i, half_s, :]
+        peak = psf_1d.max()
+        if peak > 0:
+            above = psf_1d >= 0.5 * peak
+            fwhm_out[i] = float(above.sum())
+
+    r = int(max(2, radius))
+
+    for i in range(N):
+        x0, y0 = float(refined[i, 0]), float(refined[i, 1])
+        xi, yi = int(round(x0)), int(round(y0))
+
+        if xi < r or xi >= W - r or yi < r or yi >= H - r:
+            continue
+
+        # Extract data cutout
+        cutout = img[yi - r:yi + r + 1, xi - r:xi + r + 1].copy()
+        bg = float(np.median(cutout))
+        cutout_sub = cutout - bg
+        box_size = 2 * r + 1
+
+        # Check flux
+        peak_val = cutout_sub[r, r]
+        if peak_val < flux_floor_sigma * global_sig:
+            continue
+
+        snr_out[i] = peak_val / global_sig
+
+        # Get PSF at this position, crop to fitting box size
+        psf_full = psf_stamps[i]  # [S, S]
+        # Center crop PSF to box_size if needed
+        if S > box_size:
+            ps = (S - box_size) // 2
+            psf_crop = psf_full[ps:ps + box_size, ps:ps + box_size].copy()
+        elif S < box_size:
+            psf_crop = np.zeros((box_size, box_size), dtype=np.float32)
+            ps = (box_size - S) // 2
+            psf_crop[ps:ps + S, ps:ps + S] = psf_full
+        else:
+            psf_crop = psf_full.copy()
+
+        # Normalise PSF crop
+        psf_sum = psf_crop.sum()
+        if psf_sum > 0:
+            psf_crop /= psf_sum
+
+        # Iterative sub-pixel refinement via shifted PSF fitting.
+        # For each iteration: shift the PSF by (dx, dy) via interpolation,
+        # compute optimal flux, measure residual, update (dx, dy).
+        dx_accum, dy_accum = 0.0, 0.0
+
+        for _ in range(n_iter):
+            # Shift PSF by current (dx, dy) estimate via bilinear interpolation
+            def _shifted_psf(dx, dy):
+                """Shift psf_crop by (dx, dy) sub-pixel via scipy."""
+                from scipy.ndimage import shift as ndi_shift
+                return ndi_shift(psf_crop, [dy, dx], order=1, mode='constant', cval=0.0)
+
+            shifted = _shifted_psf(dx_accum, dy_accum)
+            s_sum = shifted.sum()
+            if s_sum <= 0:
+                break
+            shifted /= s_sum
+
+            # Optimal flux
+            flux = float((cutout_sub * shifted).sum() / (shifted * shifted).sum().clip(1e-12))
+            if flux <= 0:
+                break
+
+            # Compute gradient of chi2 w.r.t. (dx, dy)
+            resid = cutout_sub - flux * shifted
+            # Numerical gradient: dPSF/dx, dPSF/dy
+            eps = 0.1
+            dpsf_dx = (_shifted_psf(dx_accum + eps, dy_accum) - _shifted_psf(dx_accum - eps, dy_accum)) / (2 * eps)
+            dpsf_dy = (_shifted_psf(dx_accum, dy_accum + eps) - _shifted_psf(dx_accum, dy_accum - eps)) / (2 * eps)
+
+            # Gauss-Newton step
+            JtJ_xx = float((flux * dpsf_dx * flux * dpsf_dx).sum())
+            JtJ_yy = float((flux * dpsf_dy * flux * dpsf_dy).sum())
+            JtJ_xy = float((flux * dpsf_dx * flux * dpsf_dy).sum())
+            Jtr_x = float((resid * flux * dpsf_dx).sum())
+            Jtr_y = float((resid * flux * dpsf_dy).sum())
+
+            det = JtJ_xx * JtJ_yy - JtJ_xy * JtJ_xy
+            if abs(det) < 1e-20:
+                break
+
+            step_x = (JtJ_yy * Jtr_x - JtJ_xy * Jtr_y) / det
+            step_y = (JtJ_xx * Jtr_y - JtJ_xy * Jtr_x) / det
+
+            # Clamp step to prevent divergence
+            step_x = max(-0.5, min(0.5, step_x))
+            step_y = max(-0.5, min(0.5, step_y))
+
+            dx_accum += step_x
+            dy_accum += step_y
+
+            # Clamp total offset
+            if abs(dx_accum) > r or abs(dy_accum) > r:
+                dx_accum, dy_accum = 0.0, 0.0
+                break
+
+        refined[i, 0] = x0 + dx_accum
+        refined[i, 1] = y0 + dy_accum
+
+    return refined, snr_out, fwhm_out
+
+
+def load_psf_net(checkpoint_path: str, device: torch.device = None) -> 'PSFNet':
+    """Load a trained PSFNet from checkpoint."""
+    if device is None:
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    ckpt = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
+    cfg = ckpt.get('config', {})
+    net = PSFNet(
+        n_bands=cfg.get('n_bands', 10),
+        stamp_size=cfg.get('stamp_size', 21),
+        hidden_dim=cfg.get('hidden_dim', 64),
+        band_embed_dim=cfg.get('band_embed_dim', 8),
+    ).to(device)
+    net.load_state_dict(ckpt['psf_net_state'])
+    net.eval()
+    return net
