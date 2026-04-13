@@ -393,24 +393,8 @@ def load_v7_foundation_from_checkpoint(
     checkpoint: str,
     device: Optional[torch.device] = None,
 ) -> JAISPFoundationV7:
-    ckpt = torch.load(checkpoint, map_location="cpu", weights_only=False)
-    cfg = ckpt.get("config", {})
-    model = JAISPFoundationV7(
-        band_names=cfg.get("band_names", ALL_BANDS),
-        stem_ch=cfg.get("stem_ch", 64),
-        hidden_ch=cfg.get("hidden_ch", 256),
-        blocks_per_stage=cfg.get("blocks_per_stage", 2),
-        transformer_depth=cfg.get("transformer_depth", 4),
-        transformer_heads=cfg.get("transformer_heads", 8),
-        fused_pixel_scale_arcsec=cfg.get("fused_pixel_scale_arcsec", 0.8),
-    )
-    missing, _ = model.load_state_dict(ckpt["model"], strict=False)
-    enc_missing = [k for k in missing if not k.startswith(("encoder.skip_projs", "target_decoders"))]
-    if enc_missing:
-        print(f"  [warn] Missing foundation keys: {enc_missing}")
-    model.eval()
-    if device is not None:
-        model = model.to(device)
+    from load_foundation import load_foundation
+    model = load_foundation(checkpoint, device=device or torch.device('cpu'), freeze=True)
     return model
 
 

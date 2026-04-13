@@ -36,10 +36,11 @@ for _p in (_HERE, _MODELS):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
-from jaisp_foundation_v7 import JAISPFoundationV7, ALL_BANDS, RUBIN_BANDS
+from jaisp_foundation_v7 import ALL_BANDS, RUBIN_BANDS
 from detection.detector import JaispDetector, JAISPEncoderWrapper, _StubEncoder
 from detection.matcher  import DetectionLoss
 from detection.dataset  import TileDetectionDataset, collate_fn
+from load_foundation import load_foundation
 
 
 # ---------------------------------------------------------------------------
@@ -52,7 +53,7 @@ def _load_encoder(
     freeze: bool = True,
 ) -> tuple:
     """
-    Load JAISPFoundationV7 from a checkpoint and wrap it for detection.
+    Load foundation model (v7 or v8) from a checkpoint and wrap it for detection.
     Falls back to stub CNN if no checkpoint is provided.
 
     Returns (wrapper, encoder_dim).
@@ -62,32 +63,11 @@ def _load_encoder(
         stub = _StubEncoder(in_channels=len(RUBIN_BANDS)).to(device)
         return stub, 512
 
-    print(f'  Loading v7 encoder from {encoder_ckpt}')
-    ckpt = torch.load(encoder_ckpt, map_location='cpu', weights_only=False)
-    cfg  = ckpt.get('config', {})
-
-    model = JAISPFoundationV7(
-        band_names               = cfg.get('band_names', ALL_BANDS),
-        stem_ch                  = cfg.get('stem_ch', 64),
-        hidden_ch                = cfg.get('hidden_ch', 256),
-        blocks_per_stage         = cfg.get('blocks_per_stage', 2),
-        transformer_depth        = cfg.get('transformer_depth', 4),
-        transformer_heads        = cfg.get('transformer_heads', 8),
-        fused_pixel_scale_arcsec = cfg.get('fused_pixel_scale_arcsec', 0.8),
-    )
-    missing, unexpected = model.load_state_dict(ckpt['model'], strict=False)
-    encoder_dim = cfg.get('hidden_ch', 256)
-    if missing:
-        # skip_projs and target_decoders are not used for encoding — safe to ignore
-        enc_missing = [k for k in missing if not k.startswith(('encoder.skip_projs', 'target_decoders'))]
-        if enc_missing:
-            print(f'  [warn] Missing encoder keys: {enc_missing}')
-    if unexpected:
-        print(f'  [warn] Unexpected keys (old arch): {len(unexpected)} keys ignored')
-
+    model = load_foundation(encoder_ckpt, device=torch.device('cpu'))
+    encoder_dim = model.encoder.hidden_ch
     wrapper = JAISPEncoderWrapper(model, freeze=freeze).to(device)
     n_enc = sum(p.numel() for p in wrapper.encoder.parameters())
-    print(f'  v7 encoder loaded ({n_enc/1e6:.1f}M params, frozen={freeze}, encoder_dim={encoder_dim})')
+    print(f'  Encoder loaded ({n_enc/1e6:.1f}M params, frozen={freeze}, encoder_dim={encoder_dim})')
     return wrapper, encoder_dim
 
 

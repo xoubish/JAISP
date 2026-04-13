@@ -50,28 +50,16 @@ RUBIN_PIXEL_SCALE_ARCSEC = 0.2
 # ============================================================
 
 def load_v7_stems(v7_checkpoint: str, device='cpu'):
-    """Load frozen V7 BandStems from a foundation checkpoint.
+    """Load frozen BandStems from a foundation checkpoint (v7 or v8).
 
     Returns a dict mapping band names (e.g. 'rubin_r', 'euclid_VIS')
     to frozen BandStem modules on the given device.
     """
     import torch
-    from jaisp_foundation_v7 import JAISPFoundationV7, ALL_BANDS
+    from load_foundation import load_foundation
 
-    ckpt = torch.load(v7_checkpoint, map_location='cpu', weights_only=False)
-    cfg = ckpt.get('config', {})
-    v7 = JAISPFoundationV7(
-        band_names=cfg.get('band_names', ALL_BANDS),
-        stem_ch=cfg.get('stem_ch', 64),
-        hidden_ch=cfg.get('hidden_ch', 256),
-        blocks_per_stage=cfg.get('blocks_per_stage', 2),
-        transformer_depth=cfg.get('transformer_depth', 4),
-        transformer_heads=cfg.get('transformer_heads', 8),
-        fused_pixel_scale_arcsec=cfg.get('fused_pixel_scale_arcsec', 0.8),
-    )
-    v7.load_state_dict(ckpt['model'], strict=False)
-
-    encoder = v7.encoder if hasattr(v7, 'encoder') else v7
+    model = load_foundation(v7_checkpoint, device=torch.device('cpu'), freeze=True)
+    encoder = model.encoder if hasattr(model, 'encoder') else model
     stems = {}
     for name, stem in encoder.stems.items():
         stem.eval()

@@ -61,6 +61,7 @@ for _p in (_HERE, _MODELS):
 
 from jaisp_foundation_v7 import JAISPFoundationV7, ALL_BANDS
 from jaisp_foundation_v6 import ConvNeXtBlock
+from load_foundation import load_foundation
 
 
 # ============================================================
@@ -376,25 +377,13 @@ def load_latent_position_head(
     ckpt = torch.load(v7_checkpoint, map_location='cpu', weights_only=False)
     cfg = ckpt.get('config', {})
 
-    v7 = JAISPFoundationV7(
-        band_names=cfg.get('band_names', ALL_BANDS),
-        stem_ch=cfg.get('stem_ch', 64),
-        hidden_ch=cfg.get('hidden_ch', 256),
-        blocks_per_stage=cfg.get('blocks_per_stage', 2),
-        transformer_depth=cfg.get('transformer_depth', 4),
-        transformer_heads=cfg.get('transformer_heads', 8),
-        fused_pixel_scale_arcsec=cfg.get('fused_pixel_scale_arcsec', 0.8),
-    )
-    missing, unexpected = v7.load_state_dict(ckpt['model'], strict=False)
-    enc_missing = [k for k in missing if not k.startswith(('encoder.skip_projs', 'target_decoders'))]
-    if enc_missing:
-        print(f'  [warn] Missing encoder keys: {enc_missing}')
+    foundation = load_foundation(v7_checkpoint, device=torch.device('cpu'))
 
     hidden_ch = cfg.get('hidden_ch', 256)
     stem_ch = cfg.get('stem_ch', 64)
     fused_scale = cfg.get('fused_pixel_scale_arcsec', 0.8)
 
-    frozen_encoder = FrozenV7Encoder(v7).to(device)
+    frozen_encoder = FrozenV7Encoder(foundation).to(device)
 
     head = LatentPositionHead(
         hidden_ch=hidden_ch,

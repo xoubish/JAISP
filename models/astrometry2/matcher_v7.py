@@ -453,24 +453,8 @@ def load_v7_matcher(
     if device is None:
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    ckpt = torch.load(v7_checkpoint, map_location='cpu', weights_only=False)
-    cfg  = ckpt.get('config', {})
-
-    v7 = JAISPFoundationV7(
-        band_names               = cfg.get('band_names', ALL_BANDS),
-        stem_ch                  = cfg.get('stem_ch', 64),
-        hidden_ch                = cfg.get('hidden_ch', 256),
-        blocks_per_stage         = cfg.get('blocks_per_stage', 2),
-        transformer_depth        = cfg.get('transformer_depth', 4),
-        transformer_heads        = cfg.get('transformer_heads', 8),
-        fused_pixel_scale_arcsec = cfg.get('fused_pixel_scale_arcsec', 0.8),
-    )
-    missing, unexpected = v7.load_state_dict(ckpt['model'], strict=False)
-    # skip_projs and target_decoders are not needed for stem/stream extraction
-    enc_missing = [k for k in missing if not k.startswith(('encoder.skip_projs', 'target_decoders'))]
-    if enc_missing:
-        print(f'  [warn] Missing encoder keys: {enc_missing}')
-    v7.eval()
+    from load_foundation import load_foundation
+    v7 = load_foundation(v7_checkpoint, device=torch.device('cpu'), freeze=True)
 
     matcher = V7AstrometryMatcher(
         v7_model         = v7,

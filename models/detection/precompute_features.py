@@ -27,26 +27,15 @@ for _p in (_HERE, _MODELS):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
-from jaisp_foundation_v7 import JAISPFoundationV7, ALL_BANDS, RUBIN_BANDS
+from jaisp_foundation_v7 import ALL_BANDS, RUBIN_BANDS
 from jaisp_dataset_v6 import JAISPDatasetV6
 from detection.detector import JAISPEncoderWrapper
+from load_foundation import load_foundation
 
 
 def _load_encoder(encoder_ckpt, device):
-    ckpt = torch.load(encoder_ckpt, map_location='cpu', weights_only=False)
-    cfg = ckpt.get('config', {})
-    model = JAISPFoundationV7(
-        band_names               = cfg.get('band_names', ALL_BANDS),
-        stem_ch                  = cfg.get('stem_ch', 64),
-        hidden_ch                = cfg.get('hidden_ch', 256),
-        blocks_per_stage         = cfg.get('blocks_per_stage', 2),
-        transformer_depth        = cfg.get('transformer_depth', 4),
-        transformer_heads        = cfg.get('transformer_heads', 8),
-        fused_pixel_scale_arcsec = cfg.get('fused_pixel_scale_arcsec', 0.8),
-    )
-    model.load_state_dict(ckpt['model'], strict=False)
+    model = load_foundation(encoder_ckpt, device=torch.device('cpu'))
     wrapper = JAISPEncoderWrapper(model, freeze=True).to(device)
-    print(f'Encoder loaded from {encoder_ckpt}')
     return wrapper
 
 

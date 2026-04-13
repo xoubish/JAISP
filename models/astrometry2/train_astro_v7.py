@@ -82,21 +82,10 @@ def _load_detector(detector_checkpoint: str, v7_checkpoint: str, device: torch.d
     """Load the CenterNet detector for source finding (optional)."""
     from detection.centernet_detector import CenterNetDetector
     from detection.detector import JAISPEncoderWrapper
-    from jaisp_foundation_v7 import JAISPFoundationV7, ALL_BANDS
+    from load_foundation import load_foundation
 
-    ckpt = torch.load(v7_checkpoint, map_location='cpu', weights_only=False)
-    cfg = ckpt.get('config', {})
-    v7 = JAISPFoundationV7(
-        band_names               = cfg.get('band_names', ALL_BANDS),
-        stem_ch                  = cfg.get('stem_ch', 64),
-        hidden_ch                = cfg.get('hidden_ch', 256),
-        blocks_per_stage         = cfg.get('blocks_per_stage', 2),
-        transformer_depth        = cfg.get('transformer_depth', 4),
-        transformer_heads        = cfg.get('transformer_heads', 8),
-        fused_pixel_scale_arcsec = cfg.get('fused_pixel_scale_arcsec', 0.8),
-    )
-    v7.load_state_dict(ckpt['model'], strict=False)
-    encoder = JAISPEncoderWrapper(v7, freeze=True)
+    model = load_foundation(v7_checkpoint, device=torch.device('cpu'))
+    encoder = JAISPEncoderWrapper(model, freeze=True)
     detector = CenterNetDetector.load(detector_checkpoint, encoder, device=device)
     detector.eval()
     print(f'  CenterNet detector loaded from {detector_checkpoint}')
