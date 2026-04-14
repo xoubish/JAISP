@@ -780,17 +780,86 @@ For each source, the eval centroids in each of the 9 non-VIS bands' native pixel
 
 The head achieves **13.5 mas median** alignment across all 9 bands — well below the 20 mas target. The improvement is remarkably consistent (~51%) across all bands and both instruments. NISP and Rubin g/r/i/z converge to the same ~13 mas floor, indicating the model uses the fused multi-band bottleneck representation rather than single-band features. The ~13 mas floor is the spatial resolution limit of the v7 bottleneck at 0.8"/px (~0.016 bottleneck pixels). The v8 fine-scale experiment (0.4"/px) will test whether this floor can be pushed lower.
 
-### 3. PSF + Forced Photometry
+### 3. PSF Modelling — `PSFField`
 
-**Directory**: `models/photometry/`
+**Directory**: `models/psf/`
 
-Accurate photometry requires knowing the point-spread function (PSF) -- the shape of a point source as recorded by the detector. The PSF varies across the field of view due to optical distortions and detector effects. This module models the spatially-varying PSF and uses it for optimal flux extraction.
+The PSF is a fundamental survey property consumed by three downstream tasks (astrometry centroiding, forced photometry, eventually shape measurement). It lives in its own module rather than under `photometry/` because it is not a sub-concept of any one task.
 
-- **PSFNet**: A neural network that parameterizes the PSF as a base Gaussian plus a learned residual in log-PSF space, conditioned on position within the tile. This allows the model to capture complex PSF wings and asymmetries that vary smoothly across the field.
-- **Matched filter**: Given the PSF model at a source's position, the optimal linear flux estimator is `flux = (PSF^T W d) / (PSF^T W PSF)` where W is the inverse-variance weight matrix and d is the observed pixel data. This is the Cramer-Rao optimal estimator -- no other linear method can achieve lower variance.
-- **Pipeline**: For each tile, precompute a PSF grid at regular positions, interpolate to each detected source's location, extract small image stamps, subtract local background, and apply the matched-filter flux estimator.
+#### Why PSFs matter for this project
 
-See `models/photometry/README.md` for full details.
+Astrometry2 plateaued at 40–50 mas MAE, and we traced the residual to **centroiding noise on the astrometric anchors themselves** rather than the matcher. Every anchor position was estimated from a 2D Gaussian fit whose centroid is biased by the real (non-Gaussian) PSF shape and broadened by centroid noise in the detection step. Improving the PSF model is therefore a prerequisite for sub-20 mas astrometry, not just a photometry nicety.
+
+#### PSFField architecture
+
+Continuous, chromatic, spatially-varying PSF field for all 10 bands in one model:
+
+```
+f(xy_sub, x_tile, y_tile, band, sed) → intensity
+```
+
+- **Continuous** (SIREN-based, Sitzmann et al. 2020). The PSF is represented as an implicit function in arcsec coordinates, not a discretised stamp. Querying at sub-pixel offsets is exact rather than interpolated. This is what makes the next two items clean.
+- **Pixel integration**: when comparing to data, each data pixel is integrated by evaluating the PSF on a K×K sub-grid (K=4) inside the pixel footprint. Rubin pixels integrate 0.2"×0.2" boxes, Euclid 0.1"×0.1". Same PSFField handles both with physically correct sampling.
+- **Chromatic**: a per-source SED embedding (from the 10-band flux vector) conditions the SIREN. The PSF shape inside each band depends on the source's SED — a hot blue star has a slightly sharper r-band PSF than a cool red star in the *same* r filter, because the filter isn't monochromatic.
+- **DCR term**: a small learnable 6×2 parameter block applies a colour-dependent centroid shift in Rubin bands only (space-based Euclid is immune). Captures residual differential chromatic refraction in stacked mosaics as a linear function of g−i colour.
+
+`render_stamps(...)` produces pixel-integrated PSF stamps in batch for N stars in one band.
+
+#### Training: jointly learn PSF *and* sub-pixel centroids
+
+The centroid-smearing bug in naive PSF fitting is: stars are extracted at integer-pixel detection peaks, so each stamp has a random ~0.5-pixel sub-pixel offset. Averaging chi² over many stars trains the model to reproduce a PSF *convolved with the centroid-error distribution* — broader than the real PSF.
+
+The fix is structural, not procedural: each star carries a **learnable sub-pixel centroid** as an `nn.Parameter`, optimised jointly with the SIREN via SGD. The converged centroids are by construction the sub-pixel refinement PSF-fitting gives you — astrometric labels fall out of PSF training for free.
+
+Star selection (`models/psf/star_selection.py`):
+
+1. **VIS-based detection** (sharpest PSF, no seeing variation, cleanest stellar locus). Candidates come from either CenterNet v8 pseudo-labels or classical `_pseudo_labels_vis` — both include bright-core detection and diffraction-spike masking.
+2. **2D moment fit** on each candidate for FWHM and sub-pixel centroid.
+3. **Stellar locus cut**: keep `|FWHM − median| < 8% × median` — the locus is a pencil-thin stripe in VIS because the VIS PSF is so sharp.
+4. **Isolation cut**: no neighbour within 3".
+5. **Per-band saturation cut**: reject stars whose peak pixel in any band falls in the top 5% for the tile.
+6. **Cross-match VIS → Rubin via WCS** and extract 10-band stamps at sub-pixel positions (`F.grid_sample`).
+
+Robust training (`models/psf/train_psf_field.py`):
+
+- **Heteroscedastic χ² with variance floor**: `σ² ≥ (0.02 × peak)²` caps per-pixel SNR at 50. Without this, bright bands have so little Poisson noise that any 2% PSF imperfection explodes χ².
+- **Huber loss**: per-pixel contributions switch from quadratic to linear at 3σ. Outlier pixels (cosmic rays, saturated spikes, binary companions) still contribute but stop dominating the gradient.
+- **Percentile outlier rejection**: after epoch 12, reject the worst 10% of stars (ranked by median across-band χ²). Drops the irreducible bad detections (blends, binaries that survived isolation).
+- **SED refresh every 5 epochs**: re-estimate each star's 10-band SED from analytic optimal fluxes. Chromatic PSF conditioning improves as the PSF improves.
+- **Gradient sanitisation**: `nan_to_num_` per-parameter before gradient clipping. Without this, any single Inf in a gradient turns the global `clip_grad_norm_` into a divide-by-Inf that zeros every other param — poisoning the step with NaN.
+
+#### Results (v2 checkpoint)
+
+Trained on 790 tiles × ~8 stars/tile = 3312 stars (after all cuts), 60 epochs, SIREN 192-wide × 6-deep, stamp 25 px:
+
+| Metric | v1 (200 tiles) | v2 (790 tiles) |
+|---|---|---|
+| χ²/ndof median, rubin_r | 4.19 | **2.23** |
+| χ²/ndof median, rubin_i | 4.11 | **1.87** |
+| χ²/ndof median, euclid_VIS | 4.84 | **3.27** |
+| Centroid drift median | 23 mas | **16 mas** |
+| VIS model FWHM | 0.357" | **0.338"** |
+| DCR rubin_u magnitude | 131 mas / colour | 31 mas / colour |
+
+The DCR coefficients show clean wavelength ordering (u > g > y ≈ r > i ≈ z), which is the expected physical scaling.
+
+#### Diagnostics
+
+`models/psf/validate_psf_field.py` produces:
+
+- χ²/ndof histograms per band
+- Centroid-drift distribution
+- Radial profile model-vs-data per band
+- Random stamp gallery with data / model / residual panels
+- DCR coefficients table
+
+#### Notebook
+
+`io/psf_visualization.ipynb` renders the per-band median PSF and its spatial variation across the tile (3×3 grid of tile positions).
+
+#### Related legacy code
+
+`models/photometry/psf_net.py` (PSFNet — Gaussian base + MLP residual, never trained) is retained only as a reference implementation. Production users should call `models.psf.PSFField`. Matched-filter forced photometry (`models/photometry/forced_photometry.py`) still works and will be migrated to consume PSFField in a follow-up.
 
 ---
 
@@ -867,9 +936,16 @@ JAISP/
 |   |   +-- sky_cube.py                Aligned 10-band sky cube extraction
 |   |   +-- viz.py                     Diagnostic visualizations
 |   |
-|   +-- photometry/                    PSF + forced photometry
-|   |   +-- psf_net.py                 Spatially-varying PSF model
-|   |   +-- train_psf_net.py           PSF training script
+|   +-- psf/                           PSF modelling (consumed by astrometry/photometry)
+|   |   +-- psf_field.py               PSFField: SIREN + SED encoder + DCR + pixel integration
+|   |   +-- star_selection.py          VIS stellar-locus selection, 10-band stamp extraction
+|   |   +-- train_psf_field.py         Joint SIREN + per-star centroid optimisation
+|   |   +-- validate_psf_field.py      χ², centroid drift, radial profile, stamp gallery
+|   |   +-- run_centernet_detections.py CenterNet inference → VIS-normalised per-tile dets
+|   |
+|   +-- photometry/                    Forced photometry (uses models/psf)
+|   |   +-- psf_net.py                 Legacy PSFNet (Gaussian base + MLP residual, reference only)
+|   |   +-- train_psf_net.py           Legacy PSFNet training script (superseded)
 |   |   +-- forced_photometry.py       Matched-filter flux estimator
 |   |   +-- stamp_extractor.py         Batched postage stamp extraction + local sky estimation
 |   |   +-- pipeline.py               End-to-end photometry pipeline
@@ -1057,8 +1133,30 @@ These checkpoints are outdated -- trained on wrong NISP pixel scales (0.3"/px as
 
 ## Current Status
 
-- **V7 foundation**: `models/checkpoints/jaisp_v7_concat/checkpoint_best.pt` (epoch 92), trained with RMS-aware loss on 790 tiles with correct NISP MER pixel scales. This is the only foundation checkpoint to use.
-- **Detection**: CenterNet (`checkpoints/centernet_v7_rms_aware/`) and StemCenterNet (`checkpoints/stem_centernet_v7_rms_aware_200/`) are both trained on the current foundation. Classical VIS detection remains a fast baseline.
-- **Astrometry**: V7 matcher with PSF-fit centroiding (SITCOMTN-159 motivated), per-source SNR estimation, and label noise floor in the Rayleigh NLL loss. Training in progress on 200-tile subset.
-- **Photometry**: PSFNet functional. Not yet rerun on the expanded dataset.
-- This is an active research codebase. Architecture and training defaults evolve with experiments.
+**Foundation models**
+- **V7**: `models/checkpoints/jaisp_v7_concat/checkpoint_best.pt` (epoch 92), RMS-aware loss, 790 tiles, correct NISP MER pixel scales. Production foundation.
+- **V8**: `models/checkpoints/jaisp_v8_fine/checkpoint_best.pt` — fine-scale experiment (0.4"/px fused), 200 tiles. Used for v8 detection.
+
+**Detection**
+- **CenterNet v7**: `checkpoints/centernet_v7_rms_aware/` — 2-round self-training on v7 foundation, 200 tiles.
+- **CenterNet v8**: `checkpoints/centernet_v8_fine/centernet_round2.pt` — on v8 features, 200 tiles. Best checkpoint used for inference on all 790 tiles → `data/detection_labels/centernet_v8_r2_790.pt` (~188 detections/tile at conf=0.3).
+- Classical VIS detection remains a fast baseline.
+
+**PSF modelling (new — 2026-04-13)**
+- **PSFField v3**: `models/checkpoints/psf_field_v3.pt` — continuous SIREN-based PSF for all 10 bands.
+  - Architecture: SIREN 192×6, w0=15, per-band radial envelope (Rubin 1.7"/Euclid 0.85"), SED-conditioned chromatic PSF, DCR term for Rubin bands.
+  - Training: 3312 stars across 429 tiles (of 790), joint PSF + sub-pixel centroid optimisation, robust chi² (Huber + variance floor), percentile outlier rejection, SED refresh.
+  - Results: best loss=779, centroid drift median=14.6 mas, Euclid NIR chi²/ndof 0.28–0.61 (excellent), chromatic FWHM difference 6% in VIS (blue vs red, physically correct).
+  - Known issue: u-band is noise-limited (chi²=0.54 which is within noise; radial profile shows cosmetic artefact at edge, not practical concern).
+  - Diagnostics: `models/psf/validate_psf_field.py`, W&B panels (gallery, radial profiles, example stamps, centroid drift).
+  - Notebook: `io/10_psf_visualization.ipynb`.
+
+**Astrometry**
+- 790 tiles, 40–50 mas MAE. Label noise (centroiding) is the dominant bottleneck.
+- PSFField v3 centroid drift of 14.6 mas shows the path to sub-20 mas labels.
+- **Next**: write `models/psf/centroid_refinement.py` to use PSFField v3 as centroiding template → regenerate labels → retrain astrometry2.
+
+**Photometry**
+- Existing matched-filter pipeline (`models/photometry/`) works but still references legacy PSFNet (never trained). Will migrate to PSFField after astrometry validation.
+
+This is an active research codebase. Architecture and training defaults evolve with experiments.

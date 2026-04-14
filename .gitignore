@@ -42,6 +42,16 @@ runs/**
 !runs/.gitkeep
 !runs/README.md
 
+# Checkpoints (local artifacts)
+checkpoints/**
+!checkpoints/.gitkeep
+!checkpoints/README.md
+
+# Model checkpoints under models/
+models/checkpoints/**
+!models/checkpoints/.gitkeep
+!models/checkpoints/README.md
+
 # =========================
 # Large scientific files
 # =========================
@@ -79,3 +89,6 @@ Thumbs.db
 
 # Codex session artifact
 .codex
+
+# Claude session artifact
+.claude/

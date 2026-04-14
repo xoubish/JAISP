@@ -216,6 +216,7 @@ def select_stars(
     isolation_arcsec: float = 3.0,
     peak_saturation_quantile: float = 0.995,  # drop brightest 0.5 %
     detections_vis_px: Optional[np.ndarray] = None,   # [N, 2] float, optional
+    per_band_saturation_quantile: float = 0.95,   # drop top 5% peak per band
     device: Optional[torch.device] = None,
 ) -> Optional[StarCatalog]:
     """
@@ -418,6 +419,35 @@ def select_stars(
     ann_full = (r_full > 7.0) & (r_full <= 9.5)
     bg_all = stamps[..., ann_full].median(dim=-1).values                  # [N, 10]
     stamps = stamps - bg_all.unsqueeze(-1).unsqueeze(-1)
+
+    # --- Per-band saturation rejection --------------------------------------
+    # Drop stars whose peak pixel in ANY band falls in the top quantile of
+    # peak values across this tile. Also require central pixels finite and
+    # rms > 0 (no flagged pixels) in every band.
+    peak_any = stamps.amax(dim=(-2, -1))                                   # [N, 10]
+    central_rms = rms_stamps[:, :, int(half_s), int(half_s)]               # [N, 10]
+    good_rms = (central_rms > 1e-6).all(dim=-1)                            # [N]
+    finite_peaks = torch.isfinite(peak_any).all(dim=-1)                    # [N]
+
+    if peak_any.shape[0] >= 5:
+        q = float(per_band_saturation_quantile)
+        thresh = torch.quantile(peak_any, q, dim=0)                        # [10]
+        not_saturated_any = (peak_any < thresh.unsqueeze(0)).all(dim=-1)   # [N]
+    else:
+        not_saturated_any = torch.ones(peak_any.shape[0], dtype=torch.bool,
+                                        device=device)
+
+    sat_keep = (good_rms & finite_peaks & not_saturated_any).cpu().numpy()
+    if sat_keep.sum() == 0:
+        return None
+    stamps     = stamps[sat_keep]
+    rms_stamps = rms_stamps[sat_keep]
+    vis_xy     = vis_xy[sat_keep]
+    rubin_xy   = rubin_xy[sat_keep]
+    fwhm_arcsec = fwhm_arcsec[sat_keep]
+    peak       = peak[sat_keep]
+    snr        = snr[sat_keep]
+    N = vis_xy.shape[0]
 
     # --- Crude per-band fluxes for SED init (sum within 3-px radius) --------
     inner_mask = (r_full < 3.0).to(stamps.dtype)

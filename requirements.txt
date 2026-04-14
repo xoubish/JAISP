@@ -10,6 +10,11 @@ fsspec
 s3fs
 h5py
 
+# ML / training
+torch
+tqdm
+wandb
+
 # Notebooks
 jupyter
 ipykernel

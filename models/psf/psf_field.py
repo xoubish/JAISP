@@ -274,10 +274,22 @@ class PSFField(nn.Module):
         siren_hidden: int = 128,
         siren_depth: int = 5,
         w0_first: float = 30.0,
+        envelope_r_rubin: float = 1.7,   # arcsec (0 disables)
+        envelope_r_euclid: float = 0.85, # arcsec
+        envelope_power: float = 4.0,
     ):
         super().__init__()
         self.sed_embed_dim = sed_embed_dim
         self.band_embed_dim = band_embed_dim
+        self.envelope_power = float(envelope_power)
+        # Per-band envelope radius in arcsec. Rubin is wider because both
+        # seeing-broadened and the training stamp angular support is larger.
+        r_per_band = torch.tensor(
+            [float(envelope_r_rubin)]  * N_RUBIN
+            + [float(envelope_r_euclid)] * (N_BANDS - N_RUBIN),
+            dtype=torch.float32,
+        )
+        self.register_buffer('envelope_r_arcsec', r_per_band)  # [10]
 
         self.tile_pos_enc = FourierFeatures(
             in_dim=2, num_freqs=tile_freqs, max_freq=8.0
@@ -409,6 +421,22 @@ class PSFField(nn.Module):
             sed_q.reshape(M, N_BANDS),
         ).view(N, S, S, K, K)
 
+        # --- Per-band radial envelope ---
+        # Suppresses SIREN ringing in data-starved wings: envelope ~1 inside
+        # band-specific r_core, falls off fast outside. Rubin gets wider
+        # r_core (broader seeing-limited PSFs) than Euclid. Disabled per band
+        # when its r_core ≤ 0.
+        r_core_per_star = self.envelope_r_arcsec[band_idx]   # [N]
+        if (r_core_per_star > 0).any():
+            r = xy_sub.norm(dim=-1)                           # [N, S, S, K, K]
+            r_core_q = r_core_per_star.view(N, 1, 1, 1, 1)
+            envelope = torch.where(
+                r_core_q > 0,
+                torch.exp(-((r / r_core_q.clamp(min=1e-6)) ** self.envelope_power)),
+                torch.ones_like(r),
+            )
+            intensity = intensity * envelope
+
         # --- Integrate over pixel (mean over sub-grid) ---
         stamps = intensity.mean(dim=(-2, -1))                # [N, S, S]
         return stamps
@@ -428,10 +456,12 @@ def analytic_optimal_flux(
     Closed-form maximum-likelihood flux estimate assuming Gaussian pixel noise:
         F* = Σ (D · M / σ²) / Σ (M² / σ²)
     """
-    inv_var = 1.0 / var.clamp(min=eps)
+    var_safe = var.clamp(min=eps)
+    inv_var = 1.0 / var_safe
     num = (data * model * inv_var).sum(dim=(-2, -1))
     den = (model * model * inv_var).sum(dim=(-2, -1)).clamp(min=eps)
-    return num / den                                         # [N]
+    flux = num / den                                         # [N]
+    return torch.nan_to_num(flux, nan=0.0, posinf=0.0, neginf=0.0)
 
 
 def chi2_loss(
@@ -440,19 +470,66 @@ def chi2_loss(
     var:   torch.Tensor,  # [N, S, S]
     flux:  Optional[torch.Tensor] = None,  # [N] — if None, compute analytically
     reduce: str = 'mean',
+    huber_delta: float = 0.0,              # 0 = plain chi²; >0 = robust
+    var_floor_frac: float = 0.0,           # minimum σ = frac × peak(data)
+    return_per_star: bool = False,
 ) -> torch.Tensor:
     """
-    Heteroscedastic chi² loss summed over pixels, then reduced over stars.
+    Heteroscedastic chi² (optionally Huber-robust) with variance floor.
 
-    Flux is detached from the graph when computed analytically — we don't
-    want gradients to flow through the flux estimate because it's an
-    implicit function of the PSF (would create a two-sided dependence).
+    Variance floor
+    --------------
+    `var_floor_frac` adds a per-star minimum σ = frac × max(data). This caps
+    peak-pixel SNR — essential for bright stars where Poisson noise is so
+    small that any model imperfection explodes the χ². With frac=0.02, peak
+    SNR is capped at 50; the model only has to be accurate to ~2 % at bright
+    pixels, which is the realistic precision floor of any PSF model.
+
+    Huber robustness
+    ----------------
+    With `huber_delta>0`, per-pixel contributions above δ² are linearised:
+      quadratic (plain χ²) when |resid|/σ ≤ δ,
+      linear             when |resid|/σ > δ.
+    Outlier pixels (cosmic rays, saturation spikes, binary neighbours) still
+    contribute but stop dominating the gradient. Typical δ ∈ [2, 5].
+
+    Flux is detached from the graph when computed analytically.
     """
+    # Sanitize inputs BEFORE any graph-forming ops. Using nan_to_num on the
+    # final value is not enough — NaN data poisons the backward pass even if
+    # the forward value is finite (0 × NaN = NaN in the gradient).
+    data_safe  = torch.nan_to_num(data,  nan=0.0, posinf=0.0, neginf=0.0)
+    model_safe = torch.nan_to_num(model, nan=0.0, posinf=0.0, neginf=0.0)
+
     if flux is None:
-        flux = analytic_optimal_flux(data, model, var).detach()  # [N]
-    resid = data - flux.view(-1, 1, 1) * model
-    chi2_per_pix = resid ** 2 / var.clamp(min=1e-12)
+        flux = analytic_optimal_flux(data_safe, model_safe, var).detach()
+    flux = torch.nan_to_num(flux, nan=0.0, posinf=0.0, neginf=0.0)
+
+    # Variance floor: σ_min = max(var_floor_frac × peak_data,  √1e-8)
+    if var_floor_frac > 0.0:
+        peak = data_safe.amax(dim=(-2, -1), keepdim=True).clamp(min=1e-6)
+        var_floor = (var_floor_frac * peak) ** 2
+        var_eff = torch.maximum(var, var_floor).clamp(min=1e-8)
+    else:
+        var_eff = var.clamp(min=1e-8)
+
+    # Bound residual magnitude to prevent float32 overflow when squaring.
+    # Real residuals are bounded by peak flux (~1e2 typical); 1e3 ceiling is
+    # a safety net that never activates in converged training.
+    resid = (data_safe - flux.view(-1, 1, 1) * model_safe).clamp(-1e3, 1e3)
+    z2 = (resid ** 2) / var_eff
+
+    # Huber: quadratic for |z| ≤ δ, linear for |z| > δ
+    if huber_delta > 0:
+        z_abs = z2.sqrt()
+        linear = (2.0 * huber_delta * z_abs - huber_delta * huber_delta)
+        chi2_per_pix = torch.where(z_abs <= huber_delta, z2, linear)
+    else:
+        chi2_per_pix = z2
+
     chi2_per_star = chi2_per_pix.sum(dim=(-2, -1))               # [N]
+    if return_per_star:
+        return chi2_per_star
     if reduce == 'mean':
         return chi2_per_star.mean()
     elif reduce == 'sum':
