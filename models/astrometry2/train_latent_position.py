@@ -51,7 +51,7 @@ from astrometry2.dataset import (
     _to_float32,
 )
 from astrometry2.latent_position_head import (
-    FrozenV7Encoder,
+    FrozenEncoder,
     LatentPositionHead,
     load_latent_position_head,
 )
@@ -117,22 +117,34 @@ def detect_and_refine_vis(
     max_sources: int = 800,
     refine_radius: int = 3,
     flux_floor_sigma: float = 1.5,
+    psf_field=None,
+    psf_device=None,
+    detections_vis_px: np.ndarray = None,
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """Detect sources in VIS and PSF-refine their centroids.
+    """Detect sources in VIS and refine centroids.
+
+    Uses PSFField-template centroiding if ``psf_field`` is provided (better
+    sub-pixel accuracy from learned, spatially-varying, chromatic PSF model),
+    otherwise falls back to the classical 2D-Gaussian ``refine_centroids_psf_fit``.
+
+    If ``detections_vis_px`` is given, skip internal detection and use those
+    positions as candidates (e.g. CenterNet pseudo-labels).
 
     Returns
     -------
-    vis_xy : [N, 2]  PSF-fit centroids (x, y) in VIS pixels
+    vis_xy : [N, 2]  refined centroids (x, y) in VIS pixels
     vis_snr : [N]  peak SNR per source
     """
-    vx, vy = detect_sources(
-        vis_img, nsig=nsig, smooth_sigma=smooth,
-        min_dist=min_dist, max_sources=max_sources,
-    )
-    if vx.size == 0:
-        return np.zeros((0, 2), dtype=np.float32), np.zeros(0, dtype=np.float32)
-
-    seed_xy = np.stack([vx, vy], axis=1).astype(np.float32)
+    if detections_vis_px is not None and detections_vis_px.shape[0] > 0:
+        seed_xy = detections_vis_px.astype(np.float32)
+    else:
+        vx, vy = detect_sources(
+            vis_img, nsig=nsig, smooth_sigma=smooth,
+            min_dist=min_dist, max_sources=max_sources,
+        )
+        if vx.size == 0:
+            return np.zeros((0, 2), dtype=np.float32), np.zeros(0, dtype=np.float32)
+        seed_xy = np.stack([vx, vy], axis=1).astype(np.float32)
 
     # Filter by signal presence.
     keep = signal_mask_in_band(
@@ -142,10 +154,22 @@ def detect_and_refine_vis(
         return np.zeros((0, 2), dtype=np.float32), np.zeros(0, dtype=np.float32)
     seed_xy = seed_xy[keep]
 
-    vis_xy, vis_snr, _ = refine_centroids_psf_fit(
-        vis_img, seed_xy, radius=refine_radius,
-        flux_floor_sigma=flux_floor_sigma, fwhm_guess=2.5,
-    )
+    # PSFField centroiding (learned, chromatic, spatially-varying) or fallback
+    if psf_field is not None:
+        from psf.centroid_refinement import refine_centroids_psf_field
+        vis_xy, vis_snr, _ = refine_centroids_psf_field(
+            vis_img, seed_xy, psf_field,
+            band_name='euclid_VIS',
+            tile_hw=vis_img.shape,
+            device=psf_device,
+            radius=refine_radius,
+            flux_floor_sigma=flux_floor_sigma,
+        )
+    else:
+        vis_xy, vis_snr, _ = refine_centroids_psf_fit(
+            vis_img, seed_xy, radius=refine_radius,
+            flux_floor_sigma=flux_floor_sigma, fwhm_guess=2.5,
+        )
     return vis_xy.astype(np.float32), vis_snr.astype(np.float32)
 
 
@@ -269,7 +293,7 @@ def compute_metrics(
 
 def make_preview_figure(
     head: LatentPositionHead,
-    frozen_encoder: FrozenV7Encoder,
+    frozen_encoder: FrozenEncoder,
     tile_pair: Tuple[str, str, str],
     device: torch.device,
     args,
@@ -420,10 +444,76 @@ def make_preview_figure(
 # Training loop
 # ============================================================
 
+def _prefetch_tile(
+    tile_id, rubin_path, euclid_path,
+    frozen_encoder, enc_device, train_device, args, vis_hw_out,
+):
+    """Encode one tile on `enc_device`, transfer features to `train_device`.
+
+    Returns None on failure, or a dict with ready-to-train tensors.
+    Used by the dual-GPU prefetch thread (encoder on GPU 0, head on GPU 1).
+    """
+    try:
+        img_t, rms_t, vis_hw, vis_wcs = load_tile_data(
+            rubin_path, euclid_path, enc_device)
+    except Exception:
+        return None
+    vis_hw_out.append(vis_hw)
+
+    enc_out = frozen_encoder.encode_tile(img_t, rms_t)
+    del img_t, rms_t
+
+    # Transfer features to the training device
+    bottleneck = enc_out['bottleneck'].to(train_device)
+    vis_stem = enc_out['vis_stem'].to(train_device)
+    fused_hw = enc_out['fused_hw']
+
+    # Detection + centroiding (CPU-bound, runs on any thread)
+    try:
+        edata = np.load(euclid_path, allow_pickle=True)
+        vis_img_np_arr = np.nan_to_num(_to_float32(edata['img_VIS']), nan=0.0)
+    except Exception:
+        return None
+
+    det_px = None
+    _cn = getattr(args, '_centernet_labels_dict', None)
+    if _cn is not None and tile_id in _cn:
+        entry = _cn[tile_id]
+        xy_norm = entry[0] if isinstance(entry, tuple) else entry
+        H_vis, W_vis = vis_hw
+        det_px = np.stack([
+            xy_norm[:, 0] * W_vis, xy_norm[:, 1] * H_vis,
+        ], axis=1).astype(np.float32)
+
+    vis_xy, vis_snr = detect_and_refine_vis(
+        vis_img_np_arr, vis_wcs,
+        nsig=args.vis_nsig, smooth=args.vis_smooth,
+        min_dist=args.vis_min_dist, max_sources=args.max_sources_vis,
+        refine_radius=args.refine_radius,
+        flux_floor_sigma=args.refine_flux_floor_sigma,
+        psf_field=getattr(args, '_psf_field', None),
+        psf_device=enc_device,
+        detections_vis_px=det_px,
+    )
+    if vis_xy.shape[0] < 5:
+        return None
+
+    return {
+        'bottleneck': bottleneck,
+        'vis_stem': vis_stem,
+        'fused_hw': fused_hw,
+        'vis_hw': vis_hw,
+        'vis_xy': vis_xy,
+        'vis_wcs': vis_wcs,
+        'tile_id': tile_id,
+        'euclid_path': euclid_path,
+    }
+
+
 def run_epoch(
     split_name: str,
     pairs: Sequence[Tuple[str, str, str]],
-    frozen_encoder: FrozenV7Encoder,
+    frozen_encoder: FrozenEncoder,
     head: LatentPositionHead,
     optimizer: Optional[torch.optim.Optimizer],
     device: torch.device,
@@ -440,43 +530,102 @@ def run_epoch(
 
     order = rng.permutation(len(pairs)) if is_train else np.arange(len(pairs))
 
-    for idx in order:
+    # --- Dual-GPU prefetch mode ---
+    # GPU 0 encodes + detects tiles in a background thread;
+    # GPU 1 trains the head on the pre-encoded features.
+    dual_gpu = getattr(args, 'dual_gpu', False)
+    if dual_gpu:
+        from concurrent.futures import ThreadPoolExecutor
+        enc_device = torch.device('cuda:0')
+        frozen_encoder.to(enc_device)
+        if getattr(args, '_psf_field', None) is not None:
+            args._psf_field.to(enc_device)
+
+    def _get_tile_data(idx):
+        """Produce encoded tile data (dual or single GPU)."""
         tile_id, rubin_path, euclid_path = pairs[idx]
-        try:
-            img_t, rms_t, vis_hw, vis_wcs = load_tile_data(rubin_path, euclid_path, device)
-        except Exception as exc:
-            print(f'[{split_name}] skip {tile_id}: load failed ({exc})')
+        if dual_gpu:
+            vis_hw_box = []
+            result = _prefetch_tile(
+                tile_id, rubin_path, euclid_path,
+                frozen_encoder, enc_device, device, args, vis_hw_box,
+            )
+            return result
+        else:
+            # --- Original single-GPU path ---
+            try:
+                img_t, rms_t, vis_hw, vis_wcs = load_tile_data(
+                    rubin_path, euclid_path, device)
+            except Exception:
+                return None
+            enc_out = frozen_encoder.encode_tile(img_t, rms_t)
+            bottleneck = enc_out['bottleneck']
+            vis_stem = enc_out['vis_stem']
+            fused_hw = enc_out['fused_hw']
+            del img_t, rms_t
+            try:
+                edata = np.load(euclid_path, allow_pickle=True)
+                vis_img_np_arr = np.nan_to_num(
+                    _to_float32(edata['img_VIS']), nan=0.0)
+            except Exception:
+                return None
+            det_px = None
+            _cn = getattr(args, '_centernet_labels_dict', None)
+            if _cn is not None and tile_id in _cn:
+                entry = _cn[tile_id]
+                xy_norm = entry[0] if isinstance(entry, tuple) else entry
+                H_vis, W_vis = vis_hw
+                det_px = np.stack([
+                    xy_norm[:, 0] * W_vis, xy_norm[:, 1] * H_vis,
+                ], axis=1).astype(np.float32)
+            vis_xy, vis_snr = detect_and_refine_vis(
+                vis_img_np_arr, vis_wcs,
+                nsig=args.vis_nsig, smooth=args.vis_smooth,
+                min_dist=args.vis_min_dist,
+                max_sources=args.max_sources_vis,
+                refine_radius=args.refine_radius,
+                flux_floor_sigma=args.refine_flux_floor_sigma,
+                psf_field=getattr(args, '_psf_field', None),
+                psf_device=device,
+                detections_vis_px=det_px,
+            )
+            if vis_xy.shape[0] < 5:
+                return None
+            return {
+                'bottleneck': bottleneck, 'vis_stem': vis_stem,
+                'fused_hw': fused_hw, 'vis_hw': vis_hw,
+                'vis_xy': vis_xy, 'vis_wcs': vis_wcs,
+                'tile_id': tile_id, 'euclid_path': euclid_path,
+            }
+
+    # Submit first tile ahead of time in dual-GPU mode
+    prefetch_pool = ThreadPoolExecutor(max_workers=1) if dual_gpu else None
+    pending_future = None
+    if prefetch_pool and len(order) > 0:
+        pending_future = prefetch_pool.submit(_get_tile_data, order[0])
+
+    for i, idx in enumerate(order):
+        # Get current tile's data (from prefetch or inline)
+        if pending_future is not None:
+            tile_data = pending_future.result()
+            # Submit NEXT tile for prefetch
+            if i + 1 < len(order):
+                pending_future = prefetch_pool.submit(
+                    _get_tile_data, order[i + 1])
+            else:
+                pending_future = None
+        else:
+            tile_data = _get_tile_data(idx)
+
+        if tile_data is None:
             continue
 
-        # --- Frozen encoder pass (no gradients) ---
-        enc_out = frozen_encoder.encode_tile(img_t, rms_t)
-        bottleneck = enc_out['bottleneck']
-        vis_stem = enc_out['vis_stem']
-        fused_hw = enc_out['fused_hw']
-
-        # Free encoder inputs (large tensors).
-        del img_t, rms_t
-
-        # --- Detect and centroid sources ---
-        vis_img_np = bottleneck.new_tensor(0)  # placeholder
-        # Re-read the VIS image for detection (it was moved to GPU; read from disk again).
-        try:
-            edata = np.load(euclid_path, allow_pickle=True)
-            vis_img_np_arr = np.nan_to_num(_to_float32(edata['img_VIS']), nan=0.0)
-        except Exception:
-            continue
-
-        vis_xy, vis_snr = detect_and_refine_vis(
-            vis_img_np_arr, vis_wcs,
-            nsig=args.vis_nsig,
-            smooth=args.vis_smooth,
-            min_dist=args.vis_min_dist,
-            max_sources=args.max_sources_vis,
-            refine_radius=args.refine_radius,
-            flux_floor_sigma=args.refine_flux_floor_sigma,
-        )
-        if vis_xy.shape[0] < 5:
-            continue
+        bottleneck = tile_data['bottleneck']
+        vis_stem   = tile_data['vis_stem']
+        fused_hw   = tile_data['fused_hw']
+        vis_hw     = tile_data['vis_hw']
+        vis_xy     = tile_data['vis_xy']
+        vis_wcs    = tile_data['vis_wcs']
 
         batch = build_tile_batch(
             vis_xy, vis_wcs,
@@ -521,7 +670,10 @@ def run_epoch(
         n_sources += batch['positions'].shape[0]
 
         # Free large tensors between tiles.
-        del bottleneck, vis_stem, enc_out, batch, out
+        del bottleneck, vis_stem, batch, out
+
+    if prefetch_pool is not None:
+        prefetch_pool.shutdown(wait=False)
 
     denom = max(1, n_tiles)
     result = {k: v / denom for k, v in agg.items()}
@@ -540,8 +692,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument('--rubin-dir', type=str, required=True)
     p.add_argument('--euclid-dir', type=str, required=True)
-    p.add_argument('--v7-checkpoint', type=str, required=True,
-                   help='Path to the frozen V7 foundation model checkpoint.')
+    p.add_argument('--foundation-checkpoint', type=str, required=True,
+                   help='Path to the frozen foundation model (v7 or v8, auto-detected).')
+    p.add_argument('--psf-checkpoint', type=str, default=None,
+                   help='Path to a trained PSFField checkpoint (e.g. psf_field_v3.pt). '
+                        'If provided, centroid labels use PSFField-template fitting '
+                        'instead of classical 2D Gaussian.')
+    p.add_argument('--centernet-labels', type=str, default=None,
+                   help='Path to CenterNet pseudo_labels .pt (e.g. '
+                        'data/detection_labels/centernet_v8_r2_790.pt). '
+                        'If provided, VIS-normalised detections replace classical '
+                        'peak-finding for source candidates.')
     p.add_argument('--output-dir', type=str,
                    default='models/checkpoints/latent_position_head')
 
@@ -578,6 +739,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--val-frac', type=float, default=0.15)
     p.add_argument('--seed', type=int, default=42)
     p.add_argument('--device', type=str, default='')
+    p.add_argument('--dual-gpu', action='store_true',
+                   help='Use GPU 0 for frozen encoder + detection, '
+                        'GPU 1 for head training. Pre-encodes tiles in a '
+                        'background thread to overlap encoder with head.')
     p.add_argument('--vis-every', type=int, default=3,
                    help='Log diagnostic preview figure every N epochs (default: 3).')
     p.add_argument('--quiver-magnify', type=float, default=10.0,
@@ -606,7 +771,7 @@ def train(args):
 
     # --- Model ---
     frozen_encoder, head = load_latent_position_head(
-        args.v7_checkpoint,
+        args.foundation_checkpoint,
         device=device,
         bottleneck_out=args.bottleneck_out,
         stem_out=args.stem_out,
@@ -614,6 +779,39 @@ def train(args):
         bottleneck_window=args.bottleneck_window,
         stem_window=args.stem_window,
     )
+
+    # --- PSFField for centroid labels (optional) ---
+    if args.psf_checkpoint:
+        import torch as _t
+        from psf.psf_field import PSFField as _PSFField
+        _ckpt = _t.load(args.psf_checkpoint, map_location='cpu', weights_only=False)
+        _cfg = _ckpt['config']
+        _psf = _PSFField(
+            sed_embed_dim=_cfg['sed_embed_dim'],
+            band_embed_dim=_cfg['band_embed_dim'],
+            tile_freqs=_cfg['tile_freqs'],
+            siren_hidden=_cfg['siren_hidden'],
+            siren_depth=_cfg['siren_depth'],
+            w0_first=_cfg['w0_first'],
+            envelope_r_rubin=_cfg.get('envelope_r_rubin', 0.0),
+            envelope_r_euclid=_cfg.get('envelope_r_euclid', 0.0),
+            envelope_power=_cfg.get('envelope_power', 4.0),
+        ).to(device).eval()
+        _psf.load_state_dict(_ckpt['psf_field_state'])
+        args._psf_field = _psf
+        print(f'Loaded PSFField from {args.psf_checkpoint}')
+    else:
+        args._psf_field = None
+
+    # --- CenterNet labels (optional) ---
+    if args.centernet_labels:
+        import torch as _t
+        _pl = _t.load(args.centernet_labels, map_location='cpu', weights_only=False)
+        args._centernet_labels_dict = _pl['labels'] if 'labels' in _pl else _pl
+        print(f'Loaded CenterNet labels for '
+              f'{len(args._centernet_labels_dict)} tiles')
+    else:
+        args._centernet_labels_dict = None
 
     optimizer = torch.optim.AdamW(
         head.parameters(), lr=args.lr, weight_decay=args.weight_decay,

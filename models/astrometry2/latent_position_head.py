@@ -300,21 +300,22 @@ class LatentPositionHead(nn.Module):
 # Frozen encoder wrapper (runs once per tile)
 # ============================================================
 
-class FrozenV7Encoder(nn.Module):
-    """Wrapper that runs the frozen V7 encoder and extracts the VIS stem.
+class FrozenEncoder(nn.Module):
+    """Wrapper that runs a frozen JAISP encoder (v7 or v8) and extracts VIS stem.
 
     Call ``encode_tile()`` once per tile to get:
       - bottleneck  [1, 256, H_bn, W_bn]
       - vis_stem    [1, 64, H_vis, W_vis]
       - fused_hw    (H_bn, W_bn)
 
+    Works with both V7 (0.8"/px bottleneck) and V8 (0.4"/px bottleneck).
     All parameters are frozen; no gradients flow through this module.
     """
 
-    def __init__(self, v7_model: JAISPFoundationV7):
+    def __init__(self, foundation_model):
         super().__init__()
-        self.encoder = v7_model.encoder
-        self.vis_stem = v7_model.encoder.stems['euclid_VIS']
+        self.encoder = foundation_model.encoder
+        self.vis_stem = foundation_model.encoder.stems['euclid_VIS']
         self.eval()
         for p in self.parameters():
             p.requires_grad = False
@@ -350,40 +351,62 @@ class FrozenV7Encoder(nn.Module):
         }
 
 
+# Backward-compatible alias
+FrozenV7Encoder = FrozenEncoder
+
+
 # ============================================================
 # Factory
 # ============================================================
 
 def load_latent_position_head(
-    v7_checkpoint: str,
+    foundation_checkpoint: str,
     device: torch.device = None,
     bottleneck_out: int = 128,
     stem_out: int = 64,
     mlp_hidden: int = 128,
-    bottleneck_window: int = 5,
+    bottleneck_window: int = 0,
     stem_window: int = 17,
-) -> Tuple[FrozenV7Encoder, LatentPositionHead]:
-    """Load frozen V7 encoder + fresh LatentPositionHead.
+) -> Tuple[FrozenEncoder, LatentPositionHead]:
+    """Load frozen encoder (v7 or v8) + fresh LatentPositionHead.
+
+    Parameters
+    ----------
+    foundation_checkpoint : path to any JAISP foundation checkpoint.
+        ``load_foundation()`` auto-detects v7 vs v8.
+    bottleneck_window : 0 = auto-scale to ~4" physical coverage
+        (5 for v7 @ 0.8"/px, 11 for v8 @ 0.4"/px). Explicit values
+        override the auto-scaling.
 
     Returns
     -------
     (frozen_encoder, head)
-        frozen_encoder : FrozenV7Encoder  (all params frozen)
+        frozen_encoder : FrozenEncoder  (all params frozen)
         head           : LatentPositionHead (trainable)
     """
     if device is None:
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    ckpt = torch.load(v7_checkpoint, map_location='cpu', weights_only=False)
+    ckpt = torch.load(foundation_checkpoint, map_location='cpu', weights_only=False)
     cfg = ckpt.get('config', {})
 
-    foundation = load_foundation(v7_checkpoint, device=torch.device('cpu'))
+    foundation = load_foundation(foundation_checkpoint, device=torch.device('cpu'))
 
     hidden_ch = cfg.get('hidden_ch', 256)
     stem_ch = cfg.get('stem_ch', 64)
     fused_scale = cfg.get('fused_pixel_scale_arcsec', 0.8)
 
-    frozen_encoder = FrozenV7Encoder(foundation).to(device)
+    # Auto-scale bottleneck window to ~4" physical coverage
+    if bottleneck_window <= 0:
+        target_arcsec = 4.0
+        raw = round(target_arcsec / fused_scale)
+        bottleneck_window = raw if raw % 2 == 1 else raw + 1   # ensure odd
+        bottleneck_window = max(5, bottleneck_window)
+    print(f'  bottleneck_window={bottleneck_window}  '
+          f'(physical coverage: {bottleneck_window * fused_scale:.1f}" '
+          f'at {fused_scale:.2f}"/px)')
+
+    frozen_encoder = FrozenEncoder(foundation).to(device)
 
     head = LatentPositionHead(
         hidden_ch=hidden_ch,
@@ -400,6 +423,12 @@ def load_latent_position_head(
     n_frozen = sum(p.numel() for p in frozen_encoder.parameters())
     n_trainable = sum(p.numel() for p in head.parameters() if p.requires_grad)
     print(f'LatentPositionHead: {n_trainable/1e6:.2f}M trainable, '
-          f'{n_frozen/1e6:.1f}M frozen encoder')
+          f'{n_frozen/1e6:.1f}M frozen encoder  '
+          f'({"v8" if abs(fused_scale - 0.8) > 0.01 else "v7"} foundation)')
 
     return frozen_encoder, head
+
+
+# Backward-compatible alias
+def load_latent_position_head_v7(v7_checkpoint, **kwargs):
+    return load_latent_position_head(v7_checkpoint, **kwargs)
