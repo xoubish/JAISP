@@ -65,6 +65,7 @@ from astrometry2.dataset import (
     discover_tile_pairs,
 )
 from astrometry2.pinn_field_solver import fit_pinn_field, evaluate_pinn_mesh
+from astrometry2.nn_field_solver import fit_nn_field, evaluate_nn_mesh
 
 
 # ============================================================
@@ -234,8 +235,17 @@ def load_anchors_from_cache(
     cache_path: str,
     bands: List[str] = ('r', 'i', 'g', 'z'),
     include_nisp: bool = False,
+    use_head_resid: bool = False,
 ) -> Dict[str, np.ndarray]:
-    """Load raw centroid offsets from an existing prediction cache.
+    """Load centroid offsets from a prediction cache.
+
+    Parameters
+    ----------
+    use_head_resid : if True, read ``{band}_head_resid`` instead of
+        ``{band}_raw``.  Use this when the cache was produced by
+        ``eval_latent_position.py --save-anchors`` and you want to fit
+        the residual field AFTER head correction (the smooth component
+        the head missed).
 
     Since the cache doesn't have PSF-fit SNR, we estimate per-source
     quality from per-tile residual scatter (sources whose offset is
@@ -253,6 +263,8 @@ def load_anchors_from_cache(
     all_band_idx = []
     all_tiles = []
 
+    offset_suffix = '_head_resid' if use_head_resid else '_raw'
+
     for band in all_bands:
         key = band if band.startswith('nisp_') else band
         if f'{key}_ra' not in cache:
@@ -261,8 +273,8 @@ def load_anchors_from_cache(
 
         ra = cache[f'{key}_ra']
         dec = cache[f'{key}_dec']
-        raw = cache[f'{key}_raw']        # [N, 2] arcsec
-        tiles = cache[f'{key}_tiles']    # [N] tile IDs
+        raw = cache[f'{key}{offset_suffix}']   # [N, 2] arcsec
+        tiles = cache[f'{key}_tiles']           # [N] tile IDs
 
         # Compute per-tile median offset and residual
         unique_tiles = np.unique(tiles)
@@ -386,8 +398,9 @@ def fit_and_export(
     lambda_band: float = 0.1,
     n_collocation: int = 15000,
     device: str = None,
+    solver: str = 'pinn',
 ):
-    """Fit global PINN and export concordance FITS."""
+    """Fit global field solver (PINN or NN) and export concordance FITS."""
     import torch
     from astropy.io import fits
     from astropy.wcs import WCS
@@ -411,32 +424,52 @@ def fit_and_export(
     unique_bands = np.unique(band_idx)
     n_bands = int(unique_bands.max()) + 1
 
-    print(f'\nFitting PINN:')
+    solver_type = solver
+    print(f'\nFitting {solver_type.upper()}:')
     print(f'  {len(pos_arcsec)} anchors, {len(unique_bands)} bands')
     print(f'  Field extent: {pos_arcsec[:,0].ptp():.0f} × {pos_arcsec[:,1].ptp():.0f} arcsec')
     print(f'  Weight range: [{weights.min():.2f}, {weights.max():.2f}]')
     print(f'  Architecture: {n_layers} layers × {hidden_dim} hidden')
-    print(f'  Physics: λ_curl={lambda_curl}, λ_lapl={lambda_lapl}, '
-          f'λ_band={lambda_band}')
+    if solver_type == 'pinn':
+        print(f'  Physics: λ_curl={lambda_curl}, λ_lapl={lambda_lapl}, '
+              f'λ_band={lambda_band}')
+    else:
+        print(f'  Regularisation: weight_decay only (no physics constraints)')
     print(f'  Device: {device}')
     print()
 
-    model, meta = fit_pinn_field(
-        pos_arcsec=pos_arcsec,
-        offsets_arcsec=offsets,
-        weights=weights,
-        band_indices=band_idx,
-        hidden_dim=hidden_dim,
-        n_layers=n_layers,
-        n_bands=n_bands,
-        n_steps=n_steps,
-        lr=1e-3,
-        lambda_curl=lambda_curl,
-        lambda_lapl=lambda_lapl,
-        lambda_band=lambda_band,
-        n_collocation=n_collocation,
-        device=device,
-    )
+    if solver_type == 'pinn':
+        model, meta = fit_pinn_field(
+            pos_arcsec=pos_arcsec,
+            offsets_arcsec=offsets,
+            weights=weights,
+            band_indices=band_idx,
+            hidden_dim=hidden_dim,
+            n_layers=n_layers,
+            n_bands=n_bands,
+            n_steps=n_steps,
+            lr=1e-3,
+            lambda_curl=lambda_curl,
+            lambda_lapl=lambda_lapl,
+            lambda_band=lambda_band,
+            n_collocation=n_collocation,
+            device=device,
+        )
+    else:
+        # NN uses fewer layers than PINN (no physics losses to inject
+        # gradients at intermediate points → deep trunks don't train).
+        nn_layers = min(n_layers, 3)
+        model, meta = fit_nn_field(
+            pos_arcsec=pos_arcsec,
+            offsets_arcsec=offsets,
+            weights=weights,
+            band_indices=band_idx,
+            hidden_dim=hidden_dim,
+            n_layers=nn_layers,
+            n_bands=n_bands,
+            n_steps=n_steps,
+            device=device,
+        )
 
     # ── Evaluate on mesh and export FITS ──────────────────────────────
     x_range = pos_arcsec[:, 0].max() - pos_arcsec[:, 0].min()
@@ -468,36 +501,58 @@ def fit_and_export(
     hdr['DEC0'] = (dec0, 'Reference Dec [deg]')
     hdr['DSTEP'] = (dstep_arcsec, 'Mesh step [arcsec]')
     hdr['NANCHORS'] = (len(pos_arcsec), 'Total anchor sources')
-    hdr['METHOD'] = ('direct_pinn', 'Concordance method')
+    hdr['METHOD'] = (f'direct_{solver_type}', 'Concordance method')
 
     hdul = fits.HDUList([fits.PrimaryHDU()])
 
-    # Per-band fields (geometric + chromatic) — matches existing FITS format
-    # Extension names: {BAND}.DRA, {BAND}.DDE  (e.g. R.DRA, NISP_Y.DDE)
+    # Per-band fields
     first_result = None
-    for bi in unique_bands:
-        bname = band_names_map.get(int(bi), f'BAND{bi}')
-        result = evaluate_pinn_mesh(
-            model, meta, field_h, field_w, dstep=1,
-            pos_arcsec_anchors=pos_arcsec[band_idx == bi],
-            band_idx=int(bi),
-        )
-        if first_result is None:
-            first_result = result
-        hdul.append(fits.ImageHDU(result['dra'], header=hdr,
-                                  name=f'{bname}.DRA'))
-        hdul.append(fits.ImageHDU(result['ddec'], header=hdr,
-                                  name=f'{bname}.DDE'))
+    if solver_type == 'pinn':
+        # PINN has per-band chromatic corrections
+        for bi in unique_bands:
+            bname = band_names_map.get(int(bi), f'BAND{bi}')
+            result = evaluate_pinn_mesh(
+                model, meta, field_h, field_w, dstep=1,
+                pos_arcsec_anchors=pos_arcsec[band_idx == bi],
+                band_idx=int(bi),
+            )
+            if first_result is None:
+                first_result = result
+            hdul.append(fits.ImageHDU(result['dra'], header=hdr,
+                                      name=f'{bname}.DRA'))
+            hdul.append(fits.ImageHDU(result['ddec'], header=hdr,
+                                      name=f'{bname}.DDE'))
+    else:
+        # NN with chromatic head: per-band evaluation
+        for bi in unique_bands:
+            bname = band_names_map.get(int(bi), f'BAND{bi}')
+            result = evaluate_nn_mesh(
+                model, meta, field_h, field_w, dstep=1,
+                pos_arcsec_anchors=pos_arcsec[band_idx == bi],
+                band_idx=int(bi),
+            )
+            if first_result is None:
+                first_result = result
+            hdul.append(fits.ImageHDU(result['dra'], header=hdr,
+                                      name=f'{bname}.DRA'))
+            hdul.append(fits.ImageHDU(result['ddec'], header=hdr,
+                                      name=f'{bname}.DDE'))
 
-    # Shared coverage map (min distance to nearest anchor from ALL bands)
-    cov_result = evaluate_pinn_mesh(
-        model, meta, field_h, field_w, dstep=1,
-        pos_arcsec_anchors=pos_arcsec, band_idx=None,
-    )
-    if cov_result['coverage'] is not None:
+    # Shared coverage map
+    if solver_type == 'pinn':
+        cov_result = evaluate_pinn_mesh(
+            model, meta, field_h, field_w, dstep=1,
+            pos_arcsec_anchors=pos_arcsec, band_idx=None,
+        )
+    else:
+        cov_result = evaluate_nn_mesh(
+            model, meta, field_h, field_w, dstep=1,
+            pos_arcsec_anchors=pos_arcsec, band_idx=None,
+        )
+    if cov_result.get('coverage') is not None:
         hdul.append(fits.ImageHDU(cov_result['coverage'], header=hdr,
                                   name='COVERAGE'))
-    geo_result = cov_result  # for stats below
+    geo_result = cov_result
 
     hdul.writeto(output_path, overwrite=True)
     print(f'\nFITS written: {output_path}')
@@ -508,7 +563,7 @@ def fit_and_export(
     print('QUALITY METRICS')
     print('=' * 60)
 
-    # Evaluate PINN at anchor positions
+    # Evaluate solver at anchor positions
     pos_norm = (pos_arcsec - meta['pos_min']) / meta['pos_scale'] * 2.0 - 1.0
     model.eval()
     with torch.no_grad():
@@ -579,6 +634,15 @@ def build_parser():
                        help='Include NISP Y/J/H bands (default: True)')
     bands.add_argument('--no-nisp', action='store_true',
                        help='Exclude NISP bands')
+    bands.add_argument('--use-head-resid', action='store_true',
+                       help='Read head_resid (post-head residuals) instead of '
+                            'raw offsets from the anchor cache. Use when the '
+                            'cache comes from eval_latent_position --save-anchors.')
+
+    p.add_argument('--solver', choices=['pinn', 'nn'], default='pinn',
+                   help='Field solver: "pinn" (physics-informed, curl-free + '
+                        'Laplacian + band consistency) or "nn" (plain MLP, '
+                        'regularised by weight decay only).')
 
     pinn = p.add_argument_group('PINN')
     pinn.add_argument('--n-steps', type=int, default=8000)
@@ -612,6 +676,7 @@ def main():
             args.cache,
             bands=args.bands,
             include_nisp=use_nisp,
+            use_head_resid=args.use_head_resid,
         )
     elif args.rubin_dir and args.euclid_dir:
         print(f'Full reprocessing: {args.rubin_dir} + {args.euclid_dir}')
@@ -651,6 +716,7 @@ def main():
         lambda_band=args.lambda_band,
         n_collocation=args.n_collocation,
         device=args.device,
+        solver=args.solver,
     )
 
 

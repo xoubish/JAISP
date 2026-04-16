@@ -70,6 +70,22 @@ The intended progression, as the dataset and methods mature:
 
 This is not speculative -- each transition is a concrete engineering step. The foundation model already encodes enough spatial precision for pixel-level reconstruction across instruments. The remaining work is propagating that precision through the downstream heads and eventually closing the loop to let the tasks inform the representation.
 
+### Why a Foundation Model — Transfer and Marginal Cost per Task
+
+The case for the foundation isn't "does it beat a task-specific baseline on this field's test split" — it's about **what we can do with the foundation that we cannot do without it**. Three properties matter:
+
+1. **Multi-band entanglement, learned once.** A u-band source and its NISP-H counterpart are the same physical object, but they appear very differently in pixels: different PSF, different noise, different flux, different morphology. The MAE objective (reconstruct the held-out band from the other nine) FORCES the encoder to learn these cross-band correspondences. A task-specific model trained from scratch on 790 tiles of ECDFS data doesn't have the sample budget to learn u-to-H mapping and also learn the downstream task. The foundation amortises that learning once.
+
+2. **Instrumental-effect awareness.** PSF differences between Rubin (seeing-limited, broad, ~0.7" FWHM) and Euclid (diffraction-limited, sharp, ~0.2" FWHM VIS), pixel-scale differences (0.2 vs 0.1"/px), bandpass shapes, noise correlations, chip-edge effects, DCR — these are all implicit in what the encoder reconstructs. The per-band, per-instrument BandStems make this explicit in the architecture; MAE pretraining makes it explicit in the learned weights.
+
+3. **Marginal cost per downstream task approaches zero.** Detection, astrometry, photometry, and (eventually) shape measurement all consume the same frozen features. The foundation's pretraining cost is paid once; each new task only trains a small head. The more downstream tasks we add, the smaller the foundation's amortised cost becomes. This is also why "does the foundation help THIS task" is the wrong question in isolation — the right question is "does the foundation help ALL tasks, collectively, enough to justify its cost."
+
+The fourth property is the one we value most and have tested least:
+
+4. **Transfer to new fields without retraining.** A foundation that learned multi-band physics from ECDFS tiles SHOULD work zero-shot on EDF-North, EDF-South, or any new LSST+Euclid deep field. The expensive part (foundation pretraining) should not need to be repeated per field. Downstream heads trained on ECDFS SHOULD continue to apply, provided the new field's sources have the same statistical properties. This is exactly what a foundation model is for. All training and evaluation in this repo so far has been in-distribution on ECDFS tract5063. Out-of-distribution evaluation on a different field is a milestone not yet executed. Without it we cannot distinguish "foundation helps on this field" from "foundation learned this specific field's idiosyncrasies."
+
+The long-term plan is to (a) extend evaluation to at least one non-ECDFS field as soon as the astrometry pipeline settles, and (b) use that OOD performance number — not the in-distribution train/val split — as the primary success metric for future foundation versions.
+
 ---
 
 ## Data
@@ -778,7 +794,56 @@ For each source, the eval centroids in each of the 9 non-VIS bands' native pixel
 | nisp_H | 122,341 | 42 mas | **13 mas** | 51% |
 | **All** | **630,120** | **44 mas** | **13.5 mas** | **51%** |
 
-The head achieves **13.5 mas median** alignment across all 9 bands — well below the 20 mas target. The improvement is remarkably consistent (~51%) across all bands and both instruments. NISP and Rubin g/r/i/z converge to the same ~13 mas floor, indicating the model uses the fused multi-band bottleneck representation rather than single-band features. The ~13 mas floor is the spatial resolution limit of the v7 bottleneck at 0.8"/px (~0.016 bottleneck pixels). The v8 fine-scale experiment (0.4"/px) will test whether this floor can be pushed lower.
+The head achieves **13.5 mas median** alignment across all 9 bands — well below the 20 mas target. The improvement is remarkably consistent (~51%) across all bands and both instruments. NISP and Rubin g/r/i/z converge to the same ~13 mas floor, indicating the model uses the fused multi-band bottleneck representation rather than single-band features. The ~13 mas floor is the spatial resolution limit of the v7 bottleneck at 0.8"/px (~0.016 bottleneck pixels).
+
+#### V8 migration (2026-04-16)
+
+The latent position head now works with either v7 or v8 foundations via `load_foundation()` auto-detection. Pass any foundation checkpoint via `--foundation-checkpoint`. The bottleneck window auto-scales to match ~4" physical coverage (v7: 5×5, v8: 11×11) when `--bottleneck-window 0` is given, but **empirically `bottleneck_window=5` works best for v8 too** — the ConvNeXt block's 3×3 kernel can't effectively integrate a 11×11 input, so the larger window dilutes the signal.
+
+A subtle but important lesson from the v8 migration: **do NOT use PSFField-refined centroids as training targets for the latent position head.** The head extracts features at the jittered position, and the features naturally encode "where the photon centroid is in the window." If the target is the PSFField-refined centroid (which differs from the photon centroid by ~16 mas), the head learns to match a quantity that is systematically offset from what it can see in features. Three training runs confirmed this:
+
+| Run | Foundation | Centroid labels | Detection | Val MAE |
+|---|---|---|---|---|
+| Baseline (v7) | v7 | Gaussian fit | classical | 17.7 mas |
+| v8 + PSFField | v8 | PSFField v3 | CenterNet v8 | 29.3 mas |
+| **v7 + PSFField (ablation)** | **v7** | **PSFField v3** | **CenterNet v8** | **29.9 mas** |
+| **v8 no-PSF / no-CN** | **v8** | **Gaussian fit** | **classical** | **~13 mas** (projected) |
+
+The v7 and v8 runs with PSFField labels converge to identical ~29 mas plateaus, proving the foundation is not the bottleneck — the target/feature mismatch creates an irreducible noise floor. The correct architectural pattern is:
+
+1. **Train** the head with Gaussian-fit VIS centroids as targets.
+2. **At inference**, take the head's predicted position and run `refine_centroids_psf_field()` from `psf.centroid_refinement` for a final sub-pixel polish.
+
+This is wired into `eval_latent_position.py` via `--psf-checkpoint` (optional). The evaluation output compares three columns: raw band offset, head-corrected, head + PSFField polish.
+
+#### End-to-end v8 pipeline (ready to invoke)
+
+```bash
+# 1. Train the latent position head on v8 foundation with classical pipeline
+CUDA_VISIBLE_DEVICES=0,1 PYTHONPATH=models python models/astrometry2/train_latent_position.py \
+    --rubin-dir        data/rubin_tiles_all \
+    --euclid-dir       data/euclid_tiles_all \
+    --foundation-checkpoint models/checkpoints/jaisp_v8_fine/checkpoint_best.pt \
+    --output-dir       models/checkpoints/latent_position_v8_no_psf \
+    --epochs 30 --bottleneck-window 5 --dual-gpu \
+    --wandb-project JAISP-LatentPosition
+
+# 2. Cross-instrument evaluation + export PINN-ready anchors
+PYTHONPATH=models python models/astrometry2/eval_latent_position.py \
+    --rubin-dir        data/rubin_tiles_all \
+    --euclid-dir       data/euclid_tiles_all \
+    --foundation-checkpoint models/checkpoints/jaisp_v8_fine/checkpoint_best.pt \
+    --head-checkpoint  models/checkpoints/latent_position_v8_no_psf/best.pt \
+    --psf-checkpoint   models/checkpoints/psf_field_v3.pt \
+    --save-anchors     models/checkpoints/latent_position_v8_no_psf/anchors.npz \
+    --output-dir       models/checkpoints/latent_position_v8_no_psf/eval
+
+# 3. Fit PINN-smoothed global concordance field
+PYTHONPATH=models python models/astrometry2/fit_direct_pinn.py \
+    --cache   models/checkpoints/latent_position_v8_no_psf/anchors.npz \
+    --output  models/checkpoints/latent_position_v8_no_psf/concordance_pinn.fits \
+    --bands r i g z --include-nisp
+```
 
 ### 3. PSF Modelling — `PSFField`
 
@@ -1151,12 +1216,22 @@ These checkpoints are outdated -- trained on wrong NISP pixel scales (0.3"/px as
   - Diagnostics: `models/psf/validate_psf_field.py`, W&B panels (gallery, radial profiles, example stamps, centroid drift).
   - Notebook: `io/10_psf_visualization.ipynb`.
 
-**Astrometry**
-- 790 tiles, 40–50 mas MAE. Label noise (centroiding) is the dominant bottleneck.
-- PSFField v3 centroid drift of 14.6 mas shows the path to sub-20 mas labels.
-- **Next**: write `models/psf/centroid_refinement.py` to use PSFField v3 as centroiding template → regenerate labels → retrain astrometry2.
+**Astrometry — V8 migration working (2026-04-16)**
+- Latent position head migrated to v8 foundation via `load_foundation()` auto-detection. Dual-GPU prefetch wired (`--dual-gpu`: encoder on GPU 0, head on GPU 1).
+- Comparison of four runs on identical val splits:
+  - V7 baseline (classical detection + Gaussian centroids, 200 tiles): **17.7 mas** val MAE
+  - V7 + PSFField-v3 centroids + CenterNet-v8 (790 tiles): 29.9 mas
+  - V8 + PSFField-v3 centroids + CenterNet-v8 (790 tiles): 29.3 mas
+  - **V8 + Gaussian centroids + classical detection (790 tiles): ~13 mas projected**, currently training
+- **Key lesson**: PSFField-refined centroids introduce a ~16 mas label-noise floor when used as training targets (the head's features encode "photon centroid" not "PSFField centroid" — the discrepancy is invisible to features). Use PSFField at inference only. See the V8 migration subsection under Astrometry.
+- Field solvers (PINN / NN / control-grid) are foundation-agnostic. `eval_latent_position.py` now exports per-source anchors via `--save-anchors` directly consumable by `fit_direct_pinn.py --cache`.
 
 **Photometry**
 - Existing matched-filter pipeline (`models/photometry/`) works but still references legacy PSFNet (never trained). Will migrate to PSFField after astrometry validation.
+
+**Open milestones**
+- **Out-of-distribution evaluation** (see Motivation § "Why a Foundation Model"). All current metrics are on ECDFS tract5063. We have not yet evaluated on a non-ECDFS field. Until we do, we cannot measure the foundation's actual value proposition — transfer without retraining. Highest-leverage next experiment after astrometry settles: download ~50 tiles from EDF-North, run eval + PINN on them without any retraining, compare the MAE to the ECDFS numbers.
+- **Foundation ablation on astrometry**: train the same latent position head with BandStem features disabled (VIS stem only, no bottleneck context). Measures how much the multi-band bottleneck is actually contributing vs. the single-band VIS features. Informs whether to invest in better foundations or better single-band heads.
+- **Downstream tasks beyond astrometry**: weak-lensing shape measurement, photo-z inputs, transient classification. Each new task that consumes frozen foundation features reduces the foundation's amortised cost and tests a different aspect of the learned representation.
 
 This is an active research codebase. Architecture and training defaults evolve with experiments.

@@ -38,24 +38,44 @@ class DistortionMLP(nn.Module):
     ------------
     - Input:  2-d normalised tangent-plane position (both in [-1, 1])
     - Hidden: n_layers × hidden_dim neurons, SiLU activation
-              (smooth, non-saturating, avoids vanishing-gradient issues)
-    - Output: 2-d offset vector (ΔRA*, ΔDec); units restored by caller
+    - Geometric head: hidden → 2-d offset (shared across bands)
+    - Chromatic head (optional, when n_bands > 0):
+          (hidden, band_embed) → 2-d correction (per-band residual)
 
-    Smoothness is controlled entirely by:
-      1. Architecture depth/width (shallower/narrower → smoother)
-      2. Weight decay in the Adam optimiser (higher → smoother)
+    The chromatic head is initialised to zero so the model starts as a
+    pure geometric field and gradually learns band-dependent corrections.
     """
 
-    def __init__(self, hidden_dim: int = 64, n_layers: int = 4):
+    def __init__(self, hidden_dim: int = 64, n_layers: int = 4,
+                 n_bands: int = 0, band_embed_dim: int = 8):
         super().__init__()
         layers: list[nn.Module] = [nn.Linear(2, hidden_dim), nn.SiLU()]
         for _ in range(n_layers - 1):
             layers += [nn.Linear(hidden_dim, hidden_dim), nn.SiLU()]
-        layers.append(nn.Linear(hidden_dim, 2))
-        self.net = nn.Sequential(*layers)
+        self.trunk = nn.Sequential(*layers)
+        self.geo_head = nn.Linear(hidden_dim, 2)
 
-    def forward(self, xy: torch.Tensor) -> torch.Tensor:
-        return self.net(xy)
+        # Chromatic path (optional)
+        self.n_bands = n_bands
+        if n_bands > 0:
+            self.band_embed = nn.Embedding(n_bands, band_embed_dim)
+            self.chrom_head = nn.Sequential(
+                nn.Linear(hidden_dim + band_embed_dim, hidden_dim // 2),
+                nn.SiLU(),
+                nn.Linear(hidden_dim // 2, 2),
+            )
+            # Zero-init so chromatic correction starts at zero
+            nn.init.zeros_(self.chrom_head[-1].weight)
+            nn.init.zeros_(self.chrom_head[-1].bias)
+
+    def forward(self, xy: torch.Tensor,
+                band_idx: torch.Tensor = None) -> torch.Tensor:
+        h = self.trunk(xy)
+        out = self.geo_head(h)
+        if self.n_bands > 0 and band_idx is not None:
+            be = self.band_embed(band_idx)
+            out = out + self.chrom_head(torch.cat([h, be], dim=-1))
+        return out
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -66,11 +86,13 @@ def fit_nn_field(
     pos_arcsec: np.ndarray,
     offsets_arcsec: np.ndarray,
     weights: np.ndarray,
+    band_indices: np.ndarray = None,
     hidden_dim: int = 64,
     n_layers: int = 4,
+    n_bands: int = 0,
     n_steps: int = 2000,
-    lr: float = 1e-3,
-    weight_decay: float = 1e-4,
+    lr: float = 3e-3,
+    weight_decay: float = 1e-5,
     device: Optional[torch.device] = None,
     verbose: bool = True,
 ) -> Tuple[DistortionMLP, dict]:
@@ -82,8 +104,12 @@ def fit_nn_field(
     pos_arcsec      : [N, 2] tangent-plane positions in arcsec (x, y)
     offsets_arcsec  : [N, 2] (ΔRA*, ΔDec) targets in arcsec
     weights         : [N]    per-source weights (typically 1/σ²)
+    band_indices    : [N]    int band index per source (optional).
+                     If provided together with n_bands > 0, the MLP learns
+                     a shared geometric field plus per-band chromatic corrections.
     hidden_dim      : neurons per hidden layer
     n_layers        : number of hidden layers
+    n_bands         : number of bands (0 = band-agnostic, >0 = chromatic)
     n_steps         : gradient-descent steps (Adam + cosine LR schedule)
     lr              : initial Adam learning rate
     weight_decay    : L2 regularisation — higher = smoother field
@@ -115,9 +141,15 @@ def fit_nn_field(
         (weights / weights.mean()).astype(np.float32),
         device=device,
     )
+    bi_t = None
+    if band_indices is not None and n_bands > 0:
+        bi_t = torch.tensor(band_indices, dtype=torch.long, device=device)
 
     # ── Model + optimiser ────────────────────────────────────────────────────
-    model = DistortionMLP(hidden_dim=hidden_dim, n_layers=n_layers).to(device)
+    model = DistortionMLP(
+        hidden_dim=hidden_dim, n_layers=n_layers,
+        n_bands=n_bands, band_embed_dim=8,
+    ).to(device)
     opt   = torch.optim.Adam(
         model.parameters(), lr=lr, weight_decay=weight_decay,
     )
@@ -130,7 +162,7 @@ def fit_nn_field(
     losses = []
     for step in range(n_steps):
         opt.zero_grad()
-        pred_out = model(xy)
+        pred_out = model(xy, band_idx=bi_t)
         loss = (w[:, None] * (pred_out - tgt) ** 2).mean()
         loss.backward()
         opt.step()
@@ -169,6 +201,7 @@ def evaluate_nn_mesh(
     field_w: int,
     dstep: int = 1,
     pos_arcsec_anchors: Optional[np.ndarray] = None,
+    band_idx: int = None,
     batch_size: int = 65536,
 ) -> dict:
     """
@@ -207,7 +240,10 @@ def evaluate_nn_mesh(
     with torch.no_grad():
         for i in range(0, len(grid_norm), batch_size):
             chunk = torch.tensor(grid_norm[i:i + batch_size], dtype=torch.float32)
-            preds.append(model(chunk).numpy())
+            bi_chunk = None
+            if band_idx is not None and model.n_bands > 0:
+                bi_chunk = torch.full((chunk.shape[0],), band_idx, dtype=torch.long)
+            preds.append(model(chunk, band_idx=bi_chunk).numpy())
     pred_np = np.concatenate(preds, axis=0) * off_scale   # → arcsec
 
     mesh_shape = (len(y_mesh), len(x_mesh))

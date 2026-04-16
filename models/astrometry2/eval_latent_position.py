@@ -6,18 +6,20 @@ frame, and ask the latent position head to correct it toward the VIS
 PSF-fit centroid.  This tests per-object, per-band alignment using the
 full multi-band latent representation.
 
-Three regimes are compared per band:
-  1. Raw offset: band centroid projected to VIS frame vs VIS centroid
-  2. Head-corrected: head prediction applied to the projected position
-  3. Theoretical floor: King-formula centroid noise at that SNR
+Regimes compared per band:
+  1. Raw offset:        band centroid in VIS frame vs VIS centroid
+  2. Head-corrected:    head prediction applied to the projected position
+  3. Head + PSFField:   head output further polished by PSFField template fit
+                        (optional, enabled via --psf-checkpoint)
 
 Usage:
-    cd models && python astrometry2/eval_latent_position.py \
-        --rubin-dir  ../data/rubin_tiles_200 \
-        --euclid-dir ../data/euclid_tiles_200 \
-        --v7-checkpoint checkpoints/jaisp_v7_concat/checkpoint_best.pt \
-        --head-checkpoint checkpoints/latent_position_head/best.pt \
-        --output-dir checkpoints/latent_position_head/eval_cross_instrument
+    PYTHONPATH=models python models/astrometry2/eval_latent_position.py \
+        --rubin-dir  data/rubin_tiles_all \
+        --euclid-dir data/euclid_tiles_all \
+        --foundation-checkpoint models/checkpoints/jaisp_v8_fine/checkpoint_best.pt \
+        --head-checkpoint models/checkpoints/latent_position_v8_no_psf/best.pt \
+        --psf-checkpoint  models/checkpoints/psf_field_v3.pt \
+        --output-dir      models/checkpoints/latent_position_v8_no_psf/eval
 """
 
 import argparse
@@ -49,7 +51,7 @@ from astrometry2.dataset import (
 )
 from astrometry2.latent_position_head import (
     LatentPositionHead,
-    FrozenV7Encoder,
+    FrozenEncoder,
     load_latent_position_head,
 )
 from astrometry2.train_latent_position import load_tile_data
@@ -152,14 +154,39 @@ def evaluate(args):
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Load model
+    # Load model — use bottleneck_window from head checkpoint (won't auto-scale)
+    head_ckpt = torch.load(args.head_checkpoint, map_location='cpu', weights_only=False)
+    head_cfg = head_ckpt.get('config', {})
+    bn_win = head_cfg.get('bottleneck_window', 5) or 5
+
     frozen_encoder, head = load_latent_position_head(
-        args.v7_checkpoint, device=device,
+        args.foundation_checkpoint, device=device,
+        bottleneck_window=bn_win,
+        stem_window=head_cfg.get('stem_window', 17) or 17,
     )
-    ckpt = torch.load(args.head_checkpoint, map_location='cpu', weights_only=False)
-    head.load_state_dict(ckpt['head_state_dict'])
+    head.load_state_dict(head_ckpt['head_state_dict'])
     head.eval()
-    print(f'Loaded head from {args.head_checkpoint} (epoch {ckpt.get("epoch", "?")})')
+    print(f'Loaded head from {args.head_checkpoint} (epoch {head_ckpt.get("epoch", "?")})')
+
+    # Optional PSFField for inference-time sub-pixel polish
+    psf_field = None
+    if args.psf_checkpoint:
+        from psf.psf_field import PSFField
+        pckpt = torch.load(args.psf_checkpoint, map_location='cpu', weights_only=False)
+        pcfg = pckpt['config']
+        psf_field = PSFField(
+            sed_embed_dim=pcfg['sed_embed_dim'],
+            band_embed_dim=pcfg['band_embed_dim'],
+            tile_freqs=pcfg['tile_freqs'],
+            siren_hidden=pcfg['siren_hidden'],
+            siren_depth=pcfg['siren_depth'],
+            w0_first=pcfg['w0_first'],
+            envelope_r_rubin=pcfg.get('envelope_r_rubin', 0.0),
+            envelope_r_euclid=pcfg.get('envelope_r_euclid', 0.0),
+            envelope_power=pcfg.get('envelope_power', 4.0),
+        ).to(device).eval()
+        psf_field.load_state_dict(pckpt['psf_field_state'])
+        print(f'Loaded PSFField from {args.psf_checkpoint}')
 
     pairs = discover_tile_pairs(args.rubin_dir, args.euclid_dir)
     print(f'Evaluating on {len(pairs)} tiles')
@@ -170,7 +197,16 @@ def evaluate(args):
     all_bands = rubin_bands + nisp_bands
 
     # Per-band accumulators
-    band_results = {b: {'raw_err': [], 'head_err': [], 'snr': []} for b in all_bands}
+    band_results = {
+        b: {'raw_err': [], 'head_err': [], 'psf_err': [], 'snr': []}
+        for b in all_bands
+    }
+    # Per-source anchor records (for PINN / field-solver consumption)
+    # Keyed by band; values are flat arrays across tiles.
+    anchors = {
+        b: {'ra': [], 'dec': [], 'raw': [], 'head_resid': [], 'tiles': [], 'snr': []}
+        for b in all_bands
+    }
     n_tiles = 0
 
     for tile_id, rubin_path, euclid_path in pairs:
@@ -281,20 +317,82 @@ def evaluate(args):
             residual = offset_valid - pred_offset
             head_radial = np.sqrt((residual ** 2).sum(axis=1))
 
+            # Optional: polish head's predicted position with PSFField
+            # template fit. The head's `band_pos_valid + pred_offset_in_px`
+            # is our best VIS-frame estimate; PSFField refines sub-pixel
+            # against the actual VIS image intensity.
+            psf_radial = None
+            if psf_field is not None:
+                from psf.centroid_refinement import refine_centroids_psf_field
+                # Map head prediction back into VIS pixels
+                # band_pos_valid is in VIS px; pred_offset is in arcsec
+                # Convert arcsec → VIS px via each source's Jacobian inverse
+                pred_offset_px = np.zeros_like(pred_offset)
+                for i in range(n_keep):
+                    jac = pix2sky[i]           # [2, 2] px→sky
+                    jinv = np.linalg.inv(jac)
+                    pred_offset_px[i] = jinv @ pred_offset[i]
+                head_vis_xy = band_pos_valid + pred_offset_px
+                try:
+                    refined_xy, _, _ = refine_centroids_psf_field(
+                        vis_img, head_vis_xy.astype(np.float32),
+                        psf_field, band_name='euclid_VIS',
+                        tile_hw=vis_img.shape, device=device,
+                        radius=3, n_iter=2, flux_floor_sigma=1.0,
+                    )
+                    # Error = (refined VIS pos) vs (true VIS centroid vis_xy)
+                    # Note: vis_xy[keep sources] is the ground truth here.
+                    # Reconstruct: offset_valid = (projected_band_pos - vis_xy)
+                    # So vis_xy = band_pos_valid - offset_valid_in_px
+                    offset_valid_px = np.zeros_like(offset_valid)
+                    for i in range(n_keep):
+                        jinv = np.linalg.inv(pix2sky[i])
+                        offset_valid_px[i] = jinv @ offset_valid[i]
+                    true_vis_xy = band_pos_valid - offset_valid_px
+                    psf_resid_px = refined_xy - true_vis_xy
+                    # Convert back to arcsec
+                    psf_resid_as = np.zeros_like(psf_resid_px)
+                    for i in range(n_keep):
+                        psf_resid_as[i] = pix2sky[i] @ psf_resid_px[i]
+                    psf_radial = np.sqrt((psf_resid_as ** 2).sum(axis=1))
+                except Exception as exc:
+                    print(f'  [warn] PSFField refine failed on {band_name}: {exc}')
+
             band_results[band_name]['raw_err'].extend((raw_radial * 1000).tolist())
             band_results[band_name]['head_err'].extend((head_radial * 1000).tolist())
+            if psf_radial is not None:
+                band_results[band_name]['psf_err'].extend((psf_radial * 1000).tolist())
             band_results[band_name]['snr'].extend(snr_valid.tolist())
+
+            # Anchor export: per-source position and residual offsets
+            # raw   = offset_valid            (band→VIS, un-corrected, arcsec)
+            # head_resid = offset_valid - pred_offset   (remaining after head)
+            ras, decs = vwcs.wcs_pix2world(
+                band_pos_valid[:, 0], band_pos_valid[:, 1], 0,
+            )
+            anchors[band_name]['ra'].append(ras.astype(np.float32))
+            anchors[band_name]['dec'].append(decs.astype(np.float32))
+            anchors[band_name]['raw'].append(offset_valid.astype(np.float32))
+            anchors[band_name]['head_resid'].append((offset_valid - pred_offset).astype(np.float32))
+            anchors[band_name]['snr'].append(snr_valid.astype(np.float32))
+            anchors[band_name]['tiles'].append(np.full(n_keep, tile_id, dtype='U64'))
 
         n_tiles += 1
         del enc_out
 
     # ---- Print results ----
-    print(f'\n{"="*75}')
+    has_psf = psf_field is not None
+    psf_header = f'  {"PSF MAE":>8}  {"PSF med":>8}' if has_psf else ''
+
+    print(f'\n{"="*90}')
     print(f'Cross-instrument per-band alignment: {n_tiles} tiles')
-    print(f'{"="*75}')
-    print(f'{"Band":<12} {"N":>6}  {"Raw MAE":>8}  {"Raw med":>8}  {"Head MAE":>8}  {"Head med":>8}  {"Improve":>8}')
-    print(f'{"":<12} {"":>6}  {"(mas)":>8}  {"(mas)":>8}  {"(mas)":>8}  {"(mas)":>8}  {"(%)":>8}')
-    print('-' * 75)
+    print(f'{"="*90}')
+    print(f'{"Band":<12} {"N":>6}  {"Raw MAE":>8}  {"Raw med":>8}  '
+          f'{"Head MAE":>8}  {"Head med":>8}{psf_header}  {"Improve":>8}')
+    print(f'{"":<12} {"":>6}  {"(mas)":>8}  {"(mas)":>8}  '
+          f'{"(mas)":>8}  {"(mas)":>8}' + ('  ' + '(mas)'.rjust(8) * 2 if has_psf else '')
+          + f'  {"(%)":>8}')
+    print('-' * 90)
 
     summary = {}
     for band_name in all_bands:
@@ -304,13 +402,19 @@ def evaluate(args):
         raw = np.array(br['raw_err'])
         hd = np.array(br['head_err'])
         n = len(raw)
-        raw_mae = np.mean(raw)
-        raw_med = np.median(raw)
-        hd_mae = np.mean(hd)
-        hd_med = np.median(hd)
+        raw_mae = np.mean(raw); raw_med = np.median(raw)
+        hd_mae = np.mean(hd);  hd_med = np.median(hd)
         improve = (1 - hd_mae / raw_mae) * 100 if raw_mae > 0 else 0
 
-        print(f'{band_name:<12} {n:>6}  {raw_mae:>8.1f}  {raw_med:>8.1f}  {hd_mae:>8.1f}  {hd_med:>8.1f}  {improve:>7.1f}%')
+        psf_col = ''
+        psf_mae = psf_med = None
+        if has_psf and br['psf_err']:
+            psf = np.array(br['psf_err'])
+            psf_mae = np.mean(psf); psf_med = np.median(psf)
+            psf_col = f'  {psf_mae:>8.1f}  {psf_med:>8.1f}'
+
+        print(f'{band_name:<12} {n:>6}  {raw_mae:>8.1f}  {raw_med:>8.1f}  '
+              f'{hd_mae:>8.1f}  {hd_med:>8.1f}{psf_col}  {improve:>7.1f}%')
 
         summary[band_name] = {
             'n_sources': n,
@@ -322,6 +426,10 @@ def evaluate(args):
             'head_p68_mas': float(np.percentile(hd, 68)),
             'improvement_pct': float(improve),
         }
+        if psf_mae is not None:
+            summary[band_name]['psf_mae_mas'] = float(psf_mae)
+            summary[band_name]['psf_median_mas'] = float(psf_med)
+            summary[band_name]['psf_p68_mas'] = float(np.percentile(psf, 68))
 
     # Overall (all bands pooled)
     all_raw = np.concatenate([np.array(br['raw_err']) for br in band_results.values() if br['raw_err']])
@@ -344,6 +452,30 @@ def evaluate(args):
     with open(out_dir / 'results.json', 'w') as f:
         json.dump({'n_tiles': n_tiles, 'per_band': summary}, f, indent=2)
     print(f'\nResults saved to {out_dir / "results.json"}')
+
+    # Export per-source anchors for the field solver (PINN / NN / grid)
+    # Format matches what `fit_direct_pinn.py --cache` consumes:
+    #   {band}_ra, {band}_dec, {band}_raw, {band}_tiles
+    # Plus {band}_head_resid (head-corrected residuals — use for polishing).
+    if args.save_anchors:
+        cache = {}
+        for band_name in all_bands:
+            a = anchors[band_name]
+            if not a['ra']:
+                continue
+            # Use Rubin short-name for Rubin bands (matches PINN cache format).
+            key = band_name.split('_', 1)[1] if band_name.startswith('rubin_') else band_name
+            cache[f'{key}_ra']   = np.concatenate(a['ra'])
+            cache[f'{key}_dec']  = np.concatenate(a['dec'])
+            cache[f'{key}_raw']  = np.concatenate(a['raw'])
+            cache[f'{key}_head_resid'] = np.concatenate(a['head_resid'])
+            cache[f'{key}_snr']  = np.concatenate(a['snr'])
+            cache[f'{key}_tiles'] = np.concatenate(a['tiles'])
+        anchor_path = Path(args.save_anchors)
+        anchor_path.parent.mkdir(parents=True, exist_ok=True)
+        np.savez_compressed(anchor_path, **cache)
+        total = sum(len(cache[k]) for k in cache if k.endswith('_ra'))
+        print(f'Saved {total} anchors to {anchor_path}')
 
     _make_figure(band_results, all_bands, all_raw, all_hd, all_snr, out_dir)
 
@@ -432,8 +564,18 @@ def main():
     p = argparse.ArgumentParser(description='Evaluate latent position head: align all 9 bands to VIS.')
     p.add_argument('--rubin-dir', type=str, required=True)
     p.add_argument('--euclid-dir', type=str, required=True)
-    p.add_argument('--v7-checkpoint', type=str, required=True)
-    p.add_argument('--head-checkpoint', type=str, required=True)
+    p.add_argument('--foundation-checkpoint', type=str, required=True,
+                   help='Foundation model checkpoint (v7 or v8, auto-detected).')
+    p.add_argument('--head-checkpoint', type=str, required=True,
+                   help='Trained LatentPositionHead checkpoint.')
+    p.add_argument('--psf-checkpoint', type=str, default=None,
+                   help='Optional: trained PSFField checkpoint. If given, '
+                        'also report the head prediction after PSFField '
+                        'sub-pixel refinement.')
+    p.add_argument('--save-anchors', type=str, default=None,
+                   help='Optional: save per-source anchors (ra, dec, raw & '
+                        'head-corrected offsets, snr, tile_id) as .npz. '
+                        'Format matches fit_direct_pinn.py --cache.')
     p.add_argument('--output-dir', type=str,
                    default='models/checkpoints/latent_position_head/eval_cross_instrument')
     p.add_argument('--min-matches', type=int, default=10)
