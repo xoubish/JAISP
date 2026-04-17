@@ -705,7 +705,7 @@ The first stage of the pipeline -- detecting sources -- can use either:
 Three solvers are available for fitting the smooth concordance field from per-source offset measurements:
 
 - **Control grid** (`field_solver.py`): Fits bilinear basis functions on a regular grid using weighted least squares. Includes finite-difference smoothness regularization and adaptive per-node anchor weights that prevent edge drift in regions with sparse source coverage. The grid resolution is automatically reduced for tiles with few matches to avoid underdetermined systems.
-- **Neural network** (`nn_field_solver.py`): A 4-layer MLP that maps normalized (x, y) tile coordinates to (dRA, dDec) offsets, trained via Adam for 2000 steps. Has no grid resolution hyperparameter, is infinitely differentiable, and scales naturally to any source density.
+- **Neural network** (`nn_field_solver.py`): An MLP with residual connections (for >= 4 layers) that maps normalized (x, y) tile coordinates to (dRA, dDec) offsets, trained via Adam with cosine LR, gradient clipping, and best-state tracking. Optional Huber loss for robustness to outlier centroids. Has no grid resolution hyperparameter, is infinitely differentiable, and scales naturally to any source density. Select via `--solver nn` in `fit_direct_pinn.py`.
 - **PINN** (`pinn_field_solver.py`): Physics-Informed Neural Network that encodes physical constraints via automatic differentiation: curl-free constraint (optical distortion fields are irrotational), Laplacian smoothness, and band consistency (achromatic geometric field + small per-band chromatic residual). Recommended for the global field fit where these physics priors are well motivated.
 
 #### Files
@@ -719,7 +719,7 @@ Three solvers are available for fitting the smooth concordance field from per-so
 | `field_solver.py` | Control-grid least-squares field solver |
 | `nn_field_solver.py` | MLP-based field solver |
 | `pinn_field_solver.py` | Physics-Informed NN field solver (curl-free, Laplacian, band consistency) |
-| `fit_direct_pinn.py` | Direct PINN concordance from raw centroids (bypasses NN matcher) |
+| `fit_direct_pinn.py` | Direct concordance from raw centroids (bypasses NN matcher). Dispatches to PINN (`--solver pinn`, default) or NN (`--solver nn`) |
 | `train_astro_v6.py` | Training script (V6 backbone) |
 | `train_astro_v7.py` | Training script (V7 backbone, CenterNet or classical sources, saves full checkpoint metadata) |
 | `infer_concordance.py` | Per-tile inference -> FITS export |
@@ -838,10 +838,17 @@ PYTHONPATH=models python models/astrometry2/eval_latent_position.py \
     --save-anchors     models/checkpoints/latent_position_v8_no_psf/anchors.npz \
     --output-dir       models/checkpoints/latent_position_v8_no_psf/eval
 
-# 3. Fit PINN-smoothed global concordance field
+# 3a. Fit PINN-smoothed global concordance field (default solver)
 PYTHONPATH=models python models/astrometry2/fit_direct_pinn.py \
     --cache   models/checkpoints/latent_position_v8_no_psf/anchors.npz \
     --output  models/checkpoints/latent_position_v8_no_psf/concordance_pinn.fits \
+    --bands r i g z --include-nisp
+
+# 3b. Or use NN solver (no physics constraints, regularised by weight decay + residual MLP)
+PYTHONPATH=models python models/astrometry2/fit_direct_pinn.py \
+    --cache   models/checkpoints/latent_position_v8_no_psf/anchors.npz \
+    --solver nn \
+    --output  models/checkpoints/latent_position_v8_no_psf/concordance_nn.fits \
     --bands r i g z --include-nisp
 ```
 

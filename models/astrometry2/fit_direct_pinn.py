@@ -410,8 +410,17 @@ def fit_and_export(
     else:
         device = torch.device(device)
 
-    # Convert to tangent plane
+    if dstep_arcsec <= 0:
+        raise ValueError('dstep_arcsec must be positive')
+
+    # Convert to tangent plane.  The solver/evaluator mesh lives in a
+    # non-negative local frame, so keep both the sky-centered coordinates
+    # and the shifted coordinates used for fitting/export.
     pos_arcsec, ra0, dec0 = sky_to_tangent_plane(anchors['ra'], anchors['dec'])
+    pos_min = pos_arcsec.min(axis=0).astype(np.float32)
+    pos_max = pos_arcsec.max(axis=0).astype(np.float32)
+    pos_extent = (pos_max - pos_min).astype(np.float32)
+    pos_fit_arcsec = (pos_arcsec - pos_min[None, :]).astype(np.float32)
     offsets = np.stack([anchors['dra'], anchors['ddec']], axis=1).astype(np.float32)
     sigma = anchors['sigma_centroid']
     band_idx = anchors['band_idx']
@@ -440,7 +449,7 @@ def fit_and_export(
 
     if solver_type == 'pinn':
         model, meta = fit_pinn_field(
-            pos_arcsec=pos_arcsec,
+            pos_arcsec=pos_fit_arcsec,
             offsets_arcsec=offsets,
             weights=weights,
             band_indices=band_idx,
@@ -456,34 +465,39 @@ def fit_and_export(
             device=device,
         )
     else:
-        # NN uses fewer layers than PINN (no physics losses to inject
-        # gradients at intermediate points → deep trunks don't train).
-        nn_layers = min(n_layers, 3)
         model, meta = fit_nn_field(
-            pos_arcsec=pos_arcsec,
+            pos_arcsec=pos_fit_arcsec,
             offsets_arcsec=offsets,
             weights=weights,
             band_indices=band_idx,
             hidden_dim=hidden_dim,
-            n_layers=nn_layers,
+            n_layers=n_layers,
             n_bands=n_bands,
             n_steps=n_steps,
             device=device,
         )
+    meta.update({
+        'ra0': float(ra0),
+        'dec0': float(dec0),
+        'tangent_pos_min': pos_min,
+        'tangent_pos_max': pos_max,
+        'tangent_pos_extent': pos_extent,
+    })
 
     # ── Evaluate on mesh and export FITS ──────────────────────────────
-    x_range = pos_arcsec[:, 0].max() - pos_arcsec[:, 0].min()
-    y_range = pos_arcsec[:, 1].max() - pos_arcsec[:, 1].min()
-    field_w = int(np.ceil(x_range / dstep_arcsec)) + 2
-    field_h = int(np.ceil(y_range / dstep_arcsec)) + 2
+    field_w = int(np.ceil(float(pos_extent[0]))) + 2
+    field_h = int(np.ceil(float(pos_extent[1]))) + 2
 
-    # Build a sky WCS for the output mesh
-    cosdec0 = np.cos(np.deg2rad(dec0))
+    # Build a sky WCS for the shifted output mesh. Pixel (0, 0) represents
+    # tangent-plane coordinate (pos_min[0], pos_min[1]) relative to ra0/dec0.
     out_wcs = WCS(naxis=2)
-    out_wcs.wcs.crpix = [field_w / 2 + 1, field_h / 2 + 1]
+    out_wcs.wcs.crpix = [
+        1.0 - float(pos_min[0]) / float(dstep_arcsec),
+        1.0 - float(pos_min[1]) / float(dstep_arcsec),
+    ]
     out_wcs.wcs.crval = [ra0, dec0]
     out_wcs.wcs.cdelt = [
-        -dstep_arcsec / 3600.0 / cosdec0,
+        dstep_arcsec / 3600.0,
         dstep_arcsec / 3600.0,
     ]
     out_wcs.wcs.ctype = ['RA---TAN', 'DEC--TAN']
@@ -502,6 +516,10 @@ def fit_and_export(
     hdr['DSTEP'] = (dstep_arcsec, 'Mesh step [arcsec]')
     hdr['NANCHORS'] = (len(pos_arcsec), 'Total anchor sources')
     hdr['METHOD'] = (f'direct_{solver_type}', 'Concordance method')
+    hdr['XMINAS'] = (float(pos_min[0]), 'Tangent x at mesh col 0 [arcsec]')
+    hdr['YMINAS'] = (float(pos_min[1]), 'Tangent y at mesh row 0 [arcsec]')
+    hdr['XMAXAS'] = (float(pos_max[0]), 'Max anchor tangent x [arcsec]')
+    hdr['YMAXAS'] = (float(pos_max[1]), 'Max anchor tangent y [arcsec]')
 
     hdul = fits.HDUList([fits.PrimaryHDU()])
 
@@ -512,8 +530,8 @@ def fit_and_export(
         for bi in unique_bands:
             bname = band_names_map.get(int(bi), f'BAND{bi}')
             result = evaluate_pinn_mesh(
-                model, meta, field_h, field_w, dstep=1,
-                pos_arcsec_anchors=pos_arcsec[band_idx == bi],
+                model, meta, field_h, field_w, dstep=dstep_arcsec,
+                pos_arcsec_anchors=pos_fit_arcsec[band_idx == bi],
                 band_idx=int(bi),
             )
             if first_result is None:
@@ -527,8 +545,8 @@ def fit_and_export(
         for bi in unique_bands:
             bname = band_names_map.get(int(bi), f'BAND{bi}')
             result = evaluate_nn_mesh(
-                model, meta, field_h, field_w, dstep=1,
-                pos_arcsec_anchors=pos_arcsec[band_idx == bi],
+                model, meta, field_h, field_w, dstep=dstep_arcsec,
+                pos_arcsec_anchors=pos_fit_arcsec[band_idx == bi],
                 band_idx=int(bi),
             )
             if first_result is None:
@@ -541,13 +559,13 @@ def fit_and_export(
     # Shared coverage map
     if solver_type == 'pinn':
         cov_result = evaluate_pinn_mesh(
-            model, meta, field_h, field_w, dstep=1,
-            pos_arcsec_anchors=pos_arcsec, band_idx=None,
+            model, meta, field_h, field_w, dstep=dstep_arcsec,
+            pos_arcsec_anchors=pos_fit_arcsec, band_idx=None,
         )
     else:
         cov_result = evaluate_nn_mesh(
-            model, meta, field_h, field_w, dstep=1,
-            pos_arcsec_anchors=pos_arcsec, band_idx=None,
+            model, meta, field_h, field_w, dstep=dstep_arcsec,
+            pos_arcsec_anchors=pos_fit_arcsec, band_idx=None,
         )
     if cov_result.get('coverage') is not None:
         hdul.append(fits.ImageHDU(cov_result['coverage'], header=hdr,
@@ -564,7 +582,7 @@ def fit_and_export(
     print('=' * 60)
 
     # Evaluate solver at anchor positions
-    pos_norm = (pos_arcsec - meta['pos_min']) / meta['pos_scale'] * 2.0 - 1.0
+    pos_norm = (pos_fit_arcsec - meta['pos_min']) / meta['pos_scale'] * 2.0 - 1.0
     model.eval()
     with torch.no_grad():
         xy_t = torch.tensor(pos_norm, dtype=torch.float32)

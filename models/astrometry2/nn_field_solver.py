@@ -30,6 +30,20 @@ from scipy.spatial import KDTree
 # Model
 # ──────────────────────────────────────────────────────────────────────────────
 
+class _ResBlock(nn.Module):
+    """Pre-activation residual block: SiLU → Linear → SiLU → Linear + skip."""
+
+    def __init__(self, dim: int):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.SiLU(), nn.Linear(dim, dim),
+            nn.SiLU(), nn.Linear(dim, dim),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x + self.net(x)
+
+
 class DistortionMLP(nn.Module):
     """
     Compact MLP: normalised (x, y) sky position → (ΔRA*, ΔDec) in arcsec.
@@ -37,7 +51,9 @@ class DistortionMLP(nn.Module):
     Architecture
     ------------
     - Input:  2-d normalised tangent-plane position (both in [-1, 1])
-    - Hidden: n_layers × hidden_dim neurons, SiLU activation
+    - Hidden: n_layers × hidden_dim neurons, SiLU activation.
+              When n_layers >= 4, uses residual blocks for stable
+              gradient flow through deeper networks.
     - Geometric head: hidden → 2-d offset (shared across bands)
     - Chromatic head (optional, when n_bands > 0):
           (hidden, band_embed) → 2-d correction (per-band residual)
@@ -49,10 +65,24 @@ class DistortionMLP(nn.Module):
     def __init__(self, hidden_dim: int = 64, n_layers: int = 4,
                  n_bands: int = 0, band_embed_dim: int = 8):
         super().__init__()
-        layers: list[nn.Module] = [nn.Linear(2, hidden_dim), nn.SiLU()]
-        for _ in range(n_layers - 1):
-            layers += [nn.Linear(hidden_dim, hidden_dim), nn.SiLU()]
-        self.trunk = nn.Sequential(*layers)
+        # Stem: project 2-d input to hidden_dim
+        self.stem = nn.Sequential(nn.Linear(2, hidden_dim), nn.SiLU())
+
+        # Hidden layers: use residual blocks for >= 4 layers
+        if n_layers >= 4:
+            # Each ResBlock counts as 2 layers; fill remainder with plain
+            n_res = (n_layers - 1) // 2
+            n_plain = (n_layers - 1) - n_res * 2
+            blocks: list[nn.Module] = [_ResBlock(hidden_dim) for _ in range(n_res)]
+            for _ in range(n_plain):
+                blocks += [nn.Linear(hidden_dim, hidden_dim), nn.SiLU()]
+            self.hidden = nn.Sequential(*blocks)
+        else:
+            layers: list[nn.Module] = []
+            for _ in range(n_layers - 1):
+                layers += [nn.Linear(hidden_dim, hidden_dim), nn.SiLU()]
+            self.hidden = nn.Sequential(*layers)
+
         self.geo_head = nn.Linear(hidden_dim, 2)
 
         # Chromatic path (optional)
@@ -70,7 +100,7 @@ class DistortionMLP(nn.Module):
 
     def forward(self, xy: torch.Tensor,
                 band_idx: torch.Tensor = None) -> torch.Tensor:
-        h = self.trunk(xy)
+        h = self.hidden(self.stem(xy))
         out = self.geo_head(h)
         if self.n_bands > 0 and band_idx is not None:
             be = self.band_embed(band_idx)
@@ -93,6 +123,8 @@ def fit_nn_field(
     n_steps: int = 2000,
     lr: float = 3e-3,
     weight_decay: float = 1e-5,
+    huber_delta: float = 0.0,
+    grad_clip: float = 0.0,
     device: Optional[torch.device] = None,
     verbose: bool = True,
 ) -> Tuple[DistortionMLP, dict]:
@@ -113,6 +145,11 @@ def fit_nn_field(
     n_steps         : gradient-descent steps (Adam + cosine LR schedule)
     lr              : initial Adam learning rate
     weight_decay    : L2 regularisation — higher = smoother field
+    huber_delta     : if > 0, use Huber loss with this delta (in normalised
+                      offset units) instead of MSE.  More robust to outlier
+                      centroids.  Typical value: 1.0–2.0 (≈ 1–2× off_scale).
+                      0 = plain MSE (original behaviour).
+    grad_clip       : max gradient norm for clipping (0 = no clipping)
     device          : torch device (auto-detected if None)
     verbose         : print loss every 500 steps
 
@@ -145,6 +182,11 @@ def fit_nn_field(
     if band_indices is not None and n_bands > 0:
         bi_t = torch.tensor(band_indices, dtype=torch.long, device=device)
 
+    # ── Loss function ────────────────────────────────────────────────────────
+    use_huber = huber_delta > 0
+    if use_huber:
+        huber_fn = nn.HuberLoss(reduction='none', delta=huber_delta)
+
     # ── Model + optimiser ────────────────────────────────────────────────────
     model = DistortionMLP(
         hidden_dim=hidden_dim, n_layers=n_layers,
@@ -160,32 +202,50 @@ def fit_nn_field(
     # ── Training loop ────────────────────────────────────────────────────────
     model.train()
     losses = []
+    best_loss = float('inf')
+    best_state = None
+
     for step in range(n_steps):
         opt.zero_grad()
         pred_out = model(xy, band_idx=bi_t)
-        loss = (w[:, None] * (pred_out - tgt) ** 2).mean()
+        if use_huber:
+            loss = (w[:, None] * huber_fn(pred_out, tgt)).mean()
+        else:
+            loss = (w[:, None] * (pred_out - tgt) ** 2).mean()
         loss.backward()
+        if grad_clip > 0:
+            nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
         opt.step()
         sched.step()
-        losses.append(float(loss))
-        if verbose and (step + 1) % 500 == 0:
-            print(f'    NN step {step+1:4d}/{n_steps}  loss={loss.item():.5f}')
 
+        loss_val = float(loss)
+        losses.append(loss_val)
+        if loss_val < best_loss:
+            best_loss = loss_val
+            best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+        if verbose and (step + 1) % 500 == 0:
+            print(f'    NN step {step+1:4d}/{n_steps}  loss={loss_val:.5f}')
+
+    # Restore best model
+    if best_state is not None:
+        model.load_state_dict(best_state)
     model.eval().cpu()
 
     meta = {
-        'pos_min':    pos_min,
-        'pos_scale':  pos_scale,
-        'off_scale':  off_scale,
-        'n_sources':  int(len(pos_arcsec)),
-        'final_loss': float(losses[-1]),
-        'hidden_dim': hidden_dim,
-        'n_layers':   n_layers,
-        'n_steps':    n_steps,
+        'pos_min':      pos_min,
+        'pos_scale':    pos_scale,
+        'off_scale':    off_scale,
+        'n_sources':    int(len(pos_arcsec)),
+        'final_loss':   float(losses[-1]),
+        'best_loss':    best_loss,
+        'loss_history': np.array(losses, dtype=np.float32),
+        'hidden_dim':   hidden_dim,
+        'n_layers':     n_layers,
+        'n_steps':      n_steps,
         'weight_decay': weight_decay,
     }
     if verbose:
-        print(f'  NN converged: final loss={losses[-1]:.5f}  '
+        print(f'  NN converged: best loss={best_loss:.5f}  '
               f'({hidden_dim}×{n_layers}, wd={weight_decay})')
     return model, meta
 
