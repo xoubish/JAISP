@@ -1,16 +1,18 @@
-# JAISP PSF + Photometry
+# JAISP Photometry
 
-This module provides a fast, GPU-first pipeline for PSF modeling and forced photometry on Rubin+Euclid tiles.
+This module provides the legacy matched-filter forced-photometry pipeline on Rubin+Euclid tiles. The original PSF model here, `PSFNet`, was never the production PSF path; the current PSF model is `models/psf/PSFField`.
+
+Use this directory as the forced-photometry implementation and PSFNet reference code. Use `models/psf/` for current PSF modelling.
 
 ## Components
 
-- `psf_net.py`: `PSFNet` spatially varying PSF model
-- `train_psf_net.py`: star-driven PSF training loop
+- `psf_net.py`: legacy `PSFNet` spatially varying PSF model, retained as reference
+- `train_psf_net.py`: legacy star-driven PSF training loop
 - `stamp_extractor.py`: batched stamp extraction + local background estimation
 - `forced_photometry.py`: vectorized matched-filter flux estimator
 - `pipeline.py`: end-to-end tile photometry wrapper
 
-## Design Choices
+## Legacy PSFNet Design Choices
 
 ### 1) PSF parameterization in log space
 
@@ -60,7 +62,7 @@ This is fully vectorized over `[N_sources, N_bands, S, S]` tensors.
 From repo root:
 
 ```bash
-# Train PSFNet
+# Legacy PSFNet experiment. Current PSFField training lives in models/psf/.
 python models/photometry/train_psf_net.py \
   --rubin_dir data/rubin_tiles_200 \
   --euclid_dir data/euclid_tiles_200 \
@@ -96,11 +98,11 @@ Returns a dict:
 
 Where `N` is number of source positions and `B` is number of bands in the tile tensor.
 
-## PSF-Template Centroiding (Bridge to Astrometry)
+## PSF-Template Centroiding (Historical Bridge to Astrometry)
 
-PSFNet can also serve as a centroiding engine for the astrometry pipeline, replacing the Gaussian-fit centroiding in `source_matching.refine_centroids_psf_fit`. The function `refine_centroids_psf_template` in `psf_net.py` does iterative Gauss-Newton fitting with the PSFNet-predicted PSF as the template, giving better centroid precision because the template matches the actual (non-Gaussian, spatially varying) PSF shape.
+PSFNet can serve as an experimental centroiding engine for the astrometry pipeline, replacing the Gaussian-fit centroiding in `source_matching.refine_centroids_psf_fit`. This path is historical and should not be confused with the current astrometry result.
 
-This is conceptually equivalent to the ePSF fitting in Libralato et al. (2024, arXiv:2411.02487) — but using a learned model instead of empirical stacking, and applicable to all 10 bands with a single model.
+The current astrometry finding is that the large raw offsets are dominated by source centering / centroid-definition scatter. PSFField-refined centroids were tested as latent-head targets and degraded the head to a ~29-30 mas plateau, so PSF-template centroids are not currently the production astrometry label convention.
 
 ```python
 from models.photometry.psf_net import load_psf_net, refine_centroids_psf_template
@@ -116,3 +118,4 @@ refined_xy, snr, fwhm = refine_centroids_psf_template(
 
 - Bands follow `BAND_ORDER` in `psf_net.py` for multi-band training/inference consistency.
 - Input `rms` maps should be strictly positive; code clamps very small values for numerical stability.
+- For current PSF work, see `models/psf/PSFField`; for current astrometry, see `models/astrometry2/README.md`.

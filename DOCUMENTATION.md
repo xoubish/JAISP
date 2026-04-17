@@ -15,7 +15,7 @@ A self-supervised multi-instrument foundation model for precision cosmology with
    - [v7 Mixed-Resolution MAE (Current)](#v7-mixed-resolution-mae-current)
 4. [Downstream Heads](#downstream-heads)
    - [Detection](#1-detection)
-   - [Astrometry Concordance](#2-astrometry-concordance)
+   - [Astrometry and Concordance](#2-astrometry-and-concordance)
    - [Latent Position Head](#latent-position-head-per-object-multi-band-alignment)
    - [PSF + Forced Photometry](#3-psf--forced-photometry)
 5. [Project Structure](#project-structure)
@@ -51,7 +51,7 @@ The system works in two layers. First, a foundation model is trained once throug
     +----+----+--------------------+
     |         |                    |
  Detection  Astrometry         Photometry
- (3 choices)(patch matching)   (PSF + matched filter)
+ (3 choices)(head + QA field)  (PSF + matched filter)
 ```
 
 This two-layer design means the expensive foundation pretraining only happens once. Each downstream task gets the benefit of 10-band multi-instrument features without paying the cost of encoding from scratch.
@@ -114,7 +114,7 @@ This overlap has several benefits:
 
 - **Foundation pretraining**: The same source appears in multiple tiles at different positions relative to tile edges. This acts as free data augmentation -- the model sees a galaxy near the center of one tile and near the edge of a neighbor, learning position-invariant features. This is particularly valuable given the current dataset size.
 - **Detection**: Sources near tile edges (where detection is hardest) appear near the center of overlapping tiles, so the detector learns to find sources regardless of their position within a tile.
-- **Astrometry**: Shared sources in overlap regions tie neighboring tiles' concordance solutions together in the global field fit (`infer_global_concordance.py`), enforcing continuity across the full survey footprint.
+- **Astrometry**: Shared sources in overlap regions help diagnose whether any smooth residual WCS/concordance field is coherent across tile boundaries. The current ECDFS result is that this smooth term is small compared with object-level centering scatter.
 
 The downside is that tile count overstates statistical independence. In the legacy 144-tile ECDFS subset, 50% overlap means there are only roughly ~36 truly independent sky areas. The expanded flat set improves sample count substantially, but overlap still matters when designing train/val/test splits or making final downstream performance claims.
 
@@ -155,7 +155,7 @@ The key insight: **256×256 tiles at 0.4"/px fused scale gives the same computat
 
 **Detection (CenterNet/StemCenterNet)**: Detection is fundamentally local -- each source is detected by its immediate neighborhood in the feature map. Tile size affects sources per tile but not what the model learns about individual sources. No meaningful impact from tile size changes.
 
-**Astrometry (concordance field)**: The smooth concordance field varies on degree scales (~5 mas across ECDFS). The global PINN/grid solver combines all tiles and doesn't care about tile boundaries. Per-tile field solving benefits from more sources (larger tiles), but the global solver is tile-size-agnostic. Tile overlap matters more than tile size here -- shared sources in overlap regions enforce continuity.
+**Astrometry**: The smooth concordance field varies on degree scales and is small in ECDFS (~5 mas). The global PINN/grid solver combines all tiles and is useful for WCS QA or fallback smooth correction, but the dominant error is object-level centering scatter. The latent position head is local, so tile size matters mostly through the spatial detail encoded by the foundation features, not through the smooth field solver.
 
 **Latent position head (per-object alignment)**: The head extracts local features at each source position: a 5×5 window from the bottleneck (~4" at 0.8"/px) and a 17×17 window from the VIS stem (~1.7" at 0.1"/px). **Changing tile size does not change the resolution of these local features.** What it changes is how much context the transformer had when computing the bottleneck features -- but the extracted window is always the same size. The fused scale, however, directly changes how much spatial detail the bottleneck encodes: at 0.4"/px instead of 0.8"/px, the 5×5 window would cover ~2" with 2× finer spatial structure.
 
@@ -575,21 +575,33 @@ Detection development originally used 130 training tiles and 14 validation tiles
 
 **Note on DETR (archived)**: DETR was the first detection approach tried, using a transformer decoder with 500 learned object queries and Hungarian matching. It was abandoned because: (1) DETR needs large datasets (trained for 500 epochs on 118k images; we have 130 tiles); (2) query collapse persisted for many epochs; (3) overkill for point-like sources at bottleneck resolution; (4) convergence was ~5× slower than CenterNet. The code is preserved for reference.
 
-### 2. Astrometry Concordance
+### 2. Astrometry and Concordance
 
 **Directory**: `models/astrometry2/`
 
-Astrometry concordance measures and corrects the smooth spatial distortion between Rubin and Euclid coordinate systems. Even after standard WCS calibration, there are residual sub-arcsecond offsets that vary smoothly across a tile. These must be corrected for joint analysis -- stacking images, measuring galaxy shapes for weak lensing, or combining photometry across instruments.
+The astrometry module now has two distinct roles:
 
-#### Key diagnostic finding (2026-04-11)
+1. **Per-object alignment**: the latent position head predicts an object-specific correction from image features. This is the current correction path for forced photometry and cross-band source alignment.
+2. **Smooth concordance fields**: PINN/NN/control-grid solvers fit a global residual WCS field. In the current ECDFS data this field is small, so it is mainly a QA product, diagnostic plot, and fallback smooth correction rather than the main astrometric fix.
 
-Analysis of 790 ECDFS tiles revealed that the actual concordance field signal is **very small (~5 mas)** while per-source centroid noise is **~47 mas** at typical matched-source SNR of 10-30. The 40-50 mas MAE previously reported was almost entirely centroid measurement noise, not unmodeled concordance field. The WCS alignment between Rubin and Euclid for ECDFS is already excellent. This has important implications:
+#### Key diagnostic finding (2026-04-17)
 
-- The per-patch NN matcher cannot beat centroid noise at these SNRs -- its predictions have the same ~50 mas scatter as raw centroid offsets.
-- The smooth field solver is the component that actually matters, because it averages over many noisy sources to recover the sub-noise signal.
-- For fields with larger concordance signals (different sky regions, different epochs), the signal-to-noise ratio per source will be better, and the pipeline more effective.
+Analysis of notebook 09 and the before/after astrometry comparison shows that the large raw offsets are dominated by **object-level centering / centroid-definition scatter**, not by a smooth WCS field.
 
-The centroid noise follows the King (1983) / SITCOMTN-159 scaling: σ ∝ FWHM/SNR. Bright unsaturated stars at SNR > 100 give ~5 mas precision; faint galaxies at SNR < 10 give ~100+ mas. Proper SNR-based weighting is critical.
+Latest diagnostic numbers:
+
+| Quantity | Median |
+|---|---:|
+| Smooth per-tile bulk/concordance field | **5.4 mas** |
+| Post-bulk source residual | **47.5 mas** |
+| Rubin detection centroid -> Rubin PSF-fit centroid | **52.7 mas** |
+| VIS detection centroid -> VIS PSF-fit centroid | **7.0 mas** |
+| Change in measured VIS-Rubin offset caused by recentering | **54.0 mas** |
+| Rubin r-vs-i band-centering offset | **47.8 mas** |
+
+The smooth field is therefore not the limiting correction in ECDFS. A concordance file can remove the small coherent residual and is still useful for WCS QA, but it cannot remove the dominant source-by-source centering ambiguity. The astrometry head is the right correction mechanism because it is conditioned on object image content and source quality.
+
+The centroid scatter follows the King (1983) / SITCOMTN-159 scaling: sigma is proportional to FWHM/SNR. Bright unsaturated stars at SNR > 100 can approach a few mas; faint or extended sources at SNR 10-30 naturally produce tens of mas. Proper SNR-based weighting remains important for any smooth field fit, but it is not a replacement for per-object correction.
 
 #### Context: Euclid instrument astrometric precision (Libralato et al. 2024)
 
@@ -605,7 +617,7 @@ Their approach relies on several conditions that differ fundamentally from the J
 | **Reference frame** | Gaia DR3 positions (propagated via proper motions) as external anchor | No external reference; self-consistent cross-instrument matching |
 | **Instruments** | Euclid only (VIS + NISP), single-epoch | Rubin (6 bands, ground-based) + Euclid (4 bands, space-based), coadds |
 | **Bands** | One filter at a time; colour-dependent systematics corrected empirically post-hoc | All 10 bands simultaneously via foundation model |
-| **Distortion** | Explicit 3rd-order polynomial GD per detector, calibrated against Gaia | Smooth concordance field fitted from per-source NN predictions |
+| **Distortion** | Explicit 3rd-order polynomial GD per detector, calibrated against Gaia | Small smooth concordance field for QA/fallback; per-object head for the dominant correction |
 
 **Key implications for JAISP:**
 
@@ -613,73 +625,48 @@ Their approach relies on several conditions that differ fundamentally from the J
 
 2. **Colour-dependent centroid systematics are confirmed.** Libralato et al. found a clear systematic in proper motions as a function of (BP-RP) colour (their Appendix C), attributed to the broad VIS filter (550-900 nm) causing colour-dependent PSF variations. This validates our latent position head approach: chromatic centroid shifts are real at the sub-mas level even for point sources, and worse for galaxies with colour gradients. Using the fused 10-band bottleneck to predict positions should handle this naturally, since the bottleneck encodes the full SED.
 
-3. **PSFNet could improve centroid training labels.** Their ePSF fitting achieves much better centroid precision than parametric Gaussian fitting. Our current `refine_centroids_psf_fit` uses a simple 2D Gaussian model with a fixed FWHM guess. If we instead used PSFNet (which learns spatially-varying, band-specific PSF shapes from isolated stars) as the centroiding template, we could get more accurate training labels for both the astrometry matcher and the latent position head. This is particularly relevant for stars, where the PSF template mismatch between the assumed Gaussian and the actual (non-Gaussian, spatially varying) PSF is a significant error source. See the discussion under "PSFNet-informed centroiding" below.
+3. **PSF models need to be used carefully.** Their ePSF fitting achieves much better centroid precision than a parametric Gaussian for bright isolated stars. In JAISP, however, PSFField-refined centroids were a worse training target for the latent head: v7 and v8 runs using PSFField labels plateaued near 29-30 mas. The head features encode the photon centroid visible in the local image window, not an external PSFField centroid that can differ by ~16 mas. Current best practice is to train/evaluate the head with Gaussian-fit photon-centroid labels and keep PSFField as a separate PSF/photometry product until a better joint training scheme is validated.
 
 4. **The self-calibration paradigm applies.** Libralato et al. iterate: measure positions → refine ePSF → refine GD → re-measure. JAISP's latent position head could participate in a similar loop: train on current centroids → predict better positions → use those as new training labels → retrain. This is the same self-training principle already used for detection.
 
-#### PSFNet-informed centroiding (planned)
+#### PSFField and centroid targets
 
-The JAISP photometry module already includes PSFNet (`models/photometry/psf_net.py`), a spatially-varying PSF model that predicts normalised PSF stamps conditioned on (x, y, band). Currently used only for matched-filter flux estimation, PSFNet could also improve astrometric centroiding:
+`models/psf/PSFField` is the current PSF model. It supersedes the legacy `models/photometry/psf_net.py` path. The important astrometry lesson from the v8 migration is:
 
-- **Current centroiding**: `refine_centroids_psf_fit` in `source_matching.py` fits a 2D Gaussian with a fixed FWHM guess. This is suboptimal because the actual PSF is non-Gaussian (especially in the wings), spatially varying, and band-dependent.
-- **PSFNet centroiding**: Given a trained PSFNet, we could replace the Gaussian template with the PSFNet prediction at each source's (x, y, band). The centroid fit becomes: minimise `sum_ij w_ij * (data_ij - flux * PSF(x+dx, y+dy))^2` over (dx, dy, flux), where PSF comes from PSFNet. This is conceptually equivalent to Libralato et al.'s ePSF fitting but using a learned model instead of an empirical stacking procedure.
-- **Expected gain**: Primarily for stars (point sources) where the PSF template is the dominant error source. For bright stars at SNR > 50, replacing the Gaussian with PSFNet could reduce centroid errors from ~10 mas to ~5 mas. For galaxies, the gain is smaller because the source morphology (not the PSF model) dominates the centroid uncertainty.
-- **Impact on latent position head**: Better centroids → better training labels → the head has a higher-quality target to learn from, which should improve convergence and final precision.
+- **Do not use PSFField-refined centroids as latent-head training targets yet.** They introduce an invisible target/feature mismatch and produce a ~29-30 mas validation plateau.
+- **Use Gaussian-fit photon centroids for latent-head training/evaluation** in the current pipeline.
+- **Use PSFField for PSF diagnostics and future forced photometry**, and revisit joint PSF + astrometry training once the target convention is explicit.
 
-This is a natural next step after the current latent position head training validates the approach. The implementation would add an optional `--psf-checkpoint` argument to the astrometry training scripts that replaces Gaussian centroiding with PSFNet template fitting.
+#### Current approach
 
-#### Two approaches
+**Latent position head (current correction)**: detect/centroid each source in a native band, project it into the VIS frame, and let the head predict a residual offset toward the VIS reference centroid. This is the path used for the latest before/after notebook and the `latent_position_v8_no_psf` checkpoint.
 
-**Per-patch NN matcher** (original): Detect sources, extract 33×33 patches, predict per-source offsets with a neural cost-volume matcher, then fit a smooth field. Best when per-source centroid precision is comparable to the concordance amplitude (SNR > 50).
+**Smooth field solvers (QA/fallback)**: `fit_direct_pinn.py` fits raw or head-residual anchors with PINN/NN smoothness priors. On raw anchors, the field amplitude is only ~5-9 mas and barely changes the tens-of-mas per-source residuals. On head residual anchors, the residual field amplitude is ~1 mas, confirming that the head has already removed the coherent component.
 
-**Direct PINN** (`fit_direct_pinn.py`, new): Skip the NN matcher entirely. Use raw centroid-based offsets weighted by King-formula SNR and fit a physics-informed neural network directly. The PINN's smoothness + curl-free + Laplacian constraints act as the denoiser. Best when centroid noise dominates (SNR < 50), which is the common case for the current ECDFS data. Runs on all tiles simultaneously with no tile boundaries.
+**Per-patch NN matcher (historical)**: detect sources, extract 33x33 patches, predict per-source offsets with a neural cost-volume matcher, then fit a smooth field. This remains useful for experiments but is not the current best per-object astrometry path.
 
 #### Pipeline
 
-For each tile, the pipeline proceeds through six stages:
+The current v8 per-object pipeline proceeds through these stages:
 
-1. **Source detection**: Find sources using either classical peak-finding (Rubin g+r+i+z coadd and VIS independently, then WCS cross-match) or the trained CenterNet detector (10-band neural detection in the VIS frame, no cross-matching needed). The neural detector option is valuable because it sees all 10 bands through the V7 encoder and can find fainter sources than classical 3-band detection, giving more anchor points for the field fit.
+1. **Source detection / centroiding**: Use the classical detector and Gaussian centroiding for the current best head training/evaluation path. CenterNet and PSFField variants exist, but the latest ablation found that PSFField centroid labels degrade the latent head.
 
-2. **Cross-instrument matching** (classical path only): Match Rubin and VIS source lists using WCS sky coordinates. Mutual nearest-neighbor matching with separation limits, sigma-clipping, and object-level deduplication removes spurious matches. Typically yields 50-200 matched pairs per tile. The CenterNet path skips this step since detections are already in the VIS frame.
+2. **Cross-instrument matching**: Match each non-VIS band to VIS using WCS sky coordinates and source-level quality cuts. Sources with raw offset > 200 mas or SNR < 5 are excluded from the headline evaluation.
 
-3. **Patch extraction**: For each matched source, extract a 33x33 pixel patch centered on the VIS position. All 10 bands (6 Rubin + VIS + 3 NISP) are reprojected onto the VIS pixel grid via WCS. When per-pixel variance maps are available in the NPZ files (which they are for both Rubin `var` and Euclid `var_VIS/Y/J/H`), per-pixel RMS patches are also extracted and reprojected alongside the image patches.
+3. **Latent feature extraction**: Run the frozen foundation on the tile. Extract a local bottleneck window and a VIS-stem window around each source via bilinear sampling.
 
-4. **Per-patch offset prediction**: The core of the matcher. Frozen V7 features extract representations from the Rubin/NISP and VIS patches independently. Two encoder modes are available:
-   - **Stem-only** (`--stream-stages 0`, default): Uses only the V7 BandStem CNNs, producing 33x33 feature maps at full patch resolution. This is equivalent to the V6 matcher.
-   - **Stem + stream stages** (`--stream-stages 1`): Applies one frozen V7 stream encoder ConvNeXt stage after the stems, producing 16x16 feature maps with richer cross-channel mixing. This leverages V7's deeper pretrained representations while maintaining enough spatial resolution for the cost volume.
+4. **Per-object offset prediction**: `latent_position_head.py` predicts `(dx, dy, log_sigma)` in VIS pixel space, converted to sky arcsec through the local WCS Jacobian.
 
-   When per-pixel RMS patches are available, the full BandStem normalization (`image / rms`) is used -- matching the normalization the stems saw during foundation pretraining. When RMS is absent, the legacy scalar MAD normalization is used as a fallback.
+5. **Evaluation and anchor export**: `eval_latent_position.py` reports raw and head residuals for all 9 non-VIS bands and can export `anchors.npz`.
 
-   Trainable ConvNeXt adapter blocks then refine these features toward astrometry-relevant signals. A spatially-weighted cross-correlation (cost volume) between the two feature maps produces a coarse offset via differentiable soft-argmax. An MLP refines this with a residual correction and outputs `(dx, dy, log_sigma)` in pixels, which a Jacobian matrix transforms to `(dRA*, dDec)` in arcseconds. In multiband mode, a learned band embedding conditions the MLP so each band gets a wavelength-specific correction. The uncertainty `sigma` is used to weight the field fit.
+6. **Optional smooth residual field**: `fit_direct_pinn.py --cache anchors.npz` fits raw or head-residual anchors. This is used to measure the remaining coherent WCS/concordance term; it is not the main correction applied on top of the head.
 
-5. **Smooth field fitting**: The per-source offsets are noisy -- each individual measurement has ~30-50 mas scatter. But the true distortion varies smoothly across the tile. A control-grid least-squares solver (bilinear basis functions with smoothness regularization and adaptive per-node anchor weights) fits a smooth 2D field from the noisy per-source measurements. An alternative MLP-based solver is also available.
+#### Matcher versions
 
-6. **Export**: The fitted concordance field is evaluated on a regular mesh and written to a FITS file as `dRA`, `dDec`, and coverage maps.
-
-```
-For each tile:
-  1. Detect sources (classical cross-match OR CenterNet 10-band)
-  2. Extract 33x33 patches + optional per-pixel RMS patches
-  3. Per-patch prediction:
-       Frozen V7 BandStems (+ optional stream stages)
-       -> per-pixel RMS normalization (or scalar MAD fallback)
-       -> ConvNeXt adapters
-       -> spatially-weighted cost volume (cross-correlation)
-       -> soft-argmax (differentiable coarse offset)
-       -> MLP refinement + band embedding -> (dx, dy, log_sigma) in pixels
-       -> Jacobian transform -> (dRA*, dDec) in arcsec
-  4. Fit smooth field from per-source offsets:
-       Control-grid least squares (or MLP solver)
-       with adaptive anchor regularization
-  5. Export concordance FITS (dRA, dDec, coverage maps)
-```
-
-#### Matcher Versions
-
-- **V7** (`matcher_v7.py`): Uses frozen V7 BandStems (from `jaisp_v7_concat`), where VIS is processed at native resolution. Supports `--stream-stages N` to use frozen V7 stream encoder ConvNeXt stages after the stems for richer features. This is the recommended matcher.
+- **V7** (`matcher_v7.py`): Uses frozen V7 BandStems (from `jaisp_v7_concat`), where VIS is processed at native resolution. Supports `--stream-stages N` to use frozen V7 stream encoder ConvNeXt stages after the stems for richer features. This is the current matcher implementation for concordance experiments.
 - **V6** (`matcher_v6.py`): Archived. Uses V6 Phase B BandStems where VIS was downsampled to Rubin resolution. Kept for backward compatibility.
 
-Both versions support multiband mode (per-band learned embeddings for wavelength-specific chromatic correction) and separate learning rates (full LR for adapters and heads, 0.1x for stems and stream stages if unfrozen for fine-tuning).
+Both matcher versions support multiband mode and remain available, but the latent position head is the current best route for per-object alignment.
 
 #### SITCOMTN-159 Motivated Improvements
 
@@ -700,13 +687,13 @@ The first stage of the pipeline -- detecting sources -- can use either:
 - **Classical** (default): `detect_sources()` performs median background subtraction, Gaussian smoothing, and local maximum detection above an N-sigma threshold in both Rubin (g+r+i+z coadd) and VIS independently, then cross-matches via WCS. Simple, fast, and well-understood.
 - **Neural** (optional): Pass `--detector-checkpoint` to replace classical detection with the trained CenterNet detector. The neural detector sees all 10 bands through the V7 encoder and produces source positions directly in the VIS frame -- no cross-matching step needed. It can find fainter sources that are invisible in a 3-band coadd, providing more anchor points for the concordance fit (typically 200+ anchors per tile vs 50-150 with classical).
 
-#### Field Solvers
+#### Field solvers
 
-Three solvers are available for fitting the smooth concordance field from per-source offset measurements:
+Three solvers are available for fitting the smooth concordance field from per-source offset measurements. In the latest workflow they are used mainly for raw/head-residual field diagnostics:
 
 - **Control grid** (`field_solver.py`): Fits bilinear basis functions on a regular grid using weighted least squares. Includes finite-difference smoothness regularization and adaptive per-node anchor weights that prevent edge drift in regions with sparse source coverage. The grid resolution is automatically reduced for tiles with few matches to avoid underdetermined systems.
 - **Neural network** (`nn_field_solver.py`): An MLP with residual connections (for >= 4 layers) that maps normalized (x, y) tile coordinates to (dRA, dDec) offsets, trained via Adam with cosine LR, gradient clipping, and best-state tracking. Optional Huber loss for robustness to outlier centroids. Has no grid resolution hyperparameter, is infinitely differentiable, and scales naturally to any source density. Select via `--solver nn` in `fit_direct_pinn.py`.
-- **PINN** (`pinn_field_solver.py`): Physics-Informed Neural Network that encodes physical constraints via automatic differentiation: curl-free constraint (optical distortion fields are irrotational), Laplacian smoothness, and band consistency (achromatic geometric field + small per-band chromatic residual). Recommended for the global field fit where these physics priors are well motivated.
+- **PINN** (`pinn_field_solver.py`): Physics-Informed Neural Network that encodes physical constraints via automatic differentiation: curl-free constraint (optical distortion fields are irrotational), Laplacian smoothness, and band consistency (achromatic geometric field + small per-band chromatic residual). Preferred for the global field diagnostic because the physics priors prevent noisy anchors from becoming spurious structure.
 
 #### Files
 
@@ -719,13 +706,13 @@ Three solvers are available for fitting the smooth concordance field from per-so
 | `field_solver.py` | Control-grid least-squares field solver |
 | `nn_field_solver.py` | MLP-based field solver |
 | `pinn_field_solver.py` | Physics-Informed NN field solver (curl-free, Laplacian, band consistency) |
-| `fit_direct_pinn.py` | Direct concordance from raw centroids (bypasses NN matcher). Dispatches to PINN (`--solver pinn`, default) or NN (`--solver nn`) |
+| `fit_direct_pinn.py` | Direct concordance from raw or head-residual anchors. Dispatches to PINN (`--solver pinn`, default) or NN (`--solver nn`) |
 | `train_astro_v6.py` | Training script (V6 backbone) |
 | `train_astro_v7.py` | Training script (V7 backbone, CenterNet or classical sources, saves full checkpoint metadata) |
 | `infer_concordance.py` | Per-tile inference -> FITS export |
 | `infer_global_concordance.py` | Global multi-tile concordance fitting |
 | `apply_concordance.py` | Apply fitted concordance fields to data |
-| `sky_cube.py` | Aligned 10-band sky cube extraction with concordance correction |
+| `sky_cube.py` | 10-band sky cube extraction; can apply a smooth concordance field when requested |
 | `train_local_matcher.py` | Local matcher training script |
 | `latent_position_head.py` | Latent-space canonical position head for per-object multi-band alignment |
 | `train_latent_position.py` | Training script for the latent position head |
@@ -734,9 +721,9 @@ Three solvers are available for fitting the smooth concordance field from per-so
 
 #### Latent Position Head (Per-Object Multi-Band Alignment)
 
-The per-patch NN matcher and field solver address the smooth concordance field (~5-7 mas). But for per-object science -- forced photometry, SED fitting, shape measurement -- you need each source's position aligned to better than ~20 mas across all 10 bands. The ~50 mas per-source centroid scatter is the bottleneck, and it has both random (noise) and systematic (chromatic) components.
+The per-patch NN matcher and field solvers address the smooth concordance field (~5 mas in ECDFS). For per-object science -- forced photometry, SED fitting, shape measurement -- the bottleneck is the ~40-120 mas raw source-centering scatter. This scatter is source-by-source, so it must be corrected source-by-source.
 
-The **latent position head** (`latent_position_head.py`) attacks this by using the frozen V7 encoder's full multi-band representation to predict chromatically-informed canonical source positions:
+The **latent position head** (`latent_position_head.py`) uses the frozen foundation encoder's multi-band representation to predict chromatically-informed source positions:
 
 1. Run the frozen V7 encoder on the full tile (once) to get the fused bottleneck (0.8"/px, 256 ch) and raw VIS BandStem features (0.1"/px, 64 ch).
 2. For each detected source, extract local windows from both feature maps via bilinear `grid_sample`.
@@ -744,7 +731,7 @@ The **latent position head** (`latent_position_head.py`) attacks this by using t
 
 The bottleneck path captures chromatic morphology from all 10 bands (star vs galaxy, color gradients, DCR). The VIS stem path provides fine spatial precision. The combination can potentially place source positions more accurately than any single-band centroiding.
 
-**Training**: Uses jitter-based self-supervision. VIS PSF-fit centroids serve as ground truth; controlled Gaussian jitter (~30 mas) creates approximate input positions. The head learns to recover the true centroid from the latent features. At inference, any rough initial position can be refined.
+**Training**: Uses jitter-based self-supervision. VIS Gaussian-fit centroids serve as the current target convention; controlled Gaussian jitter (~30 mas) creates approximate input positions. The head learns to recover the photon centroid visible in the latent features. PSFField-refined centroids are not used as training targets in the current best run because they create a target/feature mismatch.
 
 ```bash
 python models/astrometry2/train_latent_position.py \
@@ -765,7 +752,7 @@ python models/astrometry2/train_latent_position.py \
 
 The head recovers jittered positions to **17.7 mas** on val -- well below the 30 mas jitter and below the 20 mas target. Train/val are nearly identical (no overfitting). The mean jitter magnitude is ~37.5 mas, so the head recovers ~53% of the applied offset; the residual ~18 mas represents the spatial resolution floor of the bottleneck features at 0.8"/px.
 
-**Cross-instrument evaluation** (790 tiles, all bands → VIS, SNR ≥ 5, raw offset < 200 mas):
+**Cross-instrument evaluation, v7 checkpoint** (790 tiles, all bands -> VIS, SNR >= 5, raw offset < 200 mas):
 
 ```bash
 cd models && python astrometry2/eval_latent_position.py \
@@ -794,27 +781,44 @@ For each source, the eval centroids in each of the 9 non-VIS bands' native pixel
 | nisp_H | 122,341 | 42 mas | **13 mas** | 51% |
 | **All** | **630,120** | **44 mas** | **13.5 mas** | **51%** |
 
-The head achieves **13.5 mas median** alignment across all 9 bands — well below the 20 mas target. The improvement is remarkably consistent (~51%) across all bands and both instruments. NISP and Rubin g/r/i/z converge to the same ~13 mas floor, indicating the model uses the fused multi-band bottleneck representation rather than single-band features. The ~13 mas floor is the spatial resolution limit of the v7 bottleneck at 0.8"/px (~0.016 bottleneck pixels).
+The v7 head achieves **13.5 mas median** alignment across all 9 bands -- below the 20 mas target. The improvement is consistent (~51%) across all bands and both instruments. NISP and Rubin g/r/i/z converge to the same ~13 mas floor, indicating the model uses the fused multi-band bottleneck representation rather than single-band features. This remains a useful baseline, but the current best evaluated checkpoint is the v8 no-PSF run below.
 
-#### V8 migration (2026-04-16)
+#### V8 migration and latest evaluated result (2026-04-17)
 
 The latent position head now works with either v7 or v8 foundations via `load_foundation()` auto-detection. Pass any foundation checkpoint via `--foundation-checkpoint`. The bottleneck window auto-scales to match ~4" physical coverage (v7: 5×5, v8: 11×11) when `--bottleneck-window 0` is given, but **empirically `bottleneck_window=5` works best for v8 too** — the ConvNeXt block's 3×3 kernel can't effectively integrate a 11×11 input, so the larger window dilutes the signal.
 
-A subtle but important lesson from the v8 migration: **do NOT use PSFField-refined centroids as training targets for the latent position head.** The head extracts features at the jittered position, and the features naturally encode "where the photon centroid is in the window." If the target is the PSFField-refined centroid (which differs from the photon centroid by ~16 mas), the head learns to match a quantity that is systematically offset from what it can see in features. Three training runs confirmed this:
+A subtle but important lesson from the v8 migration: **do NOT use PSFField-refined centroids as training targets for the latent position head.** The head extracts features at the jittered position, and the features naturally encode "where the photon centroid is in the window." If the target is the PSFField-refined centroid (which differs from the photon centroid by ~16 mas), the head learns to match a quantity that is systematically offset from what it can see in features. The ablations confirmed this:
 
 | Run | Foundation | Centroid labels | Detection | Val MAE |
 |---|---|---|---|---|
 | Baseline (v7) | v7 | Gaussian fit | classical | 17.7 mas |
 | v8 + PSFField | v8 | PSFField v3 | CenterNet v8 | 29.3 mas |
 | **v7 + PSFField (ablation)** | **v7** | **PSFField v3** | **CenterNet v8** | **29.9 mas** |
-| **v8 no-PSF / no-CN** | **v8** | **Gaussian fit** | **classical** | **~13 mas** (projected) |
+| **v8 no-PSF / no-CN** | **v8** | **Gaussian fit** | **classical** | **current best; see table below** |
 
-The v7 and v8 runs with PSFField labels converge to identical ~29 mas plateaus, proving the foundation is not the bottleneck — the target/feature mismatch creates an irreducible noise floor. The correct architectural pattern is:
+The v7 and v8 runs with PSFField labels converge to identical ~29 mas plateaus, proving the foundation is not the bottleneck -- the target/feature mismatch creates an irreducible noise floor. The current architectural pattern is:
 
 1. **Train** the head with Gaussian-fit VIS centroids as targets.
-2. **At inference**, take the head's predicted position and run `refine_centroids_psf_field()` from `psf.centroid_refinement` for a final sub-pixel polish.
+2. **Evaluate/use** the head prediction directly for the astrometric correction.
+3. **Fit a residual PINN/NN field only as QA/fallback**, not as a major additional correction.
 
-This is wired into `eval_latent_position.py` via `--psf-checkpoint` (optional). The evaluation output compares three columns: raw band offset, head-corrected, head + PSFField polish.
+The optional `--psf-checkpoint` path in `eval_latent_position.py` exists for experiments, but it is not part of the current best astrometry claim.
+
+**Latest v8 no-PSF cross-instrument result** (`models/checkpoints/latent_position_v8_no_psf/eval/results.json`, 790 tiles, SNR >= 5, raw offset < 200 mas):
+
+| Band | N sources | Raw median | Head median | Head p68 | Median improvement |
+|------|-----------|-----------:|------------:|---------:|-------------------:|
+| rubin_u | 12,347 | 119.4 mas | 30.5 mas | 53.3 mas | 74.5% |
+| rubin_g | 60,148 | 54.0 mas | 11.4 mas | 22.3 mas | 78.9% |
+| rubin_r | 70,022 | 45.7 mas | 10.4 mas | 19.8 mas | 77.2% |
+| rubin_i | 62,232 | 41.2 mas | 10.3 mas | 18.9 mas | 75.1% |
+| rubin_z | 42,980 | 41.9 mas | 10.9 mas | 19.9 mas | 74.0% |
+| rubin_y | 17,126 | 61.5 mas | 14.7 mas | 29.4 mas | 76.2% |
+| nisp_Y | 116,572 | 41.3 mas | 9.4 mas | 17.0 mas | 77.2% |
+| nisp_J | 126,352 | 41.9 mas | 9.4 mas | 17.0 mas | 77.5% |
+| nisp_H | 122,341 | 42.2 mas | 9.5 mas | 17.0 mas | 77.6% |
+
+The v8 head reduces the radial median residual by roughly **74-79%** across all bands. Rubin g/r/i/z and NISP Y/J/H reach **~9-11 mas median**; Rubin y is **14.7 mas**; Rubin u remains harder at **30.5 mas** because of low SNR and larger raw offsets. Applying a residual PINN field after the head changes medians by only ~0.0-0.2 mas, because the remaining smooth field amplitude is already ~1 mas.
 
 #### End-to-end v8 pipeline (ready to invoke)
 
@@ -834,21 +838,20 @@ PYTHONPATH=models python models/astrometry2/eval_latent_position.py \
     --euclid-dir       data/euclid_tiles_all \
     --foundation-checkpoint models/checkpoints/jaisp_v8_fine/checkpoint_best.pt \
     --head-checkpoint  models/checkpoints/latent_position_v8_no_psf/best.pt \
-    --psf-checkpoint   models/checkpoints/psf_field_v3.pt \
     --save-anchors     models/checkpoints/latent_position_v8_no_psf/anchors.npz \
     --output-dir       models/checkpoints/latent_position_v8_no_psf/eval
 
-# 3a. Fit PINN-smoothed global concordance field (default solver)
+# 3a. Fit PINN-smoothed raw-anchor concordance field for QA/fallback
 PYTHONPATH=models python models/astrometry2/fit_direct_pinn.py \
     --cache   models/checkpoints/latent_position_v8_no_psf/anchors.npz \
-    --output  models/checkpoints/latent_position_v8_no_psf/concordance_pinn.fits \
+    --output  models/checkpoints/latent_position_v8_no_psf/concordance_pinn_raw_fixed.fits \
     --bands r i g z --include-nisp
 
-# 3b. Or use NN solver (no physics constraints, regularised by weight decay + residual MLP)
+# 3b. Fit the head-residual field; this should be ~1 mas if the head removed the coherent term
 PYTHONPATH=models python models/astrometry2/fit_direct_pinn.py \
     --cache   models/checkpoints/latent_position_v8_no_psf/anchors.npz \
-    --solver nn \
-    --output  models/checkpoints/latent_position_v8_no_psf/concordance_nn.fits \
+    --use-head-resid \
+    --output  models/checkpoints/latent_position_v8_no_psf/concordance_pinn_head_resid_fixed.fits \
     --bands r i g z --include-nisp
 ```
 
@@ -860,7 +863,7 @@ The PSF is a fundamental survey property consumed by three downstream tasks (ast
 
 #### Why PSFs matter for this project
 
-Astrometry2 plateaued at 40–50 mas MAE, and we traced the residual to **centroiding noise on the astrometric anchors themselves** rather than the matcher. Every anchor position was estimated from a 2D Gaussian fit whose centroid is biased by the real (non-Gaussian) PSF shape and broadened by centroid noise in the detection step. Improving the PSF model is therefore a prerequisite for sub-20 mas astrometry, not just a photometry nicety.
+Astrometry2 initially plateaued at 40-50 mas MAE, and notebook 09 traces that raw-anchor residual to **centering / centroid-definition scatter** rather than a missing smooth concordance field. PSF modelling is still important, but the v8 astrometry migration showed that PSFField-refined centroids are not automatically better latent-head labels: used directly as targets they create a ~29-30 mas plateau. The current role of PSFField is PSF diagnostics and future forced photometry, with astrometric label use deferred until the centroid convention is made explicit in a joint PSF+head training loop.
 
 #### PSFField architecture
 
@@ -957,7 +960,8 @@ JAISP/
 +-- checkpoints/
 |   +-- centernet_v7_rms_aware/        Current CenterNet (on jaisp_v7_concat)
 |   +-- stem_centernet_v7_rms_aware_200/ Current StemCenterNet
-|   +-- astro_v7_psffit/               Current astrometry matcher (training)
+|   +-- astro_v7_psffit/               Historical V7 astrometry matcher
+|   +-- latent_position_v8_no_psf/     Current v8 latent astrometry head + anchor fields
 |   +-- jaisp_v7_baseline/             Archived (pre-RMS-aware, wrong NISP scale)
 |
 +-- models/
@@ -987,7 +991,7 @@ JAISP/
 |   |   +-- matcher.py                Hungarian matcher (archived)
 |   |   +-- train_detection.py        DETR training script (archived)
 |   |
-|   +-- astrometry2/                   Rubin<->Euclid concordance
+|   +-- astrometry2/                   Per-object astrometry head + concordance QA fields
 |   |   +-- matcher_v7.py              V7 patch matcher (stem + optional stream stages)
 |   |   +-- matcher_v6.py              V6 patch matcher
 |   |   +-- latent_position_head.py    Latent-space canonical position head (per-object alignment)
@@ -1099,37 +1103,36 @@ python models/detection/self_train_stem.py \
     --wandb_project jaisp-detection
 ```
 
-### 3. Astrometry Matcher
+### 3. Astrometry
 
-The matcher is a patch-level model -- it only needs to learn "given a 33x33 patch pair, predict the offset." Training on ~200 tiles is sufficient; inference and field solving then run on all 790.
+The current astrometry correction is the latent position head: it predicts a per-object offset from frozen foundation features and reduces the dominant centering scatter. The older patch matcher and concordance field solvers are still available, but they are now best treated as smooth-field QA/fallback tools because ECDFS has only a few mas of coherent WCS residual.
 
 Key features:
-- **PSF-fit centroiding** (SITCOMTN-159): 2D Gaussian fitting replaces flux-weighted centroids, giving ~2x better centroid precision for bright sources.
-- **Label noise floor** (`--label-noise-floor`, default 5 mas): prevents overfitting to the ~5 mas systematic in Rubin single-visit WCS positions.
-- **Per-source SNR estimation**: each training sample carries an SNR-derived label uncertainty that modulates the Rayleigh NLL loss.
-- **Multiband mode**: default trains all Rubin + NISP bands (10 total). Use `--bands` to limit targets.
+- **Latent head correction**: current v8 no-PSF checkpoint reduces raw 41-62 mas optical/NISP medians to ~9-15 mas, with Rubin u at ~30 mas.
+- **Centering diagnosis**: notebook 09 shows the large raw offsets are source-level centering scatter; the smooth field is only ~5 mas.
+- **Residual field QA**: PINN/NN fields fitted to head residuals have ~1 mas amplitude and do not materially change the median residuals.
+- **Historical matcher path**: `train_astro_v7.py` remains available for per-patch matcher experiments and concordance exports.
 
 ```bash
 cd models
 
-# Recommended: V7 backbone + CenterNet detector + PSF-fit centroids
-python astrometry2/train_astro_v7.py \
-    --v7-checkpoint       checkpoints/jaisp_v7_concat/checkpoint_best.pt \
-    --detector-checkpoint ../checkpoints/centernet_v7_rms_aware/centernet_best.pt \
-    --rubin-dir           ../data/rubin_tiles_200 \
-    --euclid-dir          ../data/euclid_tiles_200 \
-    --multiband \
-    --epochs 120 \
-    --output-dir checkpoints/astro_v7_psffit
+# Train the current v8 latent position head
+CUDA_VISIBLE_DEVICES=0,1 PYTHONPATH=. python astrometry2/train_latent_position.py \
+    --rubin-dir        ../data/rubin_tiles_all \
+    --euclid-dir       ../data/euclid_tiles_all \
+    --foundation-checkpoint checkpoints/jaisp_v8_fine/checkpoint_best.pt \
+    --output-dir       checkpoints/latent_position_v8_no_psf \
+    --epochs 30 --bottleneck-window 5 --dual-gpu \
+    --wandb-project JAISP-LatentPosition
 
-# Without CenterNet (classical source detection)
-python astrometry2/train_astro_v7.py \
-    --v7-checkpoint  checkpoints/jaisp_v7_concat/checkpoint_best.pt \
-    --rubin-dir      ../data/rubin_tiles_200 \
-    --euclid-dir     ../data/euclid_tiles_200 \
-    --multiband \
-    --epochs 120 \
-    --output-dir checkpoints/astro_v7_classical
+# Evaluate and export anchors for concordance QA
+PYTHONPATH=. python astrometry2/eval_latent_position.py \
+    --rubin-dir        ../data/rubin_tiles_all \
+    --euclid-dir       ../data/euclid_tiles_all \
+    --foundation-checkpoint checkpoints/jaisp_v8_fine/checkpoint_best.pt \
+    --head-checkpoint  checkpoints/latent_position_v8_no_psf/best.pt \
+    --save-anchors     checkpoints/latent_position_v8_no_psf/anchors.npz \
+    --output-dir       checkpoints/latent_position_v8_no_psf/eval
 ```
 
 ### 4. Concordance Inference
@@ -1137,38 +1140,39 @@ python astrometry2/train_astro_v7.py \
 ```bash
 cd models
 
-# Generate concordance FITS with V7 matcher + CenterNet sources
-python astrometry2/infer_concordance.py \
-    --checkpoint          checkpoints/astro_v7_psffit/checkpoint_best.pt \
-    --v7-checkpoint       checkpoints/jaisp_v7_concat/checkpoint_best.pt \
-    --detector-checkpoint ../checkpoints/centernet_v7_rms_aware/centernet_best.pt \
-    --rubin-dir      ../data/rubin_tiles_all \
-    --euclid-dir     ../data/euclid_tiles_all \
-    --output         concordance_v7.fits \
-    --all-bands
+# Fit raw-anchor smooth field for QA/fallback
+PYTHONPATH=. python astrometry2/fit_direct_pinn.py \
+    --cache  checkpoints/latent_position_v8_no_psf/anchors.npz \
+    --output checkpoints/latent_position_v8_no_psf/concordance_pinn_raw_fixed.fits \
+    --bands r i g z --include-nisp
+
+# Fit head-residual smooth field; expected amplitude is ~1 mas
+PYTHONPATH=. python astrometry2/fit_direct_pinn.py \
+    --cache checkpoints/latent_position_v8_no_psf/anchors.npz \
+    --use-head-resid \
+    --output checkpoints/latent_position_v8_no_psf/concordance_pinn_head_resid_fixed.fits \
+    --bands r i g z --include-nisp
 ```
 
 ### 5. Latent Position Head (Per-Object Alignment)
 
 ```bash
-python models/astrometry2/train_latent_position.py \
-    --rubin-dir  data/rubin_tiles_200 \
-    --euclid-dir data/euclid_tiles_200 \
-    --v7-checkpoint models/checkpoints/jaisp_v7_concat/checkpoint_best.pt \
-    --epochs 30 --lr 3e-4 \
-    --jitter-arcsec 0.03 --jitter-max-arcsec 0.1 \
-    --output-dir models/checkpoints/latent_position_head \
-    --wandb-project JAISP-LatentPosition
+# See the astrometry command above. The current checkpoint is:
+# models/checkpoints/latent_position_v8_no_psf/best.pt
 ```
 
-### 6. PSF Training
+### 6. PSFField Training
 
 ```bash
-python models/photometry/train_psf_net.py \
-    --rubin_dir  data/rubin_tiles_200 \
-    --euclid_dir data/euclid_tiles_200 \
-    --out checkpoints/psf_net_v1.pt \
-    --epochs 20
+python models/psf/train_psf_field.py \
+    --rubin_dir  data/rubin_tiles_all \
+    --euclid_dir data/euclid_tiles_all \
+    --out models/checkpoints/psf_field_v3.pt \
+    --centernet_labels data/detection_labels/centernet_v8_r2_790.pt \
+    --epochs 60 \
+    --siren_hidden 192 --siren_depth 6 --w0_first 15 \
+    --stamp_size 25 \
+    --wandb_project JAISP-PSF
 ```
 
 ---
@@ -1179,11 +1183,13 @@ python models/photometry/train_psf_net.py \
 
 | Checkpoint | Location | Description |
 |------------|----------|-------------|
-| **V7 foundation (RMS-aware)** | `models/checkpoints/jaisp_v7_concat/checkpoint_best.pt` | v7_rms_aware_loss run (epoch 92). Trained on 790 tile pairs with correct NISP pixel scales and RMS-aware loss. **Use this for all downstream training.** |
+| **V7 foundation (RMS-aware)** | `models/checkpoints/jaisp_v7_concat/checkpoint_best.pt` | v7_rms_aware_loss run (epoch 92). Trained on 790 tile pairs with correct NISP pixel scales and RMS-aware loss. Default stable foundation for most downstream work; current astrometry also has a v8 path below. |
+| **V8 foundation (fine-scale)** | `models/checkpoints/jaisp_v8_fine/checkpoint_best.pt` | Fine-scale 0.4"/px foundation used by the current latent astrometry head. |
 | **CenterNet detector** | `checkpoints/centernet_v7_rms_aware/centernet_best.pt` | Fused-bottleneck CenterNet, 2-round self-training on top of `jaisp_v7_concat`. |
 | **StemCenterNet detector** | `checkpoints/stem_centernet_v7_rms_aware_200/stem_centernet_best.pt` | Native-resolution stem detector on top of `jaisp_v7_concat`. |
-| **Astrometry V7 matcher** | `models/checkpoints/astro_v7_psffit/checkpoint_best.pt` | V7 multiband matcher with PSF-fit centroids, trained on 200 tiles. |
-| **Latent position head** | `models/checkpoints/latent_position_head/best.pt` | Per-object multi-band alignment head (experimental, train with `train_latent_position.py`). |
+| **Latent position head (current)** | `models/checkpoints/latent_position_v8_no_psf/best.pt` | Current per-object astrometry correction. Uses v8 foundation, Gaussian centroid targets, no PSFField labels. |
+| **Astrometry V7 matcher** | `models/checkpoints/astro_v7_psffit/checkpoint_best.pt` | Historical V7 multiband matcher with PSF-fit centroids, trained on 200 tiles. Use for matcher experiments, not the current headline correction. |
+| **Latent position head (v7 baseline)** | `models/checkpoints/latent_position_head/best.pt` | Earlier v7 per-object alignment head. |
 
 ### Archived (historical reference only)
 
@@ -1207,7 +1213,7 @@ These checkpoints are outdated -- trained on wrong NISP pixel scales (0.3"/px as
 
 **Foundation models**
 - **V7**: `models/checkpoints/jaisp_v7_concat/checkpoint_best.pt` (epoch 92), RMS-aware loss, 790 tiles, correct NISP MER pixel scales. Production foundation.
-- **V8**: `models/checkpoints/jaisp_v8_fine/checkpoint_best.pt` — fine-scale experiment (0.4"/px fused), 200 tiles. Used for v8 detection.
+- **V8**: `models/checkpoints/jaisp_v8_fine/checkpoint_best.pt` — fine-scale experiment (0.4"/px fused), 200 tiles. Used for v8 detection and the current v8 latent astrometry head.
 
 **Detection**
 - **CenterNet v7**: `checkpoints/centernet_v7_rms_aware/` — 2-round self-training on v7 foundation, 200 tiles.
@@ -1223,21 +1229,20 @@ These checkpoints are outdated -- trained on wrong NISP pixel scales (0.3"/px as
   - Diagnostics: `models/psf/validate_psf_field.py`, W&B panels (gallery, radial profiles, example stamps, centroid drift).
   - Notebook: `io/10_psf_visualization.ipynb`.
 
-**Astrometry — V8 migration working (2026-04-16)**
+**Astrometry — current v8 result (2026-04-17)**
 - Latent position head migrated to v8 foundation via `load_foundation()` auto-detection. Dual-GPU prefetch wired (`--dual-gpu`: encoder on GPU 0, head on GPU 1).
-- Comparison of four runs on identical val splits:
-  - V7 baseline (classical detection + Gaussian centroids, 200 tiles): **17.7 mas** val MAE
-  - V7 + PSFField-v3 centroids + CenterNet-v8 (790 tiles): 29.9 mas
-  - V8 + PSFField-v3 centroids + CenterNet-v8 (790 tiles): 29.3 mas
-  - **V8 + Gaussian centroids + classical detection (790 tiles): ~13 mas projected**, currently training
-- **Key lesson**: PSFField-refined centroids introduce a ~16 mas label-noise floor when used as training targets (the head's features encode "photon centroid" not "PSFField centroid" — the discrepancy is invisible to features). Use PSFField at inference only. See the V8 migration subsection under Astrometry.
-- Field solvers (PINN / NN / control-grid) are foundation-agnostic. `eval_latent_position.py` now exports per-source anchors via `--save-anchors` directly consumable by `fit_direct_pinn.py --cache`.
+- Current checkpoint: `models/checkpoints/latent_position_v8_no_psf/best.pt`.
+- Cross-instrument evaluation on 790 ECDFS tiles: raw medians of 41-62 mas for Rubin g/r/i/z/y and NISP Y/J/H are reduced to **9-15 mas** after the head; Rubin u is reduced from **119 mas** to **30.5 mas**. Improvement is **~74-79%** in the median radial residual.
+- Notebook 09 diagnosis: the large raw residual is **centering / centroid-definition scatter**. Smooth per-tile bulk field is **5.4 mas**, post-bulk source residual is **47.5 mas**, and the measured offset changes by **54.0 mas** when recentered from detection to PSF-fit centroids.
+- Residual PINN/concordance after the head is a QA/fallback product. Its field amplitude is ~1 mas and changes the head residual medians by only ~0.0-0.2 mas.
+- **Key lesson**: PSFField-refined centroids introduce a ~16 mas target mismatch when used as training labels; v7/v8 PSFField-label runs plateau at **29-30 mas**. Use Gaussian-fit photon centroids for the current head target convention.
+- Field solvers (PINN / NN / control-grid) are foundation-agnostic. `eval_latent_position.py` exports per-source anchors via `--save-anchors` directly consumable by `fit_direct_pinn.py --cache`; use `--use-head-resid` to fit the post-head residual field.
 
 **Photometry**
-- Existing matched-filter pipeline (`models/photometry/`) works but still references legacy PSFNet (never trained). Will migrate to PSFField after astrometry validation.
+- Existing matched-filter pipeline (`models/photometry/`) works but still references legacy PSFNet (never trained). Will migrate to PSFField as a photometry task; PSFField is not part of the current best astrometric target convention.
 
 **Open milestones**
-- **Out-of-distribution evaluation** (see Motivation § "Why a Foundation Model"). All current metrics are on ECDFS tract5063. We have not yet evaluated on a non-ECDFS field. Until we do, we cannot measure the foundation's actual value proposition — transfer without retraining. Highest-leverage next experiment after astrometry settles: download ~50 tiles from EDF-North, run eval + PINN on them without any retraining, compare the MAE to the ECDFS numbers.
+- **Out-of-distribution evaluation** (see Motivation § "Why a Foundation Model"). All current metrics are on ECDFS tract5063. We have not yet evaluated on a non-ECDFS field. Until we do, we cannot measure the foundation's actual value proposition -- transfer without retraining. Highest-leverage next experiment after astrometry settles: download ~50 tiles from EDF-North, run the latent-head eval + residual-field QA without any retraining, compare the MAE to the ECDFS numbers.
 - **Foundation ablation on astrometry**: train the same latent position head with BandStem features disabled (VIS stem only, no bottleneck context). Measures how much the multi-band bottleneck is actually contributing vs. the single-band VIS features. Informs whether to invest in better foundations or better single-band heads.
 - **Downstream tasks beyond astrometry**: weak-lensing shape measurement, photo-z inputs, transient classification. Each new task that consumes frozen foundation features reduces the foundation's amortised cost and tests a different aspect of the learned representation.
 

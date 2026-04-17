@@ -10,7 +10,7 @@ Both models learn to reconstruct held-out bands at pixel precision from the rema
 For downstream heads, see:
 
 - `detection/README.md` (DETR source detection)
-- `astrometry2/README.md` (Rubin <-> Euclid VIS concordance)
+- `astrometry2/README.md` (per-object Rubin <-> Euclid alignment and concordance QA)
 - `photometry/README.md` (PSF modeling + forced photometry)
 
 ---

@@ -1,48 +1,77 @@
-# Astrometry2: Rubin → Euclid VIS Concordance
+# Astrometry2: Per-Object Alignment + Concordance QA
 
 ## What this is for
 
-Rubin and Euclid observe the same sky but their astrometric solutions are not perfectly aligned. There are small residual offsets between the two instruments, varying slowly across the field. For JAISP to combine Rubin and VIS data at the pixel level, we need to know, at every position in the VIS frame: "if I project a Rubin sky coordinate through the VIS WCS, by how many arcseconds is it off?"
+Rubin and Euclid observe the same sky, but source centers do not land at exactly the same place in every band/instrument. In the current ECDFS data, the dominant offset is **not** a large smooth WCS distortion. It is source-by-source centering / centroid-definition scatter: a galaxy or faint source has a slightly different measured center in Rubin, VIS, NISP, and even different Rubin bands.
 
-The answer is a smooth 2D field of corrections (ΔRA*, ΔDec) stored as a coarse mesh over the VIS tile. This is the **astrometry concordance product**.
+This directory therefore supports two related products:
 
-Key design principles (from the JAISP data product spec):
+1. **Latent position head**: the current per-object correction path. It predicts a source-specific offset from frozen foundation features and aligns all non-VIS bands to the VIS reference frame.
+2. **Concordance fields**: smooth residual WCS fields fitted with PINN/NN/control-grid solvers. In ECDFS these fields are small and are mainly used for QA, diagnostics, and fallback smooth correction.
+
+Key design principles:
+- The final high-precision correction comes from the **object-level head**, not from stacking a large concordance field on top of WCS.
 - The correction is stored in **sky coordinates** (arcsec), not pixel offsets.
-- At every VIS pixel position (x, y): apply the correction to Rubin's sky coord before projecting onto the VIS grid.
-- Perfect alignment means ΔRA* = ΔDec = 0 everywhere.
-- WCS handles geometry; concordance handles the residual astrometric error.
-- The correction mesh is sampled every ~8 VIS pixels (DSTEP=8, i.e. 0.8"), keeping files compact. Downstream code bilinearly interpolates to native resolution at runtime.
+- WCS handles geometry; the latent head handles object-level centering; the concordance field measures any remaining smooth residual.
+- Perfect post-head alignment means the residual field and the median residual vector are consistent with zero.
+- Concordance meshes are sampled coarsely and bilinearly interpolated when a smooth field correction is explicitly requested.
 
 ---
 
 ## Why a neural network?
 
-Classical source matching gives you a discrete set of (Rubin source position, VIS source position, offset) triples, typically a few hundred per tile. To turn those sparse noisy measurements into a smooth continuous field you need to suppress outliers (blended sources, bad detections) and interpolate coherently across the tile.
+Classical source matching gives you discrete (band source position, VIS source position, offset) triples. Notebook 09 shows that these offsets are dominated by the source center itself: changing centroid definitions moves the measured offset by ~54 mas, while the smooth per-tile field is only ~5 mas.
 
-A CNN matcher operating at native VIS resolution does both better than traditional approaches. It looks at the actual image morphology of each matched source pair, not just the catalog centroids. A blended source that has a clean centroid in the Rubin catalog but is clearly resolved in VIS will be flagged through a high predicted uncertainty. A faint source sitting on a diffraction spike will similarly be downweighted. Classical matching has no access to this pixel-level context without hand-crafted quality flags.
+A learned head is useful because it sees the pixels and the multi-band context. It can learn that a blended galaxy, a faint source, a colour gradient, or a band-specific PSF should shift the usable source position differently from a simple catalog centroid. A smooth concordance file cannot express this source-by-source information.
 
-The learned uncertainty (log_sigma) then weights the control-grid field solver, so reliable point sources dominate the field and bad matches are automatically suppressed. The model also trains jointly across all tiles, so it learns shared priors about what Rubin PSFs look like and what typical offset patterns are, rather than fitting each tile independently from scratch.
+The smooth field solvers still matter as diagnostics. They answer: after the head correction, is there any coherent residual WCS field left? In the latest run the answer is basically no: the head-residual PINN field has ~1 mas amplitude and barely changes median residuals.
 
 ---
 
 ## Current results
 
-### V7 matcher on 790 ECDFS tiles (current)
+### Latest v8 latent head on 790 ECDFS tiles (current)
 
-Analysis of 790 tiles revealed that the actual concordance field signal is very small (~5-7 mas) while per-source centroid noise is ~47 mas at typical SNR 10-30. The 40-50 mas MAE is almost entirely centroid measurement noise, not unmodeled concordance field. The WCS alignment between Rubin and Euclid for ECDFS is already excellent.
+The current checkpoint is `models/checkpoints/latent_position_v8_no_psf/best.pt`, evaluated with `eval_latent_position.py` on all 790 ECDFS tiles. Sources require SNR >= 5 and raw offset < 200 mas.
 
-| Regime | Rubin median (mas) | NISP median (mas) | Notes |
-|--------|-------------------|-------------------|-------|
-| Raw WCS | 53-71 | 41-42 | No correction |
-| NN per-source | 5-50 | 17-18 | V7 matcher, per-source |
-| Grid solver field | ~2-12 | ~5 | Smooth field correction |
-| PINN solver field | ~2-7 | ~3-4 | Better 95th percentile |
+| Band | N sources | Raw median | Head median | Head p68 |
+|------|-----------|-----------:|------------:|---------:|
+| rubin_u | 12,347 | 119.4 mas | 30.5 mas | 53.3 mas |
+| rubin_g | 60,148 | 54.0 mas | 11.4 mas | 22.3 mas |
+| rubin_r | 70,022 | 45.7 mas | 10.4 mas | 19.8 mas |
+| rubin_i | 62,232 | 41.2 mas | 10.3 mas | 18.9 mas |
+| rubin_z | 42,980 | 41.9 mas | 10.9 mas | 19.9 mas |
+| rubin_y | 17,126 | 61.5 mas | 14.7 mas | 29.4 mas |
+| nisp_Y | 116,572 | 41.3 mas | 9.4 mas | 17.0 mas |
+| nisp_J | 126,352 | 41.9 mas | 9.4 mas | 17.0 mas |
+| nisp_H | 122,341 | 42.2 mas | 9.5 mas | 17.0 mas |
 
-The NN per-source predictions are effective, but the smooth field solvers show only ~0-1% improvement in the median because the underlying field is small. The real bottleneck is per-source centroid noise (King 1983: sigma ~ FWHM/SNR), not the concordance field amplitude.
+The head improves median radial residuals by ~74-79% in most bands. Applying a residual PINN field after the head changes medians by only ~0.0-0.2 mas because the post-head smooth field amplitude is already ~1 mas.
 
-### Latent position head (new, experimental)
+### Centering diagnosis
 
-For per-object alignment to <20 mas across all 10 bands (e.g. for forced photometry), a new **latent-space canonical position head** uses the frozen V7 encoder's fused bottleneck + VIS stem features to predict chromatically-informed source positions. See the "Latent position head" section below.
+Notebook 09 (`io/09_astrometry_diagnostics.ipynb`) directly tests the large-offset cause:
+
+| Quantity | Median |
+|---|---:|
+| Smooth per-tile bulk field | 5.4 mas |
+| Residual after bulk removal | 47.5 mas |
+| Rubin detection -> PSF-fit recentering | 52.7 mas |
+| VIS detection -> PSF-fit recentering | 7.0 mas |
+| Offset change induced by recentering | 54.0 mas |
+| Rubin r-vs-i band-centering offset | 47.8 mas |
+
+Conclusion: the 40-50 mas raw residual is dominated by centering / centroid-definition scatter, not by an unmodelled smooth concordance field.
+
+### Historical V7 matcher result
+
+The older V7 per-patch matcher and smooth field solvers established the same lesson: raw offsets are tens of mas, but the smooth field is only a few mas. The matcher/field stack remains useful for experiments and FITS concordance exports, but it is not the current headline per-object correction.
+
+| Regime | Typical median | Notes |
+|--------|---------------:|-------|
+| Raw WCS anchors | 41-119 mas | Band-dependent source-centering scatter |
+| Raw-anchor PINN field amplitude | ~5-9 mas | Smooth WCS/concordance component |
+| Head-residual PINN field amplitude | ~1 mas | Coherent residual after latent head |
 
 ### Historical V6 results (144-tile ECDFS subset, archived)
 
@@ -57,7 +86,27 @@ For per-object alignment to <20 mas across all 10 bands (e.g. for forced photome
 
 ## Pipeline overview
 
-### Per-tile concordance (fast, independent tiles)
+### Current per-object alignment flow
+
+```
+Tiles on disk
+    │
+    ▼
+[train_latent_position.py / eval_latent_position.py]
+    classical source detection + Gaussian centroid targets
+    WCS match each non-VIS band to VIS
+    frozen foundation encoder (v7 or v8)
+    local bottleneck window + VIS stem window per source
+    LatentPositionHead -> (dx, dy, log_sigma) in VIS pixels
+    local WCS Jacobian -> residual sky offset in arcsec
+    │
+    ▼
+    per-band metrics + optional anchors.npz
+```
+
+`anchors.npz` stores raw offsets and head residuals for every band. It can be passed directly to `fit_direct_pinn.py --cache` to fit raw or post-head residual fields.
+
+### Concordance field flow (QA/fallback)
 
 ```
 Tiles on disk
@@ -93,7 +142,7 @@ Tiles on disk
     evaluate_control_grid_mesh() — regular mesh at DSTEP spacing + coverage map
     │
     ▼
-[infer_concordance.py]
+[infer_concordance.py / fit_direct_pinn.py]
     FITS output  —  DRA + DDE + COV image HDUs per tile
 ```
 
@@ -148,7 +197,7 @@ Tiles on disk
 | `infer_concordance.py` | Run a trained checkpoint over all tiles and write a per-tile FITS concordance file |
 | `infer_global_concordance.py` | Collect predictions from all tiles and fit a single global field (no tile boundaries); supports `--solver grid` and `--solver nn` |
 | `apply_concordance.py` | `ConcordanceMap` — load per-tile FITS and apply corrections at any sky position |
-| `sky_cube.py` | `SkyCubeExtractor` — given RA/Dec returns an aligned 10-band [10, H, W] sky cube with concordance applied |
+| `sky_cube.py` | `SkyCubeExtractor` — given RA/Dec returns a 10-band [10, H, W] sky cube; can apply a smooth concordance field when requested |
 | `latent_position_head.py` | `LatentPositionHead` — latent-space canonical position head for per-object multi-band alignment |
 | `train_latent_position.py` | Training script for the latent position head (tile-level, jitter-based self-supervision) |
 | `eval_latent_position.py` | Cross-instrument eval: align all 9 non-VIS bands to VIS, per-band metrics and diagnostics |
@@ -243,22 +292,57 @@ Each tile now produces a coverage HDU (`{prefix}.COV`) recording the minimum dis
 
 ## Precision target
 
-Residuals should be below the native astrometric uncertainties of each survey:
-- Rubin (LSST coadds): ~10-20 mas RMS
-- Euclid VIS: ~5 mas RMS
+For the per-object head, the practical ECDFS target is:
+- Rubin g/r/i/z and NISP Y/J/H: median residual ~10 mas, p68 ~17-22 mas
+- Rubin y: median residual < 15 mas
+- Rubin u: substantially improved but lower-confidence because of SNR; current median is ~30 mas
+- Smooth post-head field: ~1 mas amplitude, used as a QA check
 
-Aim for `p68_total < 20 mas` on the validation set.
+Do not interpret the ~1 mas post-head PINN field amplitude as the per-source residual. It is the remaining coherent smooth component after the head, not the radial residual distribution of individual anchors.
 
 ---
 
 ## Training
 
-### V7 matcher (recommended)
+### Latent position head (current)
+
+For current astrometry work, use the v8 no-PSF latent head path:
+
+```bash
+# Train
+CUDA_VISIBLE_DEVICES=0,1 PYTHONPATH=models python models/astrometry2/train_latent_position.py \
+  --rubin-dir        data/rubin_tiles_all \
+  --euclid-dir       data/euclid_tiles_all \
+  --foundation-checkpoint models/checkpoints/jaisp_v8_fine/checkpoint_best.pt \
+  --output-dir       models/checkpoints/latent_position_v8_no_psf \
+  --epochs 30 --bottleneck-window 5 --dual-gpu \
+  --wandb-project JAISP-LatentPosition
+
+# Evaluate and export anchors for QA fields
+PYTHONPATH=models python models/astrometry2/eval_latent_position.py \
+  --rubin-dir        data/rubin_tiles_all \
+  --euclid-dir       data/euclid_tiles_all \
+  --foundation-checkpoint models/checkpoints/jaisp_v8_fine/checkpoint_best.pt \
+  --head-checkpoint  models/checkpoints/latent_position_v8_no_psf/best.pt \
+  --save-anchors     models/checkpoints/latent_position_v8_no_psf/anchors.npz \
+  --output-dir       models/checkpoints/latent_position_v8_no_psf/eval
+
+# Fit the post-head residual field as a QA check
+PYTHONPATH=models python models/astrometry2/fit_direct_pinn.py \
+  --cache models/checkpoints/latent_position_v8_no_psf/anchors.npz \
+  --use-head-resid \
+  --output models/checkpoints/latent_position_v8_no_psf/concordance_pinn_head_resid_fixed.fits \
+  --bands r i g z --include-nisp
+```
+
+Do not pass `--psf-checkpoint` for the current headline astrometry run. The PSFField path is available for experiments, but PSFField-refined centroids were worse latent-head labels in the v8 migration ablation.
+
+### V7 matcher (historical / concordance experiments)
 
 Uses frozen V7 BandStems from the RMS-aware foundation checkpoint. Supports multiband mode (all Rubin + NISP bands), CenterNet or classical source detection, and PSF-fit centroiding.
 
 ```bash
-# V7 matcher + CenterNet detector + all bands (recommended)
+# V7 matcher + CenterNet detector + all bands
 python train_astro_v7.py \
   --v7-checkpoint       ../checkpoints/jaisp_v7_concat/checkpoint_best.pt \
   --detector-checkpoint ../../checkpoints/centernet_v7_rms_aware/centernet_best.pt \
@@ -288,7 +372,7 @@ python infer_concordance.py \
   --all-bands --auto-grid
 ```
 
-### Latent position head (per-object alignment)
+### V7 latent position head (historical baseline)
 
 For per-object alignment across all 10 bands (e.g. forced photometry), the latent position head uses the frozen V7 encoder's fused bottleneck + VIS stem features to predict chromatically-informed canonical source positions.
 
@@ -337,7 +421,9 @@ Training prints per-epoch metrics in mas: `train_MAE`, `train_p68`, `val_MAE`, `
 
 ---
 
-## Applying the concordance in practice
+## Applying a concordance field in practice
+
+Use this when you explicitly want a smooth WCS/concordance correction. For the current per-object astrometry claim, use the latent head residuals from `eval_latent_position.py`; the concordance field is QA/fallback and does not remove the dominant centering scatter by itself.
 
 `apply_concordance.py` provides `ConcordanceMap` — load once, apply anywhere.
 
@@ -398,11 +484,13 @@ reliable_mask = cov < 150   # VIS pixels within 150px of an anchor
 
 ---
 
-## Global concordance (recommended for production)
+## Global concordance (recommended field product)
 
 Per-tile fields are independent, so adjacent tiles can disagree at their shared boundary.
 `infer_global_concordance.py` solves a **single** smooth field over the entire mosaic
 in sky coordinates — no tile edges, no boundary artefacts.
+
+For the current ECDFS data, the global field should be interpreted as the smooth WCS component. The raw-anchor field amplitude is only a few mas, and the head-residual field is ~1 mas.
 
 ### Running
 
@@ -459,7 +547,7 @@ reliable = cov < 150   # arcsec
 
 The control-grid solver requires choosing a grid resolution: too coarse → can't resolve real spatial structure; too fine → underdetermined, spiky.  The MLP sidesteps this entirely.  Weight decay acts as a continuous smoothness prior — the same mechanism as Tikhonov regularization but without an explicit grid.  SiLU activations produce a field that is smooth to all orders, avoiding the piecewise-linear artefacts that can appear at control-grid cell boundaries.  Smoothness is tuned via `--nn-weight-decay` alone.
 
-With the current data (~50,000+ sources over 790 tiles) both solvers produce comparable results.  The NN advantage will grow as data volume increases and the field develops real small-scale structure that a fixed grid resolution cannot resolve without also fitting noise.
+With the current data (~50,000+ sources over 790 tiles) both solvers produce comparable smooth-field diagnostics. The NN advantage may grow as data volume increases or on fields with larger coherent residuals. On ECDFS, solver choice does not change the main conclusion: the smooth field is small compared with source-centering scatter.
 
 ---
 
@@ -513,7 +601,7 @@ The patch size (33×33) and search radius (±3 pixels) are fixed by the trained 
 
 **Mesh size (DSTEP)**: Default is 8 VIS pixels (0.8"). Rubin astrometric distortions from DCR vary on arcminute scales; 0.8" sampling is likely overkill. The `smooth_lambda` regularizer keeps the solved field smooth regardless. Empirically, DSTEP=16 or 32 may give equally good results with fewer mesh samples (smaller files), not fewer control-grid solve nodes.
 
-**One band at a time**: Each checkpoint targets one Rubin band. DCR causes wavelength-dependent offsets, so each band should have its own concordance field. Use `--context-bands` to pass additional bands as encoder input context without making them the alignment target.
+**Band-specific fields**: Smooth concordance products are exported per band because DCR and centroid definitions are wavelength dependent. The latent head, however, is evaluated across all 9 non-VIS bands against the VIS reference.
 
 **No epoch correction**: The surveys are assumed to handle proper motion and parallax internally. The concordance corrects for systematic WCS residuals only.
 
@@ -523,10 +611,14 @@ The patch size (33×33) and search radius (±3 pixels) are fixed by the trained 
 
 ## Planned improvements
 
-**Latent position head validation**: Evaluate the latent-space canonical position head on star vs galaxy populations separately to quantify the chromatic alignment gain. Stars should approach ~16 mas (noise averaging limit); galaxies are the primary beneficiary of chromatically-informed positioning.
+**Held-out / OOD validation**: The current numbers are ECDFS tract5063. The next strongest claim requires held-out tiles or a non-ECDFS field to verify transfer without retraining.
 
-**Per-object alignment for photometry**: Use the latent position head's canonical positions as input to the forced photometry pipeline, measuring whether the multi-band-informed positions improve photometric precision compared to single-band centroiding.
+**Residual maps after the head**: Continue checking that post-head residual vectors have no coherent spatial pattern and that head-residual PINN fields stay at the ~1 mas level.
 
-**Unfreeze stems after warmup**: The current V7 matcher freezes the foundation stems throughout training. A two-stage schedule — freeze for the first N epochs to stabilize the adapter, then unfreeze with a lower LR — may improve astrometric precision.
+**Population breakdown**: Report head residuals separately for bright/faint, compact/extended, and high/low SNR sources. Notebook 09 already shows centering is the dominant raw offset; the next step is making the post-head outlier story equally explicit.
+
+**Per-object alignment for photometry**: Use the latent position head's corrected positions as input to the forced photometry pipeline and measure whether multi-band-informed positions improve photometric precision compared to single-band centroiding.
+
+**Joint PSF + astrometry training**: PSFField is not a drop-in latent-head label source yet. Revisit it with a target convention that the head can see in its features, or train PSF/position jointly so the centroid definition is shared.
 
 **True super-resolution in sky_cube.py**: `SkyCubeExtractor` currently uses bicubic resampling (order=3) to bring Rubin from 0.2"/px to VIS resolution (0.1"/px). The V7 decoder conditioned on `euclid_VIS` would produce a physically motivated super-resolution; wire it in as an optional `mode='sr'` path once validated.
