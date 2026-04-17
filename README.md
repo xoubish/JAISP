@@ -2,7 +2,7 @@
 
 Self-supervised multi-instrument foundation model for precision cosmology with Rubin Observatory and Euclid, trained on overlapping ECDFS imaging.
 
-**Pipeline**: Foundation MAE (10 bands, native resolution per instrument) -> frozen encoder -> lightweight downstream heads for detection, per-object astrometry, concordance QA, and photometry.
+**Pipeline**: Foundation MAE (10 bands, native resolution per instrument) -> frozen encoder -> lightweight downstream heads for detection, per-object astrometry, concordance QA, PSF photometry, and scarlet-like residual photometry.
 
 ## Key Components
 
@@ -11,7 +11,7 @@ Self-supervised multi-instrument foundation model for precision cosmology with R
 | Foundation (V7) | `models/jaisp_foundation_v7.py` | Mixed-resolution masked autoencoder |
 | Detection | `models/detection/` | CenterNet heatmap source detector |
 | Astrometry | `models/astrometry2/` | Per-object Rubin/Euclid alignment head + concordance QA fields |
-| Photometry | `models/photometry/` | PSFField-backed forced photometry |
+| Photometry | `models/photometry/` | PSFField forced photometry + scarlet-like residual scene fitting |
 
 ## Documentation
 
@@ -54,3 +54,5 @@ PYTHONPATH=models python models/astrometry2/fit_direct_pinn.py \
 ```
 
 Current astrometry finding: the large raw 40-120 mas offsets are dominated by source centering, not by a smooth WCS field. The v8 latent head reduces most bands to ~9-15 mas median residuals (Rubin u: ~30 mas); residual concordance fields after the head are ~1 mas and mainly serve as QA.
+
+Current photometry direction: use PSFField matched-filter photometry as the compact-source baseline, then train `models/photometry/foundation_head.py` on frozen V8 features. The training path is CenterNet detections -> latent astrometry correction -> V8 morphology head -> PSFField renderer -> residual chi-square. `models/photometry/scarlet_like.py` remains the per-scene optimizer baseline/refinement reference.

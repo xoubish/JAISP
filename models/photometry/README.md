@@ -1,6 +1,12 @@
 # JAISP Photometry
 
-This module provides matched-filter forced photometry on Rubin+Euclid tiles. The current path is `PSFFieldPhotometryPipeline`, which renders templates from `models/psf/PSFField` and reuses the vectorized matched-filter estimator here.
+This module provides two photometry paths on Rubin+Euclid tiles:
+
+- `PSFFieldPhotometryPipeline`: fast PSF-template forced photometry for compact or isolated sources.
+- `scarlet_like.py`: a residual-trained, scarlet-like local scene model for extended sources and blends.
+- `foundation_head.py`: the learned V8 downstream photometry head. It reads frozen
+  V8 bottleneck + VIS-stem features at CenterNet/astrometry-corrected positions
+  and is trained by scene residual chi-square.
 
 Use `models/psf/` for PSF model training/validation. Use this directory for flux extraction and the legacy PSFNet reference code.
 
@@ -9,9 +15,41 @@ Use `models/psf/` for PSF model training/validation. Use this directory for flux
 - `psf_net.py`: legacy `PSFNet` spatially varying PSF model, retained as reference
 - `train_psf_net.py`: legacy star-driven PSF training loop
 - `psf_field_pipeline.py`: current PSFField-backed forced-photometry pipeline
+- `scarlet_like.py`: positive morphology + per-band flux scene optimizer, trained by residual chi-square
+- `foundation_head.py`: trainable morphology-refinement head on top of frozen V8 features
+- `train_foundation_photometry_head.py`: CenterNet -> astrometry head -> V8 photometry-head training loop
 - `stamp_extractor.py`: batched stamp extraction + local background estimation
 - `forced_photometry.py`: vectorized matched-filter flux estimator
 - `pipeline.py`: legacy PSFNet end-to-end tile photometry wrapper
+
+## Current Photometry Strategy
+
+The matched-filter PSF path is still the right first diagnostic. It is fast,
+stable, and gives a clear residual map. But large residuals for galaxies are
+not automatically a PSF failure: an extended source is not a delta function
+convolved with the PSF.
+
+For a non-neural upper-bound/debugging path, use the scarlet-like optimizer:
+
+1. Detect a master catalog, preferably in Euclid VIS via CenterNet.
+2. Build a non-negative morphology initializer from VIS stamps.
+3. Convolve each source morphology with the PSFField template in each band.
+4. Fit non-negative per-band source fluxes by minimizing the noise-weighted
+   pixel residual of the whole local blend scene.
+
+The production direction is the V8 foundation photometry head:
+
+1. CenterNet proposes VIS-frame detections from the 10-band tile.
+2. The latent astrometry head corrects those positions object-by-object.
+3. The frozen V8 encoder provides bottleneck and VIS-stem features.
+4. `FoundationScarletPhotometryHead` predicts morphology refinements from those
+   features.
+5. PSFField renders per-band PSFs, fluxes are solved analytically, and the head
+   weights are trained by the residual chi-square of local scenes.
+
+The scarlet-like optimizer remains useful as a baseline/refinement reference,
+but the trainable checkpoint to claim is produced by
+`train_foundation_photometry_head.py`.
 
 ## Legacy PSFNet Design Choices
 
@@ -80,6 +118,81 @@ result = pipe.run(tile, rms, positions_px, sed_vec=None)
 # result keys: flux, flux_err, chi2_dof, snr, bg
 ```
 
+Train the V8 foundation photometry head:
+
+```bash
+python models/photometry/train_foundation_photometry_head.py \
+  --rubin-dir data/rubin_tiles_all \
+  --euclid-dir data/euclid_tiles_all \
+  --foundation-checkpoint models/checkpoints/jaisp_v8_fine/checkpoint_best.pt \
+  --detector-checkpoint checkpoints/centernet_v8_fine/centernet_best.pt \
+  --astrometry-checkpoint models/checkpoints/latent_position_v8_no_psf/best.pt \
+  --psf-checkpoint models/checkpoints/psf_field_v3.pt \
+  --output-dir models/checkpoints/photometry_foundation_v1 \
+  --epochs 20 \
+  --max-sources 48 \
+  --max-sources-per-step 24 \
+  --wandb-project JAISP-photometry \
+  --wandb-name photometry_foundation_v1 \
+  --wandb-log-images
+```
+
+With W&B enabled, the trainer logs train/val scalar curves plus validation
+residual galleries (`data-bg`, `learned model`, `residual`) every epoch by
+default. Use `--wandb-image-every 5` to log images less often, or
+`--wandb-image-band 1`/`2`/`3` to visualize Y/J/H instead of VIS.
+
+Quick smoke test:
+
+```bash
+python models/photometry/train_foundation_photometry_head.py \
+  --epochs 1 \
+  --max-tiles 2 \
+  --val-frac 0.5 \
+  --max-sources 8 \
+  --max-sources-per-step 6 \
+  --min-sources 2 \
+  --output-dir models/checkpoints/photometry_foundation_smoke \
+  --sub-grid 1
+```
+
+Scarlet-like per-scene residual fit for a local tile:
+
+```python
+import torch
+from models.photometry import (
+    PSFFieldPhotometryPipeline,
+    fit_scarlet_like_tile,
+    make_positive_morphology_templates,
+)
+
+# euclid_tile/rms: [4, H, W]; vis_positions: [N, 2] in VIS pixels.
+morph = make_positive_morphology_templates(
+    euclid_tile[0],
+    vis_positions,
+    stamp_size=31,
+)["templates"]
+
+psf_pipe = PSFFieldPhotometryPipeline.from_checkpoint(
+    'models/checkpoints/psf_field_v3.pt',
+    band_names=['euclid_VIS', 'euclid_Y', 'euclid_J', 'euclid_H'],
+    stamp_size=31,
+    sub_grid=2,
+)
+psfs = psf_pipe.render_psfs(vis_positions, tile_hw=euclid_tile.shape[-2:])
+
+scene_out = fit_scarlet_like_tile(
+    euclid_tile,
+    euclid_rms,
+    vis_positions,
+    morph,
+    psfs=psfs,
+    n_steps=120,
+)
+
+# scene_out keys include flux, chi2_dof, groups, and scene_results.
+```
+
 If all bands have been reprojected onto a VIS 0.1"/px grid, pass
 `px_scales=[0.1] * len(band_names)` so PSFField renders templates on the
 same pixel footprint as the data. If you are running on native Rubin images,
@@ -122,6 +235,18 @@ Returns a dict:
 - `bg`: `[N, B]`
 
 Where `N` is number of source positions and `B` is number of bands in the tile tensor.
+
+`fit_scarlet_like_tile` returns a dict with:
+
+- `flux`: `[N, B]` non-negative fitted source fluxes
+- `chi2_dof`: `[N, B]` group-scene residual chi-square copied to each member source
+- `groups`: local blend groups used for scene fitting
+- `scene_results`: data/model/residual tensors and loss history for visual diagnostics
+
+`io/13_foundation_photometry_head.ipynb` loads a trained
+`FoundationScarletPhotometryHead` checkpoint and compares it against PSF-only
+photometry on the same CenterNet + astrometry-corrected catalog. `io/12` remains
+the per-scene scarlet-like optimizer diagnostic.
 
 ## PSF-Template Centroiding (Historical Bridge to Astrometry)
 

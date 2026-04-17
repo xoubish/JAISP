@@ -242,6 +242,7 @@ class PSFFieldPhotometryPipeline:
         positions_px: torch.Tensor,
         sed_vec: Optional[torch.Tensor] = None,
         return_psfs: bool = False,
+        return_stamps: bool = False,
     ) -> Dict[str, torch.Tensor | List[str]]:
         """
         Run forced photometry on a tile.
@@ -257,6 +258,8 @@ class PSFFieldPhotometryPipeline:
             Optional [N, 10] SED conditioning vector for PSFField.
         return_psfs
             Include rendered PSF templates in the returned dictionary.
+        return_stamps
+            Include data/model/residual stamps in the returned dictionary.
 
         Returns
         -------
@@ -299,6 +302,12 @@ class PSFFieldPhotometryPipeline:
         }
         if return_psfs:
             result["psfs"] = psfs
+        if return_stamps:
+            model = flux.unsqueeze(-1).unsqueeze(-1) * psfs
+            result["stamps"] = stamps
+            result["stamps_sub"] = stamps_sub
+            result["model"] = model
+            result["resid"] = stamps_sub - model
         return result
 
     def _prepare_positions(self, positions_px: torch.Tensor) -> torch.Tensor:

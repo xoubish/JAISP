@@ -11,7 +11,7 @@ For downstream heads, see:
 
 - `detection/README.md` (DETR source detection)
 - `astrometry2/README.md` (per-object Rubin <-> Euclid alignment and concordance QA)
-- `photometry/README.md` (PSF modeling + forced photometry)
+- `photometry/README.md` (PSFField forced photometry + scarlet-like residual scene fitting)
 
 ---
 

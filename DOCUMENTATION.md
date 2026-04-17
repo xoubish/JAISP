@@ -51,7 +51,7 @@ The system works in two layers. First, a foundation model is trained once throug
     +----+----+--------------------+
     |         |                    |
  Detection  Astrometry         Photometry
- (3 choices)(head + QA field)  (PSF + matched filter)
+ (3 choices)(head + QA field)  (PSF + residual scene fit)
 ```
 
 This two-layer design means the expensive foundation pretraining only happens once. Each downstream task gets the benefit of 10-band multi-instrument features without paying the cost of encoding from scratch.
@@ -932,9 +932,24 @@ The DCR coefficients show clean wavelength ordering (u > g > y ≈ r > i ≈ z),
 
 `io/psf_visualization.ipynb` renders the per-band median PSF and its spatial variation across the tile (3×3 grid of tile positions).
 
+#### Photometry heads
+
+Photometry now has two complementary paths:
+
+- **PSFField matched-filter photometry**: `models.photometry.PSFFieldPhotometryPipeline` renders PSFField templates and applies the vectorized matched-filter estimator in `models/photometry/forced_photometry.py`. This is the compact-source baseline and the fastest way to validate positions, noise maps, PSF sampling, and per-band flux extraction.
+- **V8 foundation photometry head**: `models/photometry/foundation_head.py` is the learned downstream head. It consumes CenterNet detections after latent-head astrometry correction, extracts frozen V8 bottleneck + VIS-stem features, predicts morphology refinements, solves per-band fluxes through the renderer, and trains by local scene residual chi-square.
+- **Scarlet-like residual optimizer**: `models/photometry/scarlet_like.py` fits local blend scenes with non-negative VIS morphology templates, PSF-convolved per-band rendered templates, non-negative per-band fluxes, and an explicit noise-weighted residual loss. This is a baseline/refinement reference for galaxies and blends where a pure PSF template should leave structured residuals.
+
+The current learned head is Euclid-native VIS/Y/J/H first, where VIS morphology
+and NISP images share the same 0.1"/px grid. Rubin support should either
+resample the VIS morphology to Rubin's 0.2"/px native grid or reproject Rubin to
+the VIS grid before sharing templates.
+
+`io/11_psf_field_photometry_validation.ipynb` validates the compact-source PSF baseline using a CenterNet VIS master catalog. `io/12_scarlet_like_photometry.ipynb` visualizes the per-scene optimizer. `io/13_foundation_photometry_head.ipynb` loads a trained V8 photometry-head checkpoint and compares learned-head residuals against PSF-only residuals on the same CenterNet + astrometry-corrected catalog.
+
 #### Related legacy code
 
-`models/photometry/psf_net.py` (PSFNet — Gaussian base + MLP residual, never trained) is retained only as a reference implementation. Production users should call `models.psf.PSFField` through `models.photometry.PSFFieldPhotometryPipeline`. The matched-filter estimator in `models/photometry/forced_photometry.py` is now reused by the PSFField-backed pipeline.
+`models/photometry/psf_net.py` (PSFNet — Gaussian base + MLP residual, never trained) is retained only as a reference implementation. Production compact-source users should call `models.psf.PSFField` through `models.photometry.PSFFieldPhotometryPipeline`. Extended/blended-source work should use the scarlet-like residual path until a learned morphology head is trained.
 
 ---
 
@@ -1022,6 +1037,9 @@ JAISP/
 |   +-- photometry/                    Forced photometry (uses models/psf)
 |   |   +-- psf_net.py                 Legacy PSFNet (Gaussian base + MLP residual, reference only)
 |   |   +-- psf_field_pipeline.py      PSFField-backed forced photometry
+|   |   +-- scarlet_like.py            Positive morphology residual scene optimizer
+|   |   +-- foundation_head.py         V8-feature morphology head trained by residual chi-square
+|   |   +-- train_foundation_photometry_head.py CenterNet + astrometry-corrected training loop
 |   |   +-- train_psf_net.py           Legacy PSFNet training script (superseded)
 |   |   +-- forced_photometry.py       Matched-filter flux estimator
 |   |   +-- stamp_extractor.py         Batched postage stamp extraction + local sky estimation
@@ -1240,7 +1258,9 @@ These checkpoints are outdated -- trained on wrong NISP pixel scales (0.3"/px as
 - Field solvers (PINN / NN / control-grid) are foundation-agnostic. `eval_latent_position.py` exports per-source anchors via `--save-anchors` directly consumable by `fit_direct_pinn.py --cache`; use `--use-head-resid` to fit the post-head residual field.
 
 **Photometry**
-- `models/photometry/PSFFieldPhotometryPipeline` now renders PSFField templates and runs the existing matched-filter flux estimator. It accepts either shared source positions or per-band astrometry-head-corrected positions. PSFField is still not part of the current best astrometric target convention.
+- `models/photometry/PSFFieldPhotometryPipeline` renders PSFField templates and runs the existing matched-filter flux estimator. It accepts either shared source positions or per-band astrometry-head-corrected positions. This remains the compact-source baseline.
+- `models/photometry/foundation_head.py` is the learned V8 photometry head: CenterNet detections are corrected by the latent astrometry head, frozen V8 features predict morphology refinements, PSFField supplies per-band PSFs, and the training objective is local scene residual chi-square.
+- `models/photometry/scarlet_like.py` adds a scarlet-like residual scene optimizer for galaxies and blends: VIS-derived positive morphologies are convolved with PSFField per band, then non-negative fluxes are fitted by reducing pixel residuals over the whole local scene. This is now the optimizer baseline/refinement reference rather than the checkpointed neural head. PSFField is still not part of the current best astrometric target convention.
 
 **Open milestones**
 - **Out-of-distribution evaluation** (see Motivation § "Why a Foundation Model"). All current metrics are on ECDFS tract5063. We have not yet evaluated on a non-ECDFS field. Until we do, we cannot measure the foundation's actual value proposition -- transfer without retraining. Highest-leverage next experiment after astrometry settles: download ~50 tiles from EDF-North, run the latent-head eval + residual-field QA without any retraining, compare the MAE to the ECDFS numbers.
