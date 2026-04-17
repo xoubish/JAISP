@@ -635,7 +635,7 @@ Their approach relies on several conditions that differ fundamentally from the J
 
 - **Do not use PSFField-refined centroids as latent-head training targets yet.** They introduce an invisible target/feature mismatch and produce a ~29-30 mas validation plateau.
 - **Use Gaussian-fit photon centroids for latent-head training/evaluation** in the current pipeline.
-- **Use PSFField for PSF diagnostics and future forced photometry**, and revisit joint PSF + astrometry training once the target convention is explicit.
+- **Use PSFField for PSF diagnostics and forced photometry**, and revisit joint PSF + astrometry training once the target convention is explicit.
 
 #### Current approach
 
@@ -934,7 +934,7 @@ The DCR coefficients show clean wavelength ordering (u > g > y ≈ r > i ≈ z),
 
 #### Related legacy code
 
-`models/photometry/psf_net.py` (PSFNet — Gaussian base + MLP residual, never trained) is retained only as a reference implementation. Production users should call `models.psf.PSFField`. Matched-filter forced photometry (`models/photometry/forced_photometry.py`) still works and will be migrated to consume PSFField in a follow-up.
+`models/photometry/psf_net.py` (PSFNet — Gaussian base + MLP residual, never trained) is retained only as a reference implementation. Production users should call `models.psf.PSFField` through `models.photometry.PSFFieldPhotometryPipeline`. The matched-filter estimator in `models/photometry/forced_photometry.py` is now reused by the PSFField-backed pipeline.
 
 ---
 
@@ -1021,6 +1021,7 @@ JAISP/
 |   |
 |   +-- photometry/                    Forced photometry (uses models/psf)
 |   |   +-- psf_net.py                 Legacy PSFNet (Gaussian base + MLP residual, reference only)
+|   |   +-- psf_field_pipeline.py      PSFField-backed forced photometry
 |   |   +-- train_psf_net.py           Legacy PSFNet training script (superseded)
 |   |   +-- forced_photometry.py       Matched-filter flux estimator
 |   |   +-- stamp_extractor.py         Batched postage stamp extraction + local sky estimation
@@ -1239,7 +1240,7 @@ These checkpoints are outdated -- trained on wrong NISP pixel scales (0.3"/px as
 - Field solvers (PINN / NN / control-grid) are foundation-agnostic. `eval_latent_position.py` exports per-source anchors via `--save-anchors` directly consumable by `fit_direct_pinn.py --cache`; use `--use-head-resid` to fit the post-head residual field.
 
 **Photometry**
-- Existing matched-filter pipeline (`models/photometry/`) works but still references legacy PSFNet (never trained). Will migrate to PSFField as a photometry task; PSFField is not part of the current best astrometric target convention.
+- `models/photometry/PSFFieldPhotometryPipeline` now renders PSFField templates and runs the existing matched-filter flux estimator. It accepts either shared source positions or per-band astrometry-head-corrected positions. PSFField is still not part of the current best astrometric target convention.
 
 **Open milestones**
 - **Out-of-distribution evaluation** (see Motivation § "Why a Foundation Model"). All current metrics are on ECDFS tract5063. We have not yet evaluated on a non-ECDFS field. Until we do, we cannot measure the foundation's actual value proposition -- transfer without retraining. Highest-leverage next experiment after astrometry settles: download ~50 tiles from EDF-North, run the latent-head eval + residual-field QA without any retraining, compare the MAE to the ECDFS numbers.

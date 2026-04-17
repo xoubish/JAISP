@@ -32,9 +32,14 @@ from typing import Dict, Optional
 
 import torch
 
-from psf_net import PSFNet
-from stamp_extractor import estimate_local_background, extract_stamps
-from forced_photometry import matched_filter, snr as compute_snr
+try:
+    from .psf_net import PSFNet
+    from .stamp_extractor import estimate_local_background, extract_stamps
+    from .forced_photometry import matched_filter, snr as compute_snr
+except ImportError:
+    from psf_net import PSFNet
+    from stamp_extractor import estimate_local_background, extract_stamps
+    from forced_photometry import matched_filter, snr as compute_snr
 
 
 class TilePhotometryPipeline:

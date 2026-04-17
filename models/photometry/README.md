@@ -1,16 +1,17 @@
 # JAISP Photometry
 
-This module provides the legacy matched-filter forced-photometry pipeline on Rubin+Euclid tiles. The original PSF model here, `PSFNet`, was never the production PSF path; the current PSF model is `models/psf/PSFField`.
+This module provides matched-filter forced photometry on Rubin+Euclid tiles. The current path is `PSFFieldPhotometryPipeline`, which renders templates from `models/psf/PSFField` and reuses the vectorized matched-filter estimator here.
 
-Use this directory as the forced-photometry implementation and PSFNet reference code. Use `models/psf/` for current PSF modelling.
+Use `models/psf/` for PSF model training/validation. Use this directory for flux extraction and the legacy PSFNet reference code.
 
 ## Components
 
 - `psf_net.py`: legacy `PSFNet` spatially varying PSF model, retained as reference
 - `train_psf_net.py`: legacy star-driven PSF training loop
+- `psf_field_pipeline.py`: current PSFField-backed forced-photometry pipeline
 - `stamp_extractor.py`: batched stamp extraction + local background estimation
 - `forced_photometry.py`: vectorized matched-filter flux estimator
-- `pipeline.py`: end-to-end tile photometry wrapper
+- `pipeline.py`: legacy PSFNet end-to-end tile photometry wrapper
 
 ## Legacy PSFNet Design Choices
 
@@ -61,8 +62,32 @@ This is fully vectorized over `[N_sources, N_bands, S, S]` tensors.
 
 From repo root:
 
+```python
+import torch
+from models.photometry import PSFFieldPhotometryPipeline
+
+pipe = PSFFieldPhotometryPipeline.from_checkpoint(
+    'models/checkpoints/psf_field_v3.pt',
+    band_names=['rubin_g', 'rubin_r', 'rubin_i', 'rubin_z'],
+    device=torch.device('cuda' if torch.cuda.is_available() else 'cpu'),
+)
+
+# tile/rms: [B, H, W] tensors on one pixel grid.
+# positions_px can be [N, 2] shared positions or [N, B, 2] per-band
+# astrometry-head-corrected positions.
+result = pipe.run(tile, rms, positions_px, sed_vec=None)
+
+# result keys: flux, flux_err, chi2_dof, snr, bg
+```
+
+If all bands have been reprojected onto a VIS 0.1"/px grid, pass
+`px_scales=[0.1] * len(band_names)` so PSFField renders templates on the
+same pixel footprint as the data. If you are running on native Rubin images,
+leave the default 0.2"/px Rubin scales.
+
+Legacy PSFNet experiment:
+
 ```bash
-# Legacy PSFNet experiment. Current PSFField training lives in models/psf/.
 python models/photometry/train_psf_net.py \
   --rubin_dir data/rubin_tiles_200 \
   --euclid_dir data/euclid_tiles_200 \

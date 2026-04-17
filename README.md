@@ -11,7 +11,7 @@ Self-supervised multi-instrument foundation model for precision cosmology with R
 | Foundation (V7) | `models/jaisp_foundation_v7.py` | Mixed-resolution masked autoencoder |
 | Detection | `models/detection/` | CenterNet heatmap source detector |
 | Astrometry | `models/astrometry2/` | Per-object Rubin/Euclid alignment head + concordance QA fields |
-| Photometry | `models/photometry/` | PSF modeling + forced photometry |
+| Photometry | `models/photometry/` | PSFField-backed forced photometry |
 
 ## Documentation
 
