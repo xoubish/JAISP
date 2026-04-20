@@ -93,6 +93,104 @@ def load_euclid_native_arrays(euclid_path: str) -> Tuple[torch.Tensor, torch.Ten
     )
 
 
+class EmpiricalPSFOverride:
+    """Substitute per-band stacked empirical PSFs for specific bands.
+
+    Delegates to the underlying PSFFieldPhotometryPipeline for any band not in
+    ``band_stacks`` and replaces overridden bands with a static, unit-sum stamp
+    broadcasted over all sources. Used as a PSFField-width sanity test.
+    """
+
+    def __init__(self, pipe, band_stacks: Dict[str, object]) -> None:
+        self.pipe = pipe
+        self.band_names = pipe.band_names
+        self.stamp_size = pipe.stamp_size
+        self.device = pipe.device
+        self.overrides: Dict[int, torch.Tensor] = {}
+        for name, stamp in band_stacks.items():
+            if name not in self.band_names:
+                continue
+            band_idx = self.band_names.index(name)
+            st = torch.as_tensor(stamp, dtype=torch.float32, device=self.device)
+            if st.ndim != 2 or st.shape[0] != st.shape[1]:
+                raise ValueError(
+                    f"empirical PSF for {name} must be a square 2D tensor, got {tuple(st.shape)}"
+                )
+            if st.shape[0] != self.stamp_size:
+                raise ValueError(
+                    f"empirical PSF size {st.shape[0]} != pipeline stamp_size {self.stamp_size}"
+                )
+            st = st.clamp_min(0.0)
+            total = float(st.sum())
+            if total <= 0 or not np.isfinite(total):
+                raise ValueError(f"empirical PSF for {name} has non-positive sum")
+            self.overrides[band_idx] = st / total
+        if not self.overrides:
+            raise ValueError(
+                f"none of band_stacks={list(band_stacks)} matched pipeline bands={self.band_names}"
+            )
+        replaced = [self.band_names[i] for i in self.overrides]
+        print(f"Empirical PSF override active for bands: {replaced}")
+
+    @torch.no_grad()
+    def render_psfs(self, positions_px, tile_hw, sed_vec=None):
+        psfs = self.pipe.render_psfs(positions_px, tile_hw=tile_hw, sed_vec=sed_vec)
+        for band_idx, stamp in self.overrides.items():
+            psfs[:, band_idx] = stamp.unsqueeze(0).expand(psfs.shape[0], -1, -1)
+        return psfs
+
+
+def load_cached_bottleneck(
+    cache_dir: str,
+    tile_id: str,
+    device: torch.device,
+) -> Optional[torch.Tensor]:
+    """Return the precomputed V8 bottleneck [1, C, H, W] or None if missing.
+
+    Consumes the no-augment variant produced by
+    ``detection/precompute_features.py`` (``{tile_id}_aug0.pt``).
+    """
+    if not cache_dir:
+        return None
+    path = Path(cache_dir) / f"{tile_id}_aug0.pt"
+    if not path.exists():
+        return None
+    payload = torch.load(path, map_location="cpu", weights_only=False)
+    feat = payload["features"]
+    if feat.dim() == 3:
+        feat = feat.unsqueeze(0)
+    return feat.to(device=device, dtype=torch.float32)
+
+
+@torch.no_grad()
+def encode_tile_with_cache(
+    frozen_encoder,
+    context_images: Dict[str, torch.Tensor],
+    context_rms: Dict[str, torch.Tensor],
+    cached_bottleneck: Optional[torch.Tensor],
+) -> Dict[str, object]:
+    """Build encoder outputs, reusing a cached bottleneck when provided.
+
+    Cache hit skips the full ConvNeXt trunk — only the VIS stem is rerun,
+    which is the minimum the morphology head needs at native resolution.
+    """
+    vis_img = context_images["euclid_VIS"]
+    vis_rms = context_rms["euclid_VIS"]
+    vis_stem = frozen_encoder.vis_stem(vis_img, vis_rms)
+    vis_hw = (vis_img.shape[-2], vis_img.shape[-1])
+    if cached_bottleneck is not None:
+        bottleneck = cached_bottleneck
+    else:
+        bottleneck = frozen_encoder.encoder(context_images, context_rms)["bottleneck"]
+    fused_hw = (bottleneck.shape[-2], bottleneck.shape[-1])
+    return {
+        "bottleneck": bottleneck,
+        "vis_stem": vis_stem,
+        "fused_hw": fused_hw,
+        "vis_hw": vis_hw,
+    }
+
+
 def load_centernet_detector(
     foundation_checkpoint: str,
     detector_checkpoint: str,
@@ -407,7 +505,8 @@ def run_one_tile(
 
     try:
         context_images, context_rms, vis_hw, vis_wcs = load_tile_data(rubin_path, euclid_path, device)
-        enc_out = frozen_encoder.encode_tile(context_images, context_rms)
+        cached_bn = load_cached_bottleneck(args.features_cache_dir, tile_id, device)
+        enc_out = encode_tile_with_cache(frozen_encoder, context_images, context_rms, cached_bn)
         euclid_tile_cpu, euclid_rms_cpu, band_wcs = load_euclid_native_arrays(euclid_path)
     except Exception as exc:
         print(f"{split} skip {tile_id}: load/encode failed: {exc}")
@@ -570,6 +669,20 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     parser.add_argument("--detector-checkpoint", default="checkpoints/centernet_v8_fine/centernet_best.pt")
     parser.add_argument("--astrometry-checkpoint", default="models/checkpoints/latent_position_v8_no_psf/best.pt")
     parser.add_argument("--psf-checkpoint", default="models/checkpoints/psf_field_v3.pt")
+    parser.add_argument(
+        "--features-cache-dir",
+        default="",
+        help="Directory of precomputed V8 bottleneck features "
+             "(e.g. data/cached_features_v8_fine). When set, the ConvNeXt trunk "
+             "is skipped; only the VIS stem is rerun per tile.",
+    )
+    parser.add_argument(
+        "--empirical-psf-path",
+        default="",
+        help="Path to a .pt file containing {'band_stacks': {band_name: HxW tensor}} "
+             "to override PSFField renders for those bands. Used as a sanity test "
+             "when PSFField width is suspected of dominating residuals.",
+    )
     parser.add_argument("--output-dir", default="models/checkpoints/photometry_foundation_v1")
     parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--max-tiles", type=int, default=0, help="Limit total train+val tiles for quick experiments.")
@@ -584,13 +697,13 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     parser.add_argument("--detector-conf", type=float, default=0.30)
     parser.add_argument("--classical-detection", action="store_true")
     parser.add_argument("--morph-size", type=int, default=31)
-    parser.add_argument("--morph-smooth", type=float, default=0.6)
-    parser.add_argument("--group-radius", type=float, default=9.0)
+    parser.add_argument("--morph-smooth", type=float, default=0.0)
+    parser.add_argument("--group-radius", type=float, default=15.0)
     parser.add_argument("--min-scene-size", type=int, default=49)
-    parser.add_argument("--max-scene-size", type=int, default=71)
-    parser.add_argument("--margin", type=int, default=38)
-    parser.add_argument("--tv-weight", type=float, default=1e-4)
-    parser.add_argument("--anchor-weight", type=float, default=2e-2)
+    parser.add_argument("--max-scene-size", type=int, default=91)
+    parser.add_argument("--margin", type=int, default=48)
+    parser.add_argument("--tv-weight", type=float, default=5e-5)
+    parser.add_argument("--anchor-weight", type=float, default=1e-2)
     parser.add_argument("--sub-grid", type=int, default=2)
     parser.add_argument("--wandb-project", default="", help="Enable W&B logging with this project name.")
     parser.add_argument("--wandb-name", default="", help="Optional W&B run name. Defaults to output-dir name.")
@@ -653,6 +766,9 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         bg_outer_radius=14.0,
         device=device,
     )
+    if args.empirical_psf_path:
+        payload = torch.load(args.empirical_psf_path, map_location="cpu", weights_only=False)
+        psf_pipe = EmpiricalPSFOverride(psf_pipe, payload["band_stacks"])
 
     config = vars(args).copy()
     config.update(cfg)

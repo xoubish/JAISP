@@ -12,7 +12,8 @@ A self-supervised multi-instrument foundation model for precision cosmology with
 2. [Data](#data)
 3. [Foundation Model](#foundation-model)
    - [Architecture History (v1 through v7)](#architecture-history-v1-through-v7)
-   - [v7 Mixed-Resolution MAE (Current)](#v7-mixed-resolution-mae-current)
+   - [v7 Mixed-Resolution MAE (Prior Production)](#v7-mixed-resolution-mae-prior-production)
+   - [v8 Fine-Scale MAE (Current)](#v8-fine-scale-mae-current)
 4. [Downstream Heads](#downstream-heads)
    - [Detection](#1-detection)
    - [Astrometry and Concordance](#2-astrometry-and-concordance)
@@ -242,7 +243,7 @@ Each band has its own `BandStem` -- a small per-band CNN that handles noise norm
 
 The foundation model went through seven major iterations over the course of this project. Understanding this history is important because each version's failure revealed a specific insight about what self-supervised astronomical representations need. The overall arc is a progression from **latent-space alignment** (v1-v5) to **pixel-space reconstruction** (v6-v7), driven by the realization that precision cosmology demands sub-pixel spatial fidelity that contrastive and JEPA objectives fundamentally cannot enforce.
 
-> *If you only need the current architecture, skip to [v7 Mixed-Resolution MAE (Current)](#v7-mixed-resolution-mae-current).*
+> *If you only need the current architecture, skip to [v8 Fine-Scale MAE (Current)](#v8-fine-scale-mae-current). V7 is described first because v8 inherits the v7 architecture with small changes.*
 
 #### v1: Patch-Level Contrastive Learning
 
@@ -320,12 +321,14 @@ See the next section for the full v7 architecture.
 | v4 | Native-res JEPA | InformationMap + shift tolerance | Superseded: spatially imprecise |
 | v5 | Native-res JEPA | Strict position matching | Failed: JEPA can't enforce pixel precision |
 | v6 | Dense MAE | Pixel-space reconstruction | Works but VIS downsampled to Rubin grid |
-| v7 | Mixed-res MAE | 2-stream (Rubin mean / Euclid concat), native resolution | **Current production**: preserves per-band PSF structure, RMS-aware loss |
-| v8 | Fine-scale MAE | v7 architecture + configurable fused scale + random crop | **Experimental**: 2× finer bottleneck (0.4"/px), same token count via 256×256 crops |
+| v7 | Mixed-res MAE | 2-stream (Rubin mean / Euclid concat), native resolution | Prior production: preserves per-band PSF structure, RMS-aware loss. Superseded by v8 for all downstream work. |
+| v8 | Fine-scale MAE | v7 architecture + configurable fused scale + random crop | **Current production**: 2× finer bottleneck (0.4"/px), same token count via 256×256 crops. All current downstream heads (CenterNet, latent position, PSFField, photometry) use v8 features. |
 
-### v7 Mixed-Resolution MAE (Current)
+### v7 Mixed-Resolution MAE (Prior Production)
 
 **File**: `models/jaisp_foundation_v7.py`
+
+> v7 was the first production foundation and remains available as a comparison baseline. v8 (below) is the current production model and is what all downstream heads are now trained against. This section describes the v7 architecture because v8 inherits it wholesale with only the fused-scale and crop changes summarised later.
 
 The v7 architecture has three main stages: per-instrument encoding at native resolution, cross-instrument fusion at a shared physical scale, and target-specific decoding back to native resolution.
 
@@ -386,15 +389,17 @@ Training uses mixed-precision (bfloat16 autocast) and supports multi-GPU via `to
 | Total params | 13.3M |
 | Location | `models/checkpoints/jaisp_v7_concat/checkpoint_best.pt` |
 
-This is the RMS-aware loss run ([wandb](https://wandb.ai/AI-Astro/JAISP-Foundation-v7/runs/x9y9os7r)), trained on 790 matched tile pairs with correct NISP MER pixel scales (0.1"/px) and RMS-adaptive InformationMap weighting. All downstream heads should be trained on this checkpoint.
+This is the RMS-aware loss run ([wandb](https://wandb.ai/AI-Astro/JAISP-Foundation-v7/runs/x9y9os7r)), trained on 790 matched tile pairs with correct NISP MER pixel scales (0.1"/px) and RMS-adaptive InformationMap weighting. It is kept available for comparison experiments; all current downstream heads have moved to v8.
 
 Reconstruction quality across bands: Rubin g/r/i/z achieve near-perfect fidelity (Pearson r >= 0.989). Rubin u and Euclid NISP bands are solid (r = 0.87-0.97). Euclid VIS is the weakest band (r = 0.87, std_ratio = 0.92), likely because reconstructing the highest-resolution channel from coarser inputs is the hardest prediction task. Mean Pearson r across all 10 bands is 0.955.
 
-### v8 Fine-Scale MAE (Experimental)
+### v8 Fine-Scale MAE (Current)
 
 **Files**: `models/jaisp_foundation_v8.py`, `models/jaisp_dataset_v8.py`, `models/train_jaisp_foundation_v8.py`
 
-V8 is an experimental fork of V7 that tests whether a finer bottleneck resolution improves downstream tasks -- particularly per-object alignment for galaxies with colour gradients. The architecture is identical to V7 except:
+**Current checkpoint**: `models/checkpoints/jaisp_v8_fine/checkpoint_best.pt`. This is the foundation all current downstream heads (CenterNet v8, latent position head v8, PSFField v3, foundation photometry head) are trained on.
+
+V8 started as an experimental fork of V7 testing whether a finer bottleneck resolution would improve per-object alignment for galaxies with colour gradients. It is now the production foundation: the v8 latent position head reduces cross-instrument alignment residuals by ~74-79% (vs. ~51% for the v7 head), and the downstream stack (CenterNet, PSFField, photometry) all operate on v8 features. The architecture is identical to V7 except:
 
 1. **Configurable fused scale**: `fused_pixel_scale_arcsec` defaults to **0.4"/px** instead of 0.8"/px, giving 2× finer spatial resolution in the bottleneck.
 2. **Auto-computed stream depths**: Stream encoder depths are derived automatically from the fused scale (Rubin depth=1, Euclid depth=2 at 0.4"/px) instead of hardcoded.
@@ -402,7 +407,7 @@ V8 is an experimental fork of V7 that tests whether a finer bottleneck resolutio
 
 The random cropping also serves as data augmentation: each 512×512 tile can yield many different 256×256 crops across epochs, effectively increasing training diversity without re-tiling the data.
 
-| Config | V7 (production) | V8 (experimental) |
+| Config | V7 (prior production) | V8 (current production) |
 |--------|-----|-----|
 | Fused scale | 0.8"/px | 0.4"/px |
 | Rubin input | 512×512 (full tile) | 256×256 (random crop) |
@@ -431,25 +436,25 @@ cd models && torchrun --nproc_per_node=2 train_jaisp_foundation_v8.py \
     --epochs 100 --lr 3e-4 --accum_steps 2
 ```
 
-The hypothesis: 2× finer bottleneck features will improve downstream per-object alignment (galaxies with colour gradients have chromatic centroid shifts at sub-arcsecond scales that v7's 0.8"/px bottleneck may compress away) and galaxy morphology reconstruction, at the cost of half the sky context per tile (51" vs 102"). V7 remains the production model; V8 results will determine whether the finer scale justifies retraining all downstream heads.
+**Outcome**: the hypothesis held up. The v8 latent position head reaches ~9-11 mas median cross-instrument residual on Rubin g/r/i/z and NISP Y/J/H (vs. ~13-15 mas for the v7 head at the same evaluation protocol), and downstream heads have been retrained against v8 features across the board. V7 is retained as a comparison baseline but is no longer the recommended starting point for new downstream work.
 
 ---
 
 ## Downstream Heads
 
-All downstream heads reuse the frozen V7 foundation encoder. Only lightweight task-specific layers are trained on top. This means each head gets the benefit of the full 10-band multi-instrument representation without the cost of encoding from scratch, and training each head is fast (hours, not days).
+All current downstream heads reuse the frozen **V8** foundation encoder (`models/checkpoints/jaisp_v8_fine/checkpoint_best.pt`). Only lightweight task-specific layers are trained on top. This means each head gets the benefit of the full 10-band multi-instrument representation without the cost of encoding from scratch, and training each head is fast (hours, not days). The V7-based checkpoints (CenterNet v7, latent position v7) remain available as comparison baselines but are superseded by their v8 counterparts.
 
 ### 1. Detection
 
 **Directory**: `models/detection/`
 
-The detection stack now supports three complementary source-finding choices:
+The detection stack supports three complementary source-finding choices. The fused-bottleneck CenterNet is now trained against the v8 foundation (`checkpoints/centernet_v8_fine/centernet_round2.pt`); the "V7 +" labels below describe the original architecture and also apply to the v8 variant (same head, different frozen encoder).
 
 1. **Classical VIS baseline**: native-resolution Euclid VIS peak-finding with bright-star masking. This is fast, robust, and remains the bootstrap source list for pseudo-label generation.
-2. **V7 + CenterNet**: a dense detector on top of the frozen V7 **fused bottleneck**. This is the strongest current option for broad 10-band semantic fusion, especially when the signal is spread across multiple bands rather than carried by one sharp VIS peak.
-3. **V7 + StemCenterNet**: a dense detector on top of the frozen V7 **BandStems** at native resolution. This preserves more local spatial detail and is the highest-resolution neural option currently in the repo.
+2. **Foundation + CenterNet (current: v8)**: a dense detector on top of the frozen foundation **fused bottleneck**. This is the strongest current option for broad 10-band semantic fusion, especially when the signal is spread across multiple bands rather than carried by one sharp VIS peak. The v8 round-2 checkpoint is used to produce the 790-tile detection label set (`data/detection_labels/centernet_v8_r2_790.pt`, ~188 detections/tile) that PSFField v3 and the foundation photometry head consume.
+3. **Foundation + StemCenterNet**: a dense detector on top of the frozen foundation **BandStems** at native resolution. This preserves more local spatial detail than the bottleneck path. The current checkpoint is on v7 stems (`checkpoints/stem_centernet_v7_rms_aware_200/`); a v8 retrain is tracked as a follow-up but has not been a bottleneck for downstream work.
 
-The point of keeping all three is scientific comparison, not redundancy. Classical VIS is the baseline and pseudo-label source. The fused-bottleneck detector tests whether the self-supervised latent has learned genuinely multi-band source evidence. The stem detector tests whether native-resolution V7 features improve local source finding beyond what the coarser bottleneck can express.
+The point of keeping all three is scientific comparison, not redundancy. Classical VIS is the baseline and pseudo-label source. The fused-bottleneck detector tests whether the self-supervised latent has learned genuinely multi-band source evidence. The stem detector tests whether native-resolution foundation features improve local source finding beyond what the coarser bottleneck can express.
 
 ![Detection overview](models/detection/detect.png)
 
@@ -603,6 +608,12 @@ The smooth field is therefore not the limiting correction in ECDFS. A concordanc
 
 The centroid scatter follows the King (1983) / SITCOMTN-159 scaling: sigma is proportional to FWHM/SNR. Bright unsaturated stars at SNR > 100 can approach a few mas; faint or extended sources at SNR 10-30 naturally produce tens of mas. Proper SNR-based weighting remains important for any smooth field fit, but it is not a replacement for per-object correction.
 
+![Centering diagnostic](docs/figures/astrometry_centering_diagnostic.png)
+*Centering / centroid-definition scatter dominates the raw Rubin–VIS offset. Switching from detection-peak to PSF-fit centroids changes the measured offset by ~54 mas, comparable to the raw offset itself — evidence that the residual is not a smooth WCS field but source-level centroid ambiguity. This motivated the per-object latent position head over a purely global concordance correction.*
+
+![Raw vs head-residual concordance](docs/figures/concordance_raw_vs_head.png)
+*Left: PINN fit to raw per-source anchors shows a coherent smooth field with ~5 mas amplitude across the tile grid. Right: same solver fit to head residuals shows the field has collapsed to ~1 mas — the head has already absorbed the coherent component, leaving essentially noise for the smooth solver. This confirms the PINN/NN/grid field solvers should be treated as QA/fallback, not as the primary correction.*
+
 #### Context: Euclid instrument astrometric precision (Libralato et al. 2024)
 
 Libralato et al. (2024, A&A, arXiv:2411.02487) demonstrated the astrometric floor of the Euclid instruments using ERO observations of the globular cluster NGC 6397. Through iterative effective PSF (ePSF) modelling and geometric distortion (GD) calibration on individual unresampled exposures, they achieved **0.7 mas (0.007 pixel) 1D precision for VIS** and **~3 mas (0.01 pixel) for NISP**, for bright well-measured stars just below saturation. This represents the state of the art for classical point-source astrometry with Euclid.
@@ -624,6 +635,9 @@ Their approach relies on several conditions that differ fundamentally from the J
 1. **Our ~50 mas scatter is not instrument-limited.** Euclid VIS can reach 0.7 mas on bright stars. Our 30-50 mas scatter on faint galaxies from coadded mosaics is dominated by (a) source faintness (SNR 10-30 vs >100), (b) extended morphology (galaxies vs point sources), and (c) resampling of the coadded mosaics which destroys sub-pixel phase information that individual exposures preserve. The theoretical King-formula floor at SNR=20 with FWHM=1.56 px is ~33 mas per axis, consistent with what we observe.
 
 2. **Colour-dependent centroid systematics are confirmed.** Libralato et al. found a clear systematic in proper motions as a function of (BP-RP) colour (their Appendix C), attributed to the broad VIS filter (550-900 nm) causing colour-dependent PSF variations. This validates our latent position head approach: chromatic centroid shifts are real at the sub-mas level even for point sources, and worse for galaxies with colour gradients. Using the fused 10-band bottleneck to predict positions should handle this naturally, since the bottleneck encodes the full SED.
+
+![Chromatic centroid diagnostic](docs/figures/astrometry_chromatic_diagnostic.png)
+*Band-to-band centroid scatter within Rubin (e.g. r-vs-i ~48 mas) and between NISP/VIS, plotted against source colour. The trend is monotonic in colour, consistent with DCR in Rubin + broad-VIS PSF chromatics à la Libralato et al. 2024 — exactly the systematic the SED-conditioned latent head is meant to absorb.*
 
 3. **PSF models need to be used carefully.** Their ePSF fitting achieves much better centroid precision than a parametric Gaussian for bright isolated stars. In JAISP, however, PSFField-refined centroids were a worse training target for the latent head: v7 and v8 runs using PSFField labels plateaued near 29-30 mas. The head features encode the photon centroid visible in the local image window, not an external PSFField centroid that can differ by ~16 mas. Current best practice is to train/evaluate the head with Gaussian-fit photon-centroid labels and keep PSFField as a separate PSF/photometry product until a better joint training scheme is validated.
 
@@ -819,6 +833,15 @@ The optional `--psf-checkpoint` path in `eval_latent_position.py` exists for exp
 | nisp_H | 122,341 | 42.2 mas | 9.5 mas | 17.0 mas | 77.6% |
 
 The v8 head reduces the radial median residual by roughly **74-79%** across all bands. Rubin g/r/i/z and NISP Y/J/H reach **~9-11 mas median**; Rubin y is **14.7 mas**; Rubin u remains harder at **30.5 mas** because of low SNR and larger raw offsets. Applying a residual PINN field after the head changes medians by only ~0.0-0.2 mas, because the remaining smooth field amplitude is already ~1 mas.
+
+![v8 cross-instrument eval](docs/figures/astrometry_v8_cross_instrument.png)
+*Headline v8 no-PSF result: raw (grey) vs. head-corrected (blue) radial offset distributions per band, 630K source×band measurements across 790 tiles. All bands converge to a similar post-head floor except Rubin u (noisier) and Rubin y (lower SNR).*
+
+![Astrometry before / after](docs/figures/astrometry_before_after.png)
+*Before/after overview on a representative tile: arrows show the per-source correction applied by the latent position head. The raw field is dominated by band-dependent centroid scatter rather than a smooth WCS offset.*
+
+![Per-band bar chart](docs/figures/astrometry_bar_chart.png)
+*Per-band median and p68 summary, raw vs. head. NISP Y/J/H and Rubin g/r/i/z sit in a tight 9-11 mas band; Rubin u and y carry the long tail.*
 
 #### End-to-end v8 pipeline (ready to invoke)
 
@@ -1202,10 +1225,12 @@ python models/psf/train_psf_field.py \
 
 | Checkpoint | Location | Description |
 |------------|----------|-------------|
-| **V7 foundation (RMS-aware)** | `models/checkpoints/jaisp_v7_concat/checkpoint_best.pt` | v7_rms_aware_loss run (epoch 92). Trained on 790 tile pairs with correct NISP pixel scales and RMS-aware loss. Default stable foundation for most downstream work; current astrometry also has a v8 path below. |
-| **V8 foundation (fine-scale)** | `models/checkpoints/jaisp_v8_fine/checkpoint_best.pt` | Fine-scale 0.4"/px foundation used by the current latent astrometry head. |
-| **CenterNet detector** | `checkpoints/centernet_v7_rms_aware/centernet_best.pt` | Fused-bottleneck CenterNet, 2-round self-training on top of `jaisp_v7_concat`. |
-| **StemCenterNet detector** | `checkpoints/stem_centernet_v7_rms_aware_200/stem_centernet_best.pt` | Native-resolution stem detector on top of `jaisp_v7_concat`. |
+| **V8 foundation (fine-scale)** | `models/checkpoints/jaisp_v8_fine/checkpoint_best.pt` | **Current production foundation.** Fine-scale 0.4"/px fused, 256×256 random-crop training. All current downstream heads are trained on this checkpoint. |
+| **V7 foundation (RMS-aware)** | `models/checkpoints/jaisp_v7_concat/checkpoint_best.pt` | Prior production (epoch 92). Trained on 790 tile pairs with correct NISP pixel scales and RMS-aware loss. Retained as a comparison baseline. |
+| **CenterNet v8 (current)** | `checkpoints/centernet_v8_fine/centernet_round2.pt` | Fused-bottleneck CenterNet, 2-round self-training on top of `jaisp_v8_fine`. Inference across all 790 tiles is cached at `data/detection_labels/centernet_v8_r2_790.pt` (~188 dets/tile) and feeds PSFField v3 and the foundation photometry head. |
+| **CenterNet v7 (baseline)** | `checkpoints/centernet_v7_rms_aware/centernet_best.pt` | Fused-bottleneck CenterNet on top of `jaisp_v7_concat`. Kept as a v7-vs-v8 comparison. |
+| **StemCenterNet detector** | `checkpoints/stem_centernet_v7_rms_aware_200/stem_centernet_best.pt` | Native-resolution stem detector on top of `jaisp_v7_concat`. No v8 retrain yet. |
+| **PSFField v3** | `models/checkpoints/psf_field_v3.pt` | Continuous SIREN-based PSF for all 10 bands. Trained on CenterNet v8 stellar selections; centroid drift median 14.6 mas, best loss 779. |
 | **Latent position head (current)** | `models/checkpoints/latent_position_v8_no_psf/best.pt` | Current per-object astrometry correction. Uses v8 foundation, Gaussian centroid targets, no PSFField labels. |
 | **Astrometry V7 matcher** | `models/checkpoints/astro_v7_psffit/checkpoint_best.pt` | Historical V7 multiband matcher with PSF-fit centroids, trained on 200 tiles. Use for matcher experiments, not the current headline correction. |
 | **Latent position head (v7 baseline)** | `models/checkpoints/latent_position_head/best.pt` | Earlier v7 per-object alignment head. |
@@ -1231,8 +1256,8 @@ These checkpoints are outdated -- trained on wrong NISP pixel scales (0.3"/px as
 ## Current Status
 
 **Foundation models**
-- **V7**: `models/checkpoints/jaisp_v7_concat/checkpoint_best.pt` (epoch 92), RMS-aware loss, 790 tiles, correct NISP MER pixel scales. Production foundation.
-- **V8**: `models/checkpoints/jaisp_v8_fine/checkpoint_best.pt` — fine-scale experiment (0.4"/px fused), 200 tiles. Used for v8 detection and the current v8 latent astrometry head.
+- **V8 (current production)**: `models/checkpoints/jaisp_v8_fine/checkpoint_best.pt` — fine-scale 0.4"/px fused, 256×256 random-crop training. All current downstream heads (CenterNet, latent position, PSFField, photometry) are trained against this checkpoint.
+- **V7 (prior production)**: `models/checkpoints/jaisp_v7_concat/checkpoint_best.pt` (epoch 92), RMS-aware loss, 790 tiles, correct NISP MER pixel scales. Retained as a comparison baseline; the v7 CenterNet and v7 latent-position checkpoints are still valid for ablations but are no longer the recommended starting point.
 
 **Detection**
 - **CenterNet v7**: `checkpoints/centernet_v7_rms_aware/` — 2-round self-training on v7 foundation, 200 tiles.
