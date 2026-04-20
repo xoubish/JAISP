@@ -177,30 +177,7 @@ At 0.4"/px:
 - The transformer sees 2× finer spatial structure, which helps for morphology-dependent tasks (chromatic centroid shifts, deblending, galaxy shape measurement)
 - Sub-pixel centroiding in the bottleneck improves to ~200 mas precision
 
-The cost is quadratic in tokens: at 0.4"/px with 512×512 tiles, the bottleneck would be 256×256 = 65K tokens -- prohibitively expensive for dense attention. But at 0.4"/px with 256×256 tiles, the bottleneck is 128×128 = 16K tokens -- identical cost to current.
-
-#### Planned experiment: 256×256 tiles at 0.4"/px fused scale
-
-To test whether finer bottleneck resolution improves per-object alignment and galaxy morphology learning:
-
-1. **Re-tile the data** at 256×256 Rubin pixels with 128px stride (50% overlap), giving ~3160 tiles from the same ECDFS footprint (4× current).
-2. **Train V7 foundation** with `fused_pixel_scale_arcsec=0.4`. The Rubin StreamEncoder would need depth=1 (256→128 at 0.4"/px) and the Euclid StreamEncoder depth=2 (~542→271→135 at ~0.4"/px). Token count is ~128×128 = 16K, same as current.
-3. **Evaluate**: Compare reconstruction quality, latent position head convergence, and detection performance against the current 512/0.8 baseline.
-
-The hypothesis: 4× more tiles (more diversity) + 2× finer bottleneck (better spatial detail) should improve downstream tasks that depend on fine spatial structure -- particularly per-object alignment for galaxies with colour gradients, where the chromatic centroid shift operates at sub-arcsecond scales.
-
-The tradeoff: less transformer context per tile (51" vs 102" sky coverage), which could hurt tasks that benefit from large-scale spatial awareness. In practice, few astronomical tasks require >50" of spatial context for per-source predictions.
-
-#### Current tile size (kept as default)
-
-The 512×512 / 0.8"/px configuration remains the default and all current checkpoints use it. It provides:
-
-- ~500 sources per tile -- good density for detection training and astrometry
-- 102" spatial context -- ~50 PSF widths, ample for source morphology
-- ~17K tokens -- near the practical limit for dense attention on a single GPU
-- Established baselines for all downstream heads
-
-As the dataset grows, adding more tiles at any size provides more diverse training samples (different source populations, noise realizations, PSF conditions) without increasing per-sample cost.
+The cost is quadratic in tokens: at 0.4"/px with 512×512 tiles, the bottleneck would be 256×256 = 65K tokens -- prohibitively expensive for dense attention. But at 0.4"/px with 256×256 tiles, the bottleneck is 128×128 = 16K tokens -- identical cost to current. This is the configuration v8 adopts (see the v8 section below).
 
 ### Rubin NPZ files (`data/rubin_tiles_all/tile_x*_y*.npz`)
 
@@ -578,8 +555,6 @@ Detection development originally used 130 training tiles and 14 validation tiles
 | `matcher.py` | Hungarian matcher + DETR loss (archived) |
 | `train_detection.py` | DETR training loop (archived) |
 
-**Note on DETR (archived)**: DETR was the first detection approach tried, using a transformer decoder with 500 learned object queries and Hungarian matching. It was abandoned because: (1) DETR needs large datasets (trained for 500 epochs on 118k images; we have 130 tiles); (2) query collapse persisted for many epochs; (3) overkill for point-like sources at bottleneck resolution; (4) convergence was ~5× slower than CenterNet. The code is preserved for reference.
-
 ### 2. Astrometry and Concordance
 
 **Directory**: `models/astrometry2/`
@@ -611,8 +586,8 @@ The centroid scatter follows the King (1983) / SITCOMTN-159 scaling: sigma is pr
 ![Centering diagnostic](docs/figures/astrometry_centering_diagnostic.png)
 *Centering / centroid-definition scatter dominates the raw Rubin–VIS offset. Switching from detection-peak to PSF-fit centroids changes the measured offset by ~54 mas, comparable to the raw offset itself — evidence that the residual is not a smooth WCS field but source-level centroid ambiguity. This motivated the per-object latent position head over a purely global concordance correction.*
 
-![Raw vs head-residual concordance](docs/figures/concordance_raw_vs_head.png)
-*Left: PINN fit to raw per-source anchors shows a coherent smooth field with ~5 mas amplitude across the tile grid. Right: same solver fit to head residuals shows the field has collapsed to ~1 mas — the head has already absorbed the coherent component, leaving essentially noise for the smooth solver. This confirms the PINN/NN/grid field solvers should be treated as QA/fallback, not as the primary correction.*
+![Concordance three-way comparison](docs/figures/concordance_3way.png)
+*Per-band four-panel breakdown across the tile grid. Columns (left → right): raw per-source anchors, PINN fit to raw anchors, head-residual anchors, PINN fit to head residuals. The PINN-raw column shows a coherent ~5 mas structured field; after the per-object latent head runs, the residual anchors (third column) look like scatter and the PINN fit to them (right column) is ~1 mas with no coherent structure. The head has absorbed the smooth component; the PINN/NN/grid solvers are now QA/fallback, not the primary correction.*
 
 #### Context: Euclid instrument astrometric precision (Libralato et al. 2024)
 
@@ -657,8 +632,6 @@ Their approach relies on several conditions that differ fundamentally from the J
 
 **Smooth field solvers (QA/fallback)**: `fit_direct_pinn.py` fits raw or head-residual anchors with PINN/NN smoothness priors. On raw anchors, the field amplitude is only ~5-9 mas and barely changes the tens-of-mas per-source residuals. On head residual anchors, the residual field amplitude is ~1 mas, confirming that the head has already removed the coherent component.
 
-**Per-patch NN matcher (historical)**: detect sources, extract 33x33 patches, predict per-source offsets with a neural cost-volume matcher, then fit a smooth field. This remains useful for experiments but is not the current best per-object astrometry path.
-
 #### Pipeline
 
 The current v8 per-object pipeline proceeds through these stages:
@@ -678,9 +651,8 @@ The current v8 per-object pipeline proceeds through these stages:
 #### Matcher versions
 
 - **V7** (`matcher_v7.py`): Uses frozen V7 BandStems (from `jaisp_v7_concat`), where VIS is processed at native resolution. Supports `--stream-stages N` to use frozen V7 stream encoder ConvNeXt stages after the stems for richer features. This is the current matcher implementation for concordance experiments.
-- **V6** (`matcher_v6.py`): Archived. Uses V6 Phase B BandStems where VIS was downsampled to Rubin resolution. Kept for backward compatibility.
 
-Both matcher versions support multiband mode and remain available, but the latent position head is the current best route for per-object alignment.
+The matcher supports multiband mode and remains available, but the latent position head is the current best route for per-object alignment.
 
 #### SITCOMTN-159 Motivated Improvements
 
@@ -713,7 +685,6 @@ Three solvers are available for fitting the smooth concordance field from per-so
 
 | File | Description |
 |------|-------------|
-| `matcher_v6.py` | V6-based patch matcher (frozen V6 stems + trainable adapters) |
 | `matcher_v7.py` | V7-based patch matcher (frozen V7 stems + optional stream stages + trainable adapters, per-pixel RMS support) |
 | `dataset.py` | Patch + RMS extraction, WCS matching, CenterNet detector integration, rotation/flip augmentation |
 | `source_matching.py` | Classical peak-finding, WCS-based source matching, PSF-fit centroiding, SNR estimation |
@@ -721,7 +692,6 @@ Three solvers are available for fitting the smooth concordance field from per-so
 | `nn_field_solver.py` | MLP-based field solver |
 | `pinn_field_solver.py` | Physics-Informed NN field solver (curl-free, Laplacian, band consistency) |
 | `fit_direct_pinn.py` | Direct concordance from raw or head-residual anchors. Dispatches to PINN (`--solver pinn`, default) or NN (`--solver nn`) |
-| `train_astro_v6.py` | Training script (V6 backbone) |
 | `train_astro_v7.py` | Training script (V7 backbone, CenterNet or classical sources, saves full checkpoint metadata) |
 | `infer_concordance.py` | Per-tile inference -> FITS export |
 | `infer_global_concordance.py` | Global multi-tile concordance fitting |
@@ -747,55 +717,7 @@ The bottleneck path captures chromatic morphology from all 10 bands (star vs gal
 
 **Training**: Uses jitter-based self-supervision. VIS Gaussian-fit centroids serve as the current target convention; controlled Gaussian jitter (~30 mas) creates approximate input positions. The head learns to recover the photon centroid visible in the latent features. PSFField-refined centroids are not used as training targets in the current best run because they create a target/feature mismatch.
 
-```bash
-python models/astrometry2/train_latent_position.py \
-    --rubin-dir data/rubin_tiles_200 --euclid-dir data/euclid_tiles_200 \
-    --v7-checkpoint models/checkpoints/jaisp_v7_concat/checkpoint_best.pt \
-    --epochs 30 --lr 3e-4 --jitter-arcsec 0.03 --jitter-max-arcsec 0.1 \
-    --output-dir models/checkpoints/latent_position_head
-```
-
-**Training result** (200 tiles, 30 epochs, jitter σ=30 mas, [wandb](https://wandb.ai/AI-Astro/JAISP-LatentPosition/runs/nosv9ii9)):
-
-| Metric | Train | Val |
-|--------|-------|-----|
-| MAE total | 17.9 mas | 17.7 mas |
-| p68 | 20.0 mas | 19.6 mas |
-| Median sigma | 13.3 mas | 13.2 mas |
-| Frac < 100 mas | 99.8% | 99.8% |
-
-The head recovers jittered positions to **17.7 mas** on val -- well below the 30 mas jitter and below the 20 mas target. Train/val are nearly identical (no overfitting). The mean jitter magnitude is ~37.5 mas, so the head recovers ~53% of the applied offset; the residual ~18 mas represents the spatial resolution floor of the bottleneck features at 0.8"/px.
-
-**Cross-instrument evaluation, v7 checkpoint** (790 tiles, all bands -> VIS, SNR >= 5, raw offset < 200 mas):
-
-```bash
-cd models && python astrometry2/eval_latent_position.py \
-    --rubin-dir  ../data/rubin_tiles_all \
-    --euclid-dir ../data/euclid_tiles_all \
-    --v7-checkpoint checkpoints/jaisp_v7_concat/checkpoint_best.pt \
-    --head-checkpoint checkpoints/latent_position_head/best.pt \
-    --output-dir checkpoints/latent_position_head/eval_cross_instrument_clipped \
-    --clip-mas 200 --min-snr 5
-```
-
-For each source, the eval centroids in each of the 9 non-VIS bands' native pixels, projects to the VIS frame, and asks the head to refine toward the VIS PSF-fit centroid. Sources with raw offset > 200 mas (bad centroids / wrong matches) or band SNR < 5 are excluded.
-
-**Results** (630K source×band measurements across 790 tiles):
-
-| Band | N sources | Raw median | Head median | MAE improvement |
-|------|-----------|-----------|-------------|-----------------|
-| rubin_u | 12,347 | 119 mas | 46 mas | 51% |
-| rubin_g | 60,148 | 54 mas | **15 mas** | 52% |
-| rubin_r | 70,022 | 46 mas | **14 mas** | 51% |
-| rubin_i | 62,232 | 41 mas | **13 mas** | 50% |
-| rubin_z | 42,980 | 42 mas | **14 mas** | 50% |
-| rubin_y | 17,126 | 62 mas | 20 mas | 51% |
-| nisp_Y | 116,572 | 41 mas | **13 mas** | 51% |
-| nisp_J | 126,352 | 42 mas | **13 mas** | 50% |
-| nisp_H | 122,341 | 42 mas | **13 mas** | 51% |
-| **All** | **630,120** | **44 mas** | **13.5 mas** | **51%** |
-
-The v7 head achieves **13.5 mas median** alignment across all 9 bands -- below the 20 mas target. The improvement is consistent (~51%) across all bands and both instruments. NISP and Rubin g/r/i/z converge to the same ~13 mas floor, indicating the model uses the fused multi-band bottleneck representation rather than single-band features. This remains a useful baseline, but the current best evaluated checkpoint is the v8 no-PSF run below.
+**v7 baseline** (`models/checkpoints/latent_position_head/best.pt`, 630K source×band measurements across 790 tiles): 44 mas raw median → **13.5 mas head median** (~51% improvement, consistent across all 9 bands). Kept as the direct v7-vs-v8 comparison for the v8 result below.
 
 #### V8 migration and latest evaluated result (2026-04-17)
 
@@ -840,8 +762,8 @@ The v8 head reduces the radial median residual by roughly **74-79%** across all 
 ![Astrometry before / after](docs/figures/astrometry_before_after.png)
 *Before/after overview on a representative tile: arrows show the per-source correction applied by the latent position head. The raw field is dominated by band-dependent centroid scatter rather than a smooth WCS offset.*
 
-![Per-band bar chart](docs/figures/astrometry_bar_chart.png)
-*Per-band median and p68 summary, raw vs. head. NISP Y/J/H and Rubin g/r/i/z sit in a tight 9-11 mas band; Rubin u and y carry the long tail.*
+![SNR diagnostic](docs/figures/astrometry_snr_diagnostic.png)
+*Why low-SNR sources end up in the tail. Left: centroid residual vs. combined √(SNR_R × SNR_V); the red median track follows the King (1983) / SITCOMTN-159 σ ∝ FWHM / SNR curve down to the ~5 mas systematic floor (dashed). Middle: Rubin-only vs. VIS-only SNR show the same scaling separately. Right: VIS PSF-fit FWHM distribution — most sources are resolved galaxies (FWHM > PSF), which also enlarges centroid ambiguity. The Rubin u tail in the head-corrected table is exactly this regime: low SNR + extended morphology.*
 
 #### End-to-end v8 pipeline (ready to invoke)
 
@@ -970,10 +892,6 @@ the VIS grid before sharing templates.
 
 `io/11_psf_field_photometry_validation.ipynb` validates the compact-source PSF baseline using a CenterNet VIS master catalog. `io/12_scarlet_like_photometry.ipynb` visualizes the per-scene optimizer. `io/13_foundation_photometry_head.ipynb` loads a trained V8 photometry-head checkpoint and compares learned-head residuals against PSF-only residuals on the same CenterNet + astrometry-corrected catalog.
 
-#### Related legacy code
-
-`models/photometry/psf_net.py` (PSFNet — Gaussian base + MLP residual, never trained) is retained only as a reference implementation. Production compact-source users should call `models.psf.PSFField` through `models.photometry.PSFFieldPhotometryPipeline`. Extended/blended-source work should use the scarlet-like residual path until a learned morphology head is trained.
-
 ---
 
 ## Project Structure
@@ -1025,13 +943,9 @@ JAISP/
 |   |   +-- self_train_stem.py         Stem self-training: train -> refine -> retrain
 |   |   +-- dataset.py                 Pseudo-labels (VIS + saturation mask)
 |   |   +-- detect.png                 Example detection comparison figure
-|   |   +-- detector.py               DETR model (archived)
-|   |   +-- matcher.py                Hungarian matcher (archived)
-|   |   +-- train_detection.py        DETR training script (archived)
 |   |
 |   +-- astrometry2/                   Per-object astrometry head + concordance QA fields
 |   |   +-- matcher_v7.py              V7 patch matcher (stem + optional stream stages)
-|   |   +-- matcher_v6.py              V6 patch matcher
 |   |   +-- latent_position_head.py    Latent-space canonical position head (per-object alignment)
 |   |   +-- dataset.py                 Patch dataset + per-pixel RMS + detector integration
 |   |   +-- source_matching.py         Classical detection utilities
@@ -1039,7 +953,6 @@ JAISP/
 |   |   +-- nn_field_solver.py         MLP field solver
 |   |   +-- pinn_field_solver.py      PINN field solver (physics-informed)
 |   |   +-- fit_direct_pinn.py        Direct PINN from raw centroids
-|   |   +-- train_astro_v6.py          V6 training script
 |   |   +-- train_astro_v7.py          V7 training script (CenterNet or classical sources)
 |   |   +-- train_local_matcher.py     Local matcher training script
 |   |   +-- train_latent_position.py   Latent position head training script
@@ -1058,17 +971,14 @@ JAISP/
 |   |   +-- run_centernet_detections.py CenterNet inference → VIS-normalised per-tile dets
 |   |
 |   +-- photometry/                    Forced photometry (uses models/psf)
-|   |   +-- psf_net.py                 Legacy PSFNet (Gaussian base + MLP residual, reference only)
 |   |   +-- psf_field_pipeline.py      PSFField-backed forced photometry
 |   |   +-- scarlet_like.py            Positive morphology residual scene optimizer
 |   |   +-- foundation_head.py         V8-feature morphology head trained by residual chi-square
 |   |   +-- train_foundation_photometry_head.py CenterNet + astrometry-corrected training loop
-|   |   +-- train_psf_net.py           Legacy PSFNet training script (superseded)
 |   |   +-- forced_photometry.py       Matched-filter flux estimator
 |   |   +-- stamp_extractor.py         Batched postage stamp extraction + local sky estimation
 |   |   +-- pipeline.py               End-to-end photometry pipeline
 |   |
-|   +-- older_architectures/           Archived experiments (v1-v5)
 |   +-- checkpoints/                   Saved model weights
 |
 +-- io/                                Data I/O notebooks and scripts
