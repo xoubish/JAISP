@@ -8,20 +8,36 @@ A self-supervised multi-instrument foundation model for precision cosmology with
 
 ## Table of Contents
 
-1. [Motivation](#motivation)
-2. [Data](#data)
-3. [Foundation Model](#foundation-model)
-   - [Architecture History (v1 through v7)](#architecture-history-v1-through-v7)
+1. [Current Stack Snapshot](#current-stack-snapshot)
+2. [Motivation](#motivation)
+3. [Data](#data)
+4. [Foundation Model](#foundation-model)
+   - [Architecture History (v1 through v8)](#architecture-history-v1-through-v8)
    - [v7 Mixed-Resolution MAE (Prior Production)](#v7-mixed-resolution-mae-prior-production)
    - [v8 Fine-Scale MAE (Current)](#v8-fine-scale-mae-current)
-4. [Downstream Heads](#downstream-heads)
+5. [Downstream Heads](#downstream-heads)
    - [Detection](#1-detection)
    - [Astrometry and Concordance](#2-astrometry-and-concordance)
    - [Latent Position Head](#latent-position-head-per-object-multi-band-alignment)
-   - [PSF + Forced Photometry](#3-psf--forced-photometry)
-5. [Project Structure](#project-structure)
-6. [Quick Start](#quick-start)
-7. [Checkpoints](#checkpoints)
+   - [PSF Modelling and Photometry](#3-psf-modelling-and-photometry)
+6. [Project Structure](#project-structure)
+7. [Quick Start](#quick-start)
+8. [Checkpoints](#checkpoints)
+
+---
+
+## Current Stack Snapshot
+
+| Layer | Current default | Notes |
+|-------|-----------------|-------|
+| Foundation | `models/checkpoints/jaisp_v8_fine/checkpoint_best.pt` | Fine-scale 0.4"/px fused MAE, trained with 256x256 Rubin random crops from the 512x512 tile product. |
+| Detection | `checkpoints/centernet_v8_fine/centernet_round2.pt` | Fused-bottleneck CenterNet on v8 features; all-790-tile labels cached at `data/detection_labels/centernet_v8_r2_790.pt`. |
+| Astrometry | `models/checkpoints/latent_position_v8_no_psf/best.pt` | Current no-PSF latent position head. Gaussian-fit photon centroids are the present target convention. |
+| Smooth field QA | `models/astrometry2/fit_direct_pinn.py` | Fits raw or head-residual anchors from `anchors.npz`; post-head fields are about 1 mas and are QA/fallback products. |
+| PSF | `models/checkpoints/psf_field_v3.pt` | Continuous SIREN PSFField for all 10 bands, used for PSF diagnostics and photometry. |
+| Photometry | `models/checkpoints/photometry_foundation_200_fast/checkpoint_best.pt`; experiment: `models/checkpoints/rendered_stamp_v2_bigstamp/checkpoint_best.pt` | Current main learned v8 photometry head, plus PSFField matched-filter, scarlet-like residual-scene, and rendered-stamp experimental paths. |
+
+Figure policy for this file: keep only figures that change the reader's understanding. Repetitive good/worst galleries, per-epoch W&B panels, and minor variants should stay in notebooks or checkpoint folders unless they support a new conclusion.
 
 ---
 
@@ -91,12 +107,14 @@ The long-term plan is to (a) extend evaluation to at least one non-ECDFS field a
 
 ## Data
 
-The repo currently contains two compatible tile products:
+The current checkout contains the products used by the v8 pipeline:
 
-- **Legacy ECDFS development subset**: `data/rubin_tiles_ecdfs/` and `data/euclid_tiles_ecdfs/`, with 144 matched Rubin+Euclid pairs. These are the tiles many earlier experiments and downstream prototypes were built on.
-- **Current flat training set**: `data/rubin_tiles_all/` and `data/euclid_tiles_all/`, extracted from `data/tiles_product.tar.gz`. This set currently contains 790 matched Rubin+Euclid pairs plus one extra readable Euclid-only tile that Rubin-driven loaders ignore.
+- **Current flat training set**: `data/rubin_tiles_all/` and `data/euclid_tiles_all/`. The Rubin side contains 790 tiles; the Euclid side contains 791 readable files, of which 790 are matched Rubin+Euclid pairs and one is Euclid-only. Rubin-driven loaders ignore the unmatched Euclid tile.
+- **200-tile downstream subset**: `data/rubin_tiles_200/` and `data/euclid_tiles_200/`, both symlink subsets of the flat training set. Current detection training and cached v8 features use this subset.
+- **Patch-organized tract5063 product**: `data/rubin_tiles_tract5063/patch_{14,15,24}/` and `data/euclid_tiles_tract5063/patch_{14,15,24}/`, with 280 files per instrument. These are useful for patch-level inspection and ingestion provenance; the flat loaders above are the current training interface.
+- **Historical ECDFS 144-tile subset**: referenced in older checkpoints and experiment notes, but the `data/rubin_tiles_ecdfs/` and `data/euclid_tiles_ecdfs/` directories are not present in this checkout.
 
-Both products use the same NPZ schemas. In the flat set, filenames encode tract/patch metadata directly, for example `tile_x02816_y00512_tract5063_patch_14.npz` and `tile_x02816_y00512_tract5063_patch_14_euclid.npz`.
+These products use compatible NPZ schemas. In the flat set, filenames encode tract/patch metadata directly, for example `tile_x02816_y00512_tract5063_patch_14.npz` and `tile_x02816_y00512_tract5063_patch_14_euclid.npz`.
 
 ![Tile coverage map](docs/figures/downloaded_patches.png)
 *Left: Spatial distribution of Rubin tile centers by patch, covering the ECDFS field. Right: Tile counts per patch showing matched Rubin+Euclid pair availability.*
@@ -121,7 +139,7 @@ The downside is that tile count overstates statistical independence. In the lega
 
 ### Tile Size, Fused Scale, and Resolution Tradeoffs
 
-The current 512x512 Rubin tile size (102" x 102" on sky) was chosen to balance transformer cost, source density, and spatial context. But tile size interacts with another critical parameter -- `fused_pixel_scale_arcsec` -- in ways that matter for per-object alignment and galaxy morphology. This section documents the tradeoff space.
+The stored Rubin tile product is 512x512 pixels (102" x 102" on sky), which balances source density and spatial context. The current v8 foundation does not train on the full stored tile at once: it draws 256x256 Rubin random crops, paired with matching Euclid crops, so the transformer sees a smaller sky area at a finer fused scale. Tile size and `fused_pixel_scale_arcsec` should therefore be treated together.
 
 #### How tile size flows through the architecture
 
@@ -143,12 +161,12 @@ The bottleneck token count -- and therefore transformer cost -- is controlled by
 | Tile (Rubin px) | Sky | Fused scale | Bottleneck tokens | Attention cost | Sources/tile |
 |---|---|---|---|---|---|
 | 256×256 | 51" | 0.8"/px | ~64×64 = 4K | 1× (baseline) | ~125 |
-| **512×512 (current)** | **102"** | **0.8"/px** | **~128×128 = 16K** | **16×** | **~500** |
+| 512×512 full tile (v7) | 102" | 0.8"/px | ~128×128 = 16K | 16× | ~500 |
 | 1024×1024 | 204" | 0.8"/px | ~256×256 = 65K | **260×** | ~2000 |
-| 256×256 | 51" | **0.4"/px** | ~128×128 = 16K | 16× (same as current) | ~125 |
+| **256×256 crop (v8 current)** | **51"** | **0.4"/px** | **~128×128 = 16K** | **16× (same as v7 full tile)** | **~125** |
 | 512×512 | 102" | 0.4"/px | ~256×256 = 65K | 260× (too expensive) | ~500 |
 
-The key insight: **256×256 tiles at 0.4"/px fused scale gives the same computational cost as the current setup but with 2× finer bottleneck spatial resolution.**
+The key insight: **256×256 crops at 0.4"/px fused scale give the same transformer cost as the v7 full-tile setup but with 2× finer bottleneck spatial resolution.**
 
 #### What tile size affects per component
 
@@ -164,7 +182,7 @@ The key insight: **256×256 tiles at 0.4"/px fused scale gives the same computat
 
 #### Why fused scale matters more than tile size
 
-The fused scale (`fused_pixel_scale_arcsec`) sets the angular resolution of the bottleneck -- the finest spatial detail the transformer can reason about. At the current 0.8"/px:
+The fused scale (`fused_pixel_scale_arcsec`) sets the angular resolution of the bottleneck -- the finest spatial detail the transformer can reason about. At v7's 0.8"/px:
 
 - Each bottleneck pixel covers 8 VIS pixels (4 Rubin pixels)
 - A compact galaxy (2" effective radius) is ~5 bottleneck pixels across
@@ -177,7 +195,7 @@ At 0.4"/px:
 - The transformer sees 2× finer spatial structure, which helps for morphology-dependent tasks (chromatic centroid shifts, deblending, galaxy shape measurement)
 - Sub-pixel centroiding in the bottleneck improves to ~200 mas precision
 
-The cost is quadratic in tokens: at 0.4"/px with 512×512 tiles, the bottleneck would be 256×256 = 65K tokens -- prohibitively expensive for dense attention. But at 0.4"/px with 256×256 tiles, the bottleneck is 128×128 = 16K tokens -- identical cost to current. This is the configuration v8 adopts (see the v8 section below).
+The cost is quadratic in tokens: at 0.4"/px with 512×512 tiles, the bottleneck would be 256×256 = 65K tokens -- prohibitively expensive for dense attention. But at 0.4"/px with 256×256 crops, the bottleneck is 128×128 = 16K tokens -- identical cost to the v7 full-tile baseline. This is the configuration v8 adopts (see the v8 section below).
 
 ### Rubin NPZ files (`data/rubin_tiles_all/tile_x*_y*.npz`)
 
@@ -189,7 +207,7 @@ The cost is quadratic in tokens: at 0.4"/px with 512×512 tiles, the bottleneck 
 | `bands`  | `[6]`            | Band name strings (u, g, r, i, z, y) |
 | `wcs_hdr`| string           | FITS WCS header for astrometric calibration |
 
-Pixel scale: 0.2 arcsec/pixel. Each tile covers roughly 102 x 102 arcsec on the sky. The legacy `data/rubin_tiles_ecdfs/` directory uses the same schema.
+Pixel scale: 0.2 arcsec/pixel. Each tile covers roughly 102 x 102 arcsec on the sky. The patch-organized tract5063 product uses the same Rubin schema; the historical ECDFS subset used the same schema when present.
 
 ### Euclid NPZ files (`data/euclid_tiles_all/tile_x*_y*_euclid.npz`)
 
@@ -200,7 +218,7 @@ Pixel scale: 0.2 arcsec/pixel. Each tile covers roughly 102 x 102 arcsec on the 
 | `var_VIS/Y/J/H`  | same              | Variance       |
 | `wcs_VIS/Y/J/H`  | string            | FITS WCS       |
 
-Euclid VIS has twice the angular resolution of Rubin, which is why preserving it at native resolution (rather than downsampling to match Rubin) is so important for the foundation model design. The legacy `data/euclid_tiles_ecdfs/` directory uses the same schema.
+Euclid VIS has twice the angular resolution of Rubin, which is why preserving it at native resolution (rather than downsampling to match Rubin) is so important for the foundation model design. The patch-organized tract5063 product uses the same Euclid schema; the historical ECDFS subset used the same schema when present.
 
 ### Supported Bands
 
@@ -216,9 +234,9 @@ Each band has its own `BandStem` -- a small per-band CNN that handles noise norm
 
 ## Foundation Model
 
-### Architecture History (v1 through v7)
+### Architecture History (v1 through v8)
 
-The foundation model went through seven major iterations over the course of this project. Understanding this history is important because each version's failure revealed a specific insight about what self-supervised astronomical representations need. The overall arc is a progression from **latent-space alignment** (v1-v5) to **pixel-space reconstruction** (v6-v7), driven by the realization that precision cosmology demands sub-pixel spatial fidelity that contrastive and JEPA objectives fundamentally cannot enforce.
+The foundation model went through eight major iterations over the course of this project. Understanding this history is important because each version's failure revealed a specific insight about what self-supervised astronomical representations need. The overall arc is a progression from **latent-space alignment** (v1-v5) to **pixel-space reconstruction** (v6-v8), driven by the realization that precision cosmology demands sub-pixel spatial fidelity that contrastive and JEPA objectives fundamentally cannot enforce.
 
 > *If you only need the current architecture, skip to [v8 Fine-Scale MAE (Current)](#v8-fine-scale-mae-current). V7 is described first because v8 inherits the v7 architecture with small changes.*
 
@@ -278,7 +296,7 @@ The reason this works is simple and powerful: to reconstruct a held-out band at 
 
 **Limitation**: Phase B downsampled Euclid VIS (~1084x1084 at 0.1"/px) to Rubin's 512x512 grid before encoding. This was a pragmatic choice to avoid dealing with mixed resolutions, but it discarded the 2x resolution advantage that makes VIS the most valuable single channel for astrometry and deblending.
 
-#### v7: Mixed-Resolution MAE (current)
+#### v7: Mixed-Resolution MAE (prior production)
 
 v7 fixes v6's resolution bottleneck. Instead of forcing all instruments onto one pixel grid, each instrument processes at its native resolution through independent encoder branches with different depths. The branches are designed so that after their respective downsampling stages, both streams arrive at approximately the same physical angular scale (~0.8 arcsec/pixel). At this common physical scale they fuse into a shared latent representation, pass through a transformer bottleneck, and then decode back to the target band's native resolution.
 
@@ -352,7 +370,7 @@ NISP Y/J/H data comes from Euclid MER mosaics, already resampled to 0.1"/px (sam
 
 Training uses mixed-precision (bfloat16 autocast) and supports multi-GPU via `torchrun` with DistributedDataParallel.
 
-**Current checkpoint** (`jaisp_v7_concat` / `v7_rms_aware_loss`):
+**Reference checkpoint** (`jaisp_v7_concat` / `v7_rms_aware_loss`):
 
 | Parameter | Value |
 |-----------|-------|
@@ -425,7 +443,7 @@ All current downstream heads reuse the frozen **V8** foundation encoder (`models
 
 **Directory**: `models/detection/`
 
-The detection stack supports three complementary source-finding choices. The fused-bottleneck CenterNet is now trained against the v8 foundation (`checkpoints/centernet_v8_fine/centernet_round2.pt`); the "V7 +" labels below describe the original architecture and also apply to the v8 variant (same head, different frozen encoder).
+The detection stack supports three complementary source-finding choices. The fused-bottleneck CenterNet is now trained against the v8 foundation (`checkpoints/centernet_v8_fine/centernet_round2.pt`) with cached v8 bottleneck features in `data/cached_features_v8_fine/`.
 
 1. **Classical VIS baseline**: native-resolution Euclid VIS peak-finding with bright-star masking. This is fast, robust, and remains the bootstrap source list for pseudo-label generation.
 2. **Foundation + CenterNet (current: v8)**: a dense detector on top of the frozen foundation **fused bottleneck**. This is the strongest current option for broad 10-band semantic fusion, especially when the signal is spread across multiple bands rather than carried by one sharp VIS peak. The v8 round-2 checkpoint is used to produce the 790-tile detection label set (`data/detection_labels/centernet_v8_r2_790.pt`, ~188 detections/tile) that PSFField v3 and the foundation photometry head consume.
@@ -454,7 +472,7 @@ The DETR code is preserved in `detector.py`, `matcher.py`, and `train_detection.
 
 **Classical VIS** is the control baseline. It runs source detection directly on the Euclid VIS image at native 0.1"/px resolution and remains the pseudo-label source for both neural training loops. It is useful because it is simple, interpretable, and usually conservative around obvious sources, but it is limited to what is visible in VIS.
 
-**V7 + CenterNet (fused bottleneck)** treats detection as a per-pixel prediction problem on the frozen V7 bottleneck. The foundation model has already fused Rubin, VIS, and NISP streams into a shared multi-band latent, so the detector head operates on a representation that has deep cross-band mixing built in. This is the learned version of classical peak-finding -- but operating on rich 10-band features instead of a simple coadd.
+**Foundation + CenterNet (fused bottleneck)** treats detection as a per-pixel prediction problem on the frozen foundation bottleneck. The current checkpoint uses v8 features; the v7 checkpoint remains a baseline. The foundation model has already fused Rubin, VIS, and NISP streams into a shared multi-band latent, so the detector head operates on a representation that has deep cross-band mixing built in. This is the learned version of classical peak-finding -- but operating on rich 10-band features instead of a simple coadd.
 
 This approach is a natural fit for astronomical source detection because:
 
@@ -462,33 +480,33 @@ This approach is a natural fit for astronomical source detection because:
 - **Fast convergence.** With direct per-pixel supervision and only 3.5M trainable parameters, CenterNet converges much faster than DETR on the historical 144-tile subset. Val loss drops steadily from epoch 1 without the query-collapse plateau that plagued DETR.
 - **Naturally extensible.** Additional per-pixel heads can be added cheaply by appending more output channels. The current architecture already supports an optional profile head for source shape parameters (ellipticity, half-light radius, Sersic index) that can be activated when training labels become available -- this is important for future integration with tools like Tractor that need shape priors for deblending and forced photometry.
 
-**V7 + StemCenterNet (native stems)** reuses the pretrained V7 BandStems directly at native band resolution. Rubin, VIS, and NISP streams are projected into a common VIS-frame feature grid, fused with a lightweight residual encoder-decoder, and then converted to the same heatmap/offset-style outputs as the bottleneck detector. This path preserves more local spatial detail than the fused 0.8"/px bottleneck, which makes it appealing for high-resolution source finding and deblending, but it also makes the model more sensitive to sharp instrumental structure such as diffraction spikes and bright-star halos. The stem self-training loop uses a lighter bright-star veto during round-2 label promotion (`promotion_spike_radius=20`) to balance novel source discovery against artifact rejection.
+**V7 + StemCenterNet (native stems)** reuses the pretrained V7 BandStems directly at native band resolution. Rubin, VIS, and NISP streams are projected into a common VIS-frame feature grid, fused with a lightweight residual encoder-decoder, and then converted to the same heatmap/offset-style outputs as the bottleneck detector. This path preserves more local spatial detail than the bottleneck detector and remains useful as a stem-vs-bottleneck ablation, but it also makes the model more sensitive to sharp instrumental structure such as diffraction spikes and bright-star halos. The stem self-training loop uses a lighter bright-star veto during round-2 label promotion (`promotion_spike_radius=20`) to balance novel source discovery against artifact rejection.
 
 In practice, the two neural detectors test different hypotheses:
 
 - **CenterNet on the fused bottleneck** asks whether the foundation model learned strong multi-band source evidence.
-- **StemCenterNet on native-resolution stems** asks whether V7 pretraining improves local detection when the head keeps more of the original spatial detail.
+- **StemCenterNet on native-resolution stems** asks whether foundation pretraining improves local detection when the head keeps more of the original spatial detail.
 
-#### How V7 + CenterNet Works
+#### How Foundation + CenterNet Works
 
-The frozen V7 encoder processes the multi-band input tile and produces a bottleneck feature map at approximately 130x130 spatial resolution. A decoder neck with three progressive 2x bilinear upsampling stages (each followed by Conv-BN-ReLU) upsamples the bottleneck 8x to ~1040x1040, matching Euclid VIS native resolution (0.1"/px). Channel widths narrow as spatial resolution increases (256 -> 128 -> 64 -> 64) to keep memory manageable. Four parallel prediction heads then produce dense per-pixel outputs at VIS resolution:
+The frozen foundation encoder processes the multi-band input tile and produces a bottleneck feature map. For v7 full-tile features this is approximately 130x130; for the current v8 full-tile cache it is approximately 262x262 (`[256, ~262, ~262]` per tile). A decoder neck with three progressive 2x bilinear upsampling stages (each followed by Conv-BN-ReLU) upsamples the bottleneck 8x. Labels and predictions are normalized to tile coordinates, so the output grid does not have to be exactly one VIS pixel per cell. Four parallel prediction heads then produce dense per-pixel outputs:
 
 ```
-Frozen V7 encoder
-  -> bottleneck [B, 256, ~130, ~130]        (0.8"/px)
-  -> Flat conv: 256 -> 128 channels          (130x130)
+Frozen foundation encoder (v8 current / v7 baseline)
+  -> bottleneck [B, 256, Hf, Wf]             (v8: ~262x262, v7: ~130x130)
+  -> Flat conv: 256 -> 128 channels
   -> 3x bilinear 2x upsample + Conv-BN-ReLU:
-       128 -> 64 channels                    (130 -> 260)
-        64 -> 64 channels                    (260 -> 520)
-        64 -> 64 channels                    (520 -> 1040)
-  -> Dense prediction heads at VIS resolution (~0.1"/px):
-       Heatmap  [B, 1, ~1040, ~1040]  -- source probability (sigmoid)
-       Offset   [B, 2, ~1040, ~1040]  -- sub-pixel (dx, dy) refinement
-       Log flux [B, 1, ~1040, ~1040]  -- brightness proxy
-       Profile  [B, 4, ~1040, ~1040]  -- (e1, e2, r_half, sersic_n) [optional, future]
+       128 -> 64 channels
+        64 -> 64 channels
+        64 -> 64 channels
+  -> Dense prediction heads:
+       Heatmap  [B, 1, 8Hf, 8Wf]  -- source probability (sigmoid)
+       Offset   [B, 2, 8Hf, 8Wf]  -- sub-grid refinement
+       Log flux [B, 1, 8Hf, 8Wf]  -- brightness proxy
+       Profile  [B, 4, 8Hf, 8Wf]  -- (e1, e2, r_half, sersic_n) [optional, future]
 ```
 
-At inference, source detection is simple: find local maxima in the heatmap (via max-pooling NMS with kernel 7), threshold on confidence, and read off the offset, flux, and profile values at each peak location. Because the heatmap is at VIS resolution, each pixel corresponds to 0.1" on the sky -- the offset head only needs to cover tiny sub-pixel corrections (±0.05"), giving VIS-native centroid precision without relying on large sub-pixel offsets from a coarse bottleneck grid.
+At inference, source detection is simple: find local maxima in the heatmap (via max-pooling NMS with kernel 7), threshold on confidence, and read off the offset, flux, and profile values at each peak location. The current v8 head operates on a finer-than-v7 output grid; final source positions are normalized and can be mapped back into VIS pixels or sky coordinates by downstream code.
 
 #### How V7 + StemCenterNet Works
 
@@ -515,9 +533,9 @@ Since there is no curated source catalog for this field, both neural detectors u
 
 **Pseudo-labels**: When Euclid VIS is available, sources are detected in the VIS image at native 0.1"/px resolution using classical peak-finding (3-sigma threshold, Gaussian smoothing, subpixel centroiding). This preserves VIS's spatial precision. A **bright-star spike mask** (dilating saturated VIS cores by 40 VIS pixels, about 4 arcsec) suppresses obvious diffraction-spike detections during pseudo-label creation. When VIS is unavailable, Rubin g+r+i coadd pseudo-labels are used as a fallback.
 
-**Precomputed features**: The fused-bottleneck CenterNet path can cache encoder outputs to disk. With 8 augmentation variants each (4 rotations × 2 flips), bottleneck tensors `[256, ~130, ~130]` are saved and training then runs only the lightweight decoder neck + heads -- no encoder forward pass needed per step. This is the fastest neural detection path in the repo.
+**Precomputed features**: The fused-bottleneck CenterNet path can cache encoder outputs to disk. The current v8 cache is `data/cached_features_v8_fine/`; the no-augment v8 tensors are `[256, ~262, ~262]` for full 512x512 Rubin tiles. Training then runs only the lightweight decoder neck + heads -- no encoder forward pass needed per step. This is the fastest neural detection path in the repo.
 
-**Live stem training**: StemCenterNet does not use cached bottleneck features. It runs directly from the frozen V7 BandStems at native resolution, which is more expensive but preserves more local structure.
+**Live stem training**: StemCenterNet does not use cached bottleneck features. The available checkpoint runs directly from the frozen V7 BandStems at native resolution, which is more expensive but preserves more local structure.
 
 **Self-training rounds**:
 1. **Round 1**: Train on VIS pseudo-labels. The model learns what sources look like in 10-band feature space.
@@ -534,18 +552,18 @@ For the stem path, round-2 promotion uses a lighter bright-star veto mask (`prom
 | `loss_off` | L1 | Only at GT source positions | 1.0 | Sub-pixel offset refinement |
 | `loss_flux` | L1 | Only at GT source positions | 0.1 | Flux estimation (lower weight: pseudo-labels are noisy) |
 
-Detection development originally used 130 training tiles and 14 validation tiles from a 144-tile ECDFS subset. The current recommended training uses a 200-tile subset (`data/rubin_tiles_200`, `data/euclid_tiles_200`) with 8 augmentation variants cached per tile. The full 790-tile flat dataset is available but 200 tiles is sufficient for detection accuracy.
+Detection development originally used 130 training tiles and 14 validation tiles from a 144-tile ECDFS subset. The current recommended training uses a 200-tile subset (`data/rubin_tiles_200`, `data/euclid_tiles_200`). The current v8 cache uses 4 augmentation variants per tile (`800` feature files plus `pseudo_labels.pt`); older v7 runs used 8 variants. The full 790-tile flat dataset is available but 200 tiles is sufficient for detection accuracy.
 
 #### Files
 
 | File | Description |
 |------|-------------|
 | `centernet_detector.py` | `CenterNetDetector` model: 8× decoder neck + heatmap/offset/flux/profile heads |
-| `stem_centernet_detector.py` | `StemCenterNetDetector`: native-resolution V7 BandStem fusion + dense heads |
+| `stem_centernet_detector.py` | `StemCenterNetDetector`: native-resolution BandStem fusion + dense heads; current checkpoint is v7 |
 | `centernet_loss.py` | Focal loss, bounded Gaussian heatmap rendering (memory-safe at VIS scale), masked offset/flux L1 |
 | `train_centernet.py` | CenterNet training loop (supports live encoder or cached features mode) |
 | `train_stem_centernet.py` | StemCenterNet training loop (live native-resolution stem features) |
-| `precompute_features.py` | One-time V7 encoder feature caching (all tiles × 8 augmentation variants) |
+| `precompute_features.py` | One-time foundation encoder feature caching; supports v7 or v8 via `load_foundation()` |
 | `cached_dataset.py` | Dataset loading precomputed features + pseudo-labels with label refinement support |
 | `self_train.py` | Self-training loop: VIS labels → train → promote/demote → retrain |
 | `self_train_stem.py` | Self-training loop for StemCenterNet with lighter artifact-aware promotion |
@@ -611,8 +629,7 @@ Their approach relies on several conditions that differ fundamentally from the J
 
 2. **Colour-dependent centroid systematics are confirmed.** Libralato et al. found a clear systematic in proper motions as a function of (BP-RP) colour (their Appendix C), attributed to the broad VIS filter (550-900 nm) causing colour-dependent PSF variations. This validates our latent position head approach: chromatic centroid shifts are real at the sub-mas level even for point sources, and worse for galaxies with colour gradients. Using the fused 10-band bottleneck to predict positions should handle this naturally, since the bottleneck encodes the full SED.
 
-![Chromatic centroid diagnostic](docs/figures/astrometry_chromatic_diagnostic.png)
-*Band-to-band centroid scatter within Rubin (e.g. r-vs-i ~48 mas) and between NISP/VIS, plotted against source colour. The trend is monotonic in colour, consistent with DCR in Rubin + broad-VIS PSF chromatics à la Libralato et al. 2024 — exactly the systematic the SED-conditioned latent head is meant to absorb.*
+The supporting chromatic diagnostic is kept in `docs/figures/astrometry_chromatic_diagnostic.png`. It is not embedded here because the centering and v8 cross-instrument figures already carry the main astrometry story; the chromatic plot is a targeted follow-up for colour-dependent centroid shifts.
 
 3. **PSF models need to be used carefully.** Their ePSF fitting achieves much better centroid precision than a parametric Gaussian for bright isolated stars. In JAISP, however, PSFField-refined centroids were a worse training target for the latent head: v7 and v8 runs using PSFField labels plateaued near 29-30 mas. The head features encode the photon centroid visible in the local image window, not an external PSFField centroid that can differ by ~16 mas. Current best practice is to train/evaluate the head with Gaussian-fit photon-centroid labels and keep PSFField as a separate PSF/photometry product until a better joint training scheme is validated.
 
@@ -650,7 +667,7 @@ The current v8 per-object pipeline proceeds through these stages:
 
 #### Matcher versions
 
-- **V7** (`matcher_v7.py`): Uses frozen V7 BandStems (from `jaisp_v7_concat`), where VIS is processed at native resolution. Supports `--stream-stages N` to use frozen V7 stream encoder ConvNeXt stages after the stems for richer features. This is the current matcher implementation for concordance experiments.
+- **V7** (`matcher_v7.py`): Uses frozen V7 BandStems (from `jaisp_v7_concat`), where VIS is processed at native resolution. Supports `--stream-stages N` to use frozen V7 stream encoder ConvNeXt stages after the stems for richer features. This matcher remains available for historical concordance experiments; the v8 latent head is the current per-object correction path.
 
 The matcher supports multiband mode and remains available, but the latent position head is the current best route for per-object alignment.
 
@@ -671,7 +688,7 @@ Training patches are augmented with random 90/180/270-degree rotations and horiz
 The first stage of the pipeline -- detecting sources -- can use either:
 
 - **Classical** (default): `detect_sources()` performs median background subtraction, Gaussian smoothing, and local maximum detection above an N-sigma threshold in both Rubin (g+r+i+z coadd) and VIS independently, then cross-matches via WCS. Simple, fast, and well-understood.
-- **Neural** (optional): Pass `--detector-checkpoint` to replace classical detection with the trained CenterNet detector. The neural detector sees all 10 bands through the V7 encoder and produces source positions directly in the VIS frame -- no cross-matching step needed. It can find fainter sources that are invisible in a 3-band coadd, providing more anchor points for the concordance fit (typically 200+ anchors per tile vs 50-150 with classical).
+- **Neural** (optional): Pass `--detector-checkpoint` to replace classical detection with the trained CenterNet detector. The neural detector sees all 10 bands through the frozen foundation encoder and produces source positions directly in the VIS frame -- no cross-matching step needed. It can find fainter sources that are invisible in a 3-band coadd, providing more anchor points for the concordance fit (typically 200+ anchors per tile vs 50-150 with classical).
 
 #### Field solvers
 
@@ -709,7 +726,7 @@ The per-patch NN matcher and field solvers address the smooth concordance field 
 
 The **latent position head** (`latent_position_head.py`) uses the frozen foundation encoder's multi-band representation to predict chromatically-informed source positions:
 
-1. Run the frozen V7 encoder on the full tile (once) to get the fused bottleneck (0.8"/px, 256 ch) and raw VIS BandStem features (0.1"/px, 64 ch).
+1. Run the frozen foundation encoder on the full tile (once) to get the fused bottleneck (v8 current: 0.4"/px, 256 ch; v7 baseline: 0.8"/px, 256 ch) and raw VIS BandStem features (0.1"/px, 64 ch).
 2. For each detected source, extract local windows from both feature maps via bilinear `grid_sample`.
 3. Process through a small trainable head (ConvNeXt + Conv + MLP, 687K params) to predict a position refinement `(dx, dy, log_sigma)` in VIS pixel space, converted to sky arcsec via the local Jacobian.
 
@@ -759,11 +776,7 @@ The v8 head reduces the radial median residual by roughly **74-79%** across all 
 ![v8 cross-instrument eval](docs/figures/astrometry_v8_cross_instrument.png)
 *Headline v8 no-PSF result: raw (grey) vs. head-corrected (blue) radial offset distributions per band, 630K source×band measurements across 790 tiles. All bands converge to a similar post-head floor except Rubin u (noisier) and Rubin y (lower SNR).*
 
-![Astrometry before / after](docs/figures/astrometry_before_after.png)
-*Before/after overview on a representative tile: arrows show the per-source correction applied by the latent position head. The raw field is dominated by band-dependent centroid scatter rather than a smooth WCS offset.*
-
-![SNR diagnostic](docs/figures/astrometry_snr_diagnostic.png)
-*Why low-SNR sources end up in the tail. Left: centroid residual vs. combined √(SNR_R × SNR_V); the red median track follows the King (1983) / SITCOMTN-159 σ ∝ FWHM / SNR curve down to the ~5 mas systematic floor (dashed). Middle: Rubin-only vs. VIS-only SNR show the same scaling separately. Right: VIS PSF-fit FWHM distribution — most sources are resolved galaxies (FWHM > PSF), which also enlarges centroid ambiguity. The Rubin u tail in the head-corrected table is exactly this regime: low SNR + extended morphology.*
+Optional astrometry diagnostics are available but intentionally not embedded here: `docs/figures/astrometry_before_after.png` for a representative per-source arrow plot, `docs/figures/astrometry_snr_diagnostic.png` for the SNR tail, and `docs/figures/astrometry_chromatic_diagnostic.png` for colour trends.
 
 #### End-to-end v8 pipeline (ready to invoke)
 
@@ -800,7 +813,7 @@ PYTHONPATH=models python models/astrometry2/fit_direct_pinn.py \
     --bands r i g z --include-nisp
 ```
 
-### 3. PSF Modelling — `PSFField`
+### 3. PSF Modelling and Photometry
 
 **Directory**: `models/psf/`
 
@@ -848,20 +861,20 @@ Robust training (`models/psf/train_psf_field.py`):
 - **SED refresh every 5 epochs**: re-estimate each star's 10-band SED from analytic optimal fluxes. Chromatic PSF conditioning improves as the PSF improves.
 - **Gradient sanitisation**: `nan_to_num_` per-parameter before gradient clipping. Without this, any single Inf in a gradient turns the global `clip_grad_norm_` into a divide-by-Inf that zeros every other param — poisoning the step with NaN.
 
-#### Results (v2 checkpoint)
+#### Results (v3 checkpoint)
 
-Trained on 790 tiles × ~8 stars/tile = 3312 stars (after all cuts), 60 epochs, SIREN 192-wide × 6-deep, stamp 25 px:
+The current checkpoint is `models/checkpoints/psf_field_v3.pt` (epoch 59, SIREN 192-wide × 6-deep, stamp 25 px). The v3 diagnostics in `models/checkpoints/psf_field_v3_diag/` evaluate 451 validation stars across 60 tiles:
 
-| Metric | v1 (200 tiles) | v2 (790 tiles) |
-|---|---|---|
-| χ²/ndof median, rubin_r | 4.19 | **2.23** |
-| χ²/ndof median, rubin_i | 4.11 | **1.87** |
-| χ²/ndof median, euclid_VIS | 4.84 | **3.27** |
-| Centroid drift median | 23 mas | **16 mas** |
-| VIS model FWHM | 0.357" | **0.338"** |
-| DCR rubin_u magnitude | 131 mas / colour | 31 mas / colour |
+| Metric | v2 | v3 current |
+|---|---:|---:|
+| χ²/ndof median, rubin_r | 2.23 | 2.89 |
+| χ²/ndof median, rubin_i | 1.87 | 2.20 |
+| χ²/ndof median, euclid_VIS | 3.27 | 3.69 |
+| χ²/ndof median, euclid_Y / J / H | 2.20 / 3.59 / 0.56 | **0.28 / 0.45 / 0.61** |
+| Centroid drift median | 16.0 mas | **14.6 mas** |
+| VIS model FWHM | 0.338" | **0.319"** |
 
-The DCR coefficients show clean wavelength ordering (u > g > y ≈ r > i ≈ z), which is the expected physical scaling.
+V3 tightens the centroid drift and NISP residuals but leaves VIS and some Rubin bands above χ²/ndof ≈ 1, so PSFField remains a strong photometry/diagnostic product rather than the current astrometry target convention.
 
 #### Diagnostics
 
@@ -875,7 +888,7 @@ The DCR coefficients show clean wavelength ordering (u > g > y ≈ r > i ≈ z),
 
 #### Notebook
 
-`io/psf_visualization.ipynb` renders the per-band median PSF and its spatial variation across the tile (3×3 grid of tile positions).
+`io/10_psf_visualization.ipynb` renders the per-band median PSF and its spatial variation across the tile (3×3 grid of tile positions).
 
 #### Photometry heads
 
@@ -884,6 +897,7 @@ Photometry now has two complementary paths:
 - **PSFField matched-filter photometry**: `models.photometry.PSFFieldPhotometryPipeline` renders PSFField templates and applies the vectorized matched-filter estimator in `models/photometry/forced_photometry.py`. This is the compact-source baseline and the fastest way to validate positions, noise maps, PSF sampling, and per-band flux extraction.
 - **V8 foundation photometry head**: `models/photometry/foundation_head.py` is the learned downstream head. It consumes CenterNet detections after latent-head astrometry correction, extracts frozen V8 bottleneck + VIS-stem features, predicts morphology refinements, solves per-band fluxes through the renderer, and trains by local scene residual chi-square.
 - **Scarlet-like residual optimizer**: `models/photometry/scarlet_like.py` fits local blend scenes with non-negative VIS morphology templates, PSF-convolved per-band rendered templates, non-negative per-band fluxes, and an explicit noise-weighted residual loss. This is a baseline/refinement reference for galaxies and blends where a pure PSF template should leave structured residuals.
+- **RenderedStampHead experiment**: `models/photometry/rendered_stamp_head.py` predicts per-source, per-band positive unit-sum rendered stamps directly from frozen V8 features, with no explicit PSF, morphology template, or convolution step. The latest local checkpoint is `models/checkpoints/rendered_stamp_v2_bigstamp/checkpoint_best.pt` (stamp size 71, 200-tile run). Treat this as an experimental end-to-end photometry path, not the default production baseline.
 
 The current learned head is Euclid-native VIS/Y/J/H first, where VIS morphology
 and NISP images share the same 0.1"/px grid. Rubin support should either
@@ -908,21 +922,20 @@ JAISP/
 |   +-- euclid_tiles_all/              Full flat Euclid training tiles (790 tiles, *.npz)
 |   +-- rubin_tiles_200/               200-tile subset (symlinks, used for downstream training)
 |   +-- euclid_tiles_200/              200-tile subset (symlinks, used for downstream training)
-|   +-- cached_features_v7_rms_aware/  Precomputed V7 encoder features for detection
-|   +-- rubin_tiles_ecdfs/             Legacy ECDFS Rubin tiles (144 tiles, archived)
-|   +-- euclid_tiles_ecdfs/            Legacy ECDFS Euclid tiles (144 tiles, archived)
-|   +-- tiles_product.tar.gz           Source archive for the expanded flat tile set
+|   +-- rubin_tiles_tract5063/         Patch-organized tract5063 tiles (patches 14/15/24)
+|   +-- euclid_tiles_tract5063/        Patch-organized tract5063 Euclid tiles
+|   +-- cached_features_v8_fine/       Precomputed V8 encoder features for current CenterNet
+|   +-- detection_labels/              CenterNet v8 labels for all 790 matched tiles
+|   +-- download_tiles_product.sh      Helper for fetching/regenerating the tile product
 |
 +-- checkpoints/
-|   +-- centernet_v7_rms_aware/        Current CenterNet (on jaisp_v7_concat)
-|   +-- stem_centernet_v7_rms_aware_200/ Current StemCenterNet
-|   +-- astro_v7_psffit/               Historical V7 astrometry matcher
-|   +-- latent_position_v8_no_psf/     Current v8 latent astrometry head + anchor fields
-|   +-- jaisp_v7_baseline/             Archived (pre-RMS-aware, wrong NISP scale)
+|   +-- centernet_v8_fine/             Current CenterNet (on jaisp_v8_fine)
+|   +-- centernet_v7_rms_aware/        V7 CenterNet baseline
+|   +-- stem_centernet_v7_rms_aware_200/ V7 StemCenterNet baseline
 |
 +-- models/
-|   +-- jaisp_foundation_v7.py         V7 mixed-resolution MAE (production)
-|   +-- jaisp_foundation_v8.py         V8 fine-scale MAE (experimental, 0.4"/px)
+|   +-- jaisp_foundation_v8.py         V8 fine-scale MAE (current production, 0.4"/px)
+|   +-- jaisp_foundation_v7.py         V7 mixed-resolution MAE (prior production baseline)
 |   +-- jaisp_foundation_v6.py         V6 single-grid MAE (library, used by V7/V8)
 |   +-- jaisp_dataset_v7.py            V7 mixed-resolution split helpers
 |   +-- jaisp_dataset_v8.py            V8 random crop + split helpers
@@ -937,7 +950,7 @@ JAISP/
 |   |   +-- centernet_loss.py          Focal loss + bounded heatmap targets
 |   |   +-- train_centernet.py         CenterNet training (live or cached features)
 |   |   +-- train_stem_centernet.py    StemCenterNet training
-|   |   +-- precompute_features.py     One-time V7 encoder feature caching
+|   |   +-- precompute_features.py     One-time foundation encoder feature caching (v7 or v8)
 |   |   +-- cached_dataset.py          Dataset for cached features + labels
 |   |   +-- self_train.py              Self-training: train -> refine -> retrain
 |   |   +-- self_train_stem.py         Stem self-training: train -> refine -> retrain
@@ -975,11 +988,21 @@ JAISP/
 |   |   +-- scarlet_like.py            Positive morphology residual scene optimizer
 |   |   +-- foundation_head.py         V8-feature morphology head trained by residual chi-square
 |   |   +-- train_foundation_photometry_head.py CenterNet + astrometry-corrected training loop
+|   |   +-- rendered_stamp_head.py     End-to-end per-source rendered-stamp photometry experiment
+|   |   +-- train_rendered_stamp_head.py RenderedStampHead training loop
 |   |   +-- forced_photometry.py       Matched-filter flux estimator
 |   |   +-- stamp_extractor.py         Batched postage stamp extraction + local sky estimation
 |   |   +-- pipeline.py               End-to-end photometry pipeline
 |   |
 |   +-- checkpoints/                   Saved model weights
+|   |   +-- jaisp_v8_fine/             Current v8 foundation
+|   |   +-- latent_position_v8_no_psf/ Current v8 latent astrometry head + anchors
+|   |   +-- psf_field_v3.pt            Current PSFField checkpoint
+|   |   +-- photometry_foundation_200_fast/ Current learned photometry-head run
+|   |   +-- photometry_foundation_200_emppsf/ Empirical-PSF photometry ablation
+|   |   +-- rendered_stamp_v2_bigstamp/ Experimental end-to-end rendered-stamp head
+|   |   +-- jaisp_v7_concat/           Prior production foundation baseline
+|   |   +-- astro_v7_psffit/           Historical V7 astrometry matcher
 |
 +-- io/                                Data I/O notebooks and scripts
 +-- wandb/                             Experiment tracking logs
@@ -992,28 +1015,28 @@ JAISP/
 ### 1. Foundation Model Training
 
 ```bash
-# V7 mixed-resolution MAE with 2-stream concat architecture (recommended)
+# V8 fine-scale MAE (current production foundation)
 # Multi-GPU with bfloat16 AMP (adjust --nproc_per_node to number of GPUs)
-cd models && torchrun --nproc_per_node=2 train_jaisp_foundation_v7.py \
+cd models && torchrun --nproc_per_node=2 train_jaisp_foundation_v8.py \
     --rubin_dir  ../data/rubin_tiles_all \
     --euclid_dir ../data/euclid_tiles_all \
-    --output_dir ./checkpoints/jaisp_v7_concat \
-    --hidden_ch 256 --transformer_depth 4 --transformer_heads 8 \
-    --fused_pixel_scale_arcsec 0.8 --cross_instrument_prob 1.0 \
+    --output_dir ./checkpoints/jaisp_v8_fine \
+    --fused_pixel_scale_arcsec 0.4 --crop_size_rubin 256 \
+    --hidden_ch 256 \
     --epochs 100 --lr 3e-4 --accum_steps 2 \
     --persistent_workers --num_workers 4 \
-    --wandb_name v7_rms_aware_loss
+    --wandb_name v8_fused04_crop256
 
 # Single-GPU fallback (plain python, no torchrun needed)
-cd models && python train_jaisp_foundation_v7.py \
+cd models && python train_jaisp_foundation_v8.py \
     --rubin_dir  ../data/rubin_tiles_all \
     --euclid_dir ../data/euclid_tiles_all \
-    --output_dir ./checkpoints/jaisp_v7_concat \
-    --hidden_ch 256 --transformer_depth 4 --transformer_heads 8 \
-    --fused_pixel_scale_arcsec 0.8 --cross_instrument_prob 1.0 \
+    --output_dir ./checkpoints/jaisp_v8_fine \
+    --fused_pixel_scale_arcsec 0.4 --crop_size_rubin 256 \
+    --hidden_ch 256 \
     --epochs 100 --lr 3e-4 --accum_steps 4 \
     --persistent_workers --num_workers 4 \
-    --wandb_name v7_concat_euclid_fused
+    --wandb_name v8_fused04_crop256
 ```
 
 ### 2. Detection Head
@@ -1030,20 +1053,20 @@ cd models && python train_jaisp_foundation_v7.py \
 python models/detection/precompute_features.py \
     --rubin_dir    data/rubin_tiles_200 \
     --euclid_dir   data/euclid_tiles_200 \
-    --encoder_ckpt models/checkpoints/jaisp_v7_concat/checkpoint_best.pt \
-    --out_dir      data/cached_features_v7_rms_aware \
-    --n_augments   8
+    --encoder_ckpt models/checkpoints/jaisp_v8_fine/checkpoint_best.pt \
+    --out_dir      data/cached_features_v8_fine \
+    --n_augments   4
 
 # Step 2: Self-training (runs round 1 + label refinement + round 2)
 python models/detection/self_train.py \
-    --feature_dir  data/cached_features_v7_rms_aware \
+    --feature_dir  data/cached_features_v8_fine \
     --rubin_dir    data/rubin_tiles_200 \
     --euclid_dir   data/euclid_tiles_200 \
-    --out_dir      checkpoints/centernet_v7_rms_aware \
+    --out_dir      checkpoints/centernet_v8_fine \
     --rounds 2 --epochs 100 --batch_size 4 \
     --wandb_project jaisp-detection
 
-# Option B: native-resolution StemCenterNet
+# Option B: native-resolution StemCenterNet (v7 baseline)
 python models/detection/self_train_stem.py \
     --encoder_ckpt models/checkpoints/jaisp_v7_concat/checkpoint_best.pt \
     --rubin_dir    data/rubin_tiles_200 \
@@ -1127,6 +1150,45 @@ python models/psf/train_psf_field.py \
     --wandb_project JAISP-PSF
 ```
 
+### 7. V8 Foundation Photometry Head
+
+```bash
+python models/photometry/train_foundation_photometry_head.py \
+    --rubin-dir data/rubin_tiles_all \
+    --euclid-dir data/euclid_tiles_all \
+    --foundation-checkpoint models/checkpoints/jaisp_v8_fine/checkpoint_best.pt \
+    --detector-checkpoint checkpoints/centernet_v8_fine/centernet_best.pt \
+    --astrometry-checkpoint models/checkpoints/latent_position_v8_no_psf/best.pt \
+    --psf-checkpoint models/checkpoints/psf_field_v3.pt \
+    --features-cache-dir data/cached_features_v8_fine \
+    --output-dir models/checkpoints/photometry_foundation_200_fast \
+    --epochs 30 --max-tiles 200 \
+    --max-sources 48 --max-sources-per-step 24 \
+    --sub-grid 2 \
+    --wandb-project jaisp-photometry \
+    --wandb-name photometry_foundation_200_fast \
+    --wandb-log-images
+```
+
+### 8. RenderedStampHead Experiment
+
+```bash
+python models/photometry/train_rendered_stamp_head.py \
+    --rubin-dir data/rubin_tiles_all \
+    --euclid-dir data/euclid_tiles_all \
+    --foundation-checkpoint models/checkpoints/jaisp_v8_fine/checkpoint_best.pt \
+    --detector-checkpoint checkpoints/centernet_v8_fine/centernet_best.pt \
+    --astrometry-checkpoint models/checkpoints/latent_position_v8_no_psf/best.pt \
+    --features-cache-dir data/cached_features_v8_fine \
+    --output-dir models/checkpoints/rendered_stamp_v2_bigstamp \
+    --epochs 10 --max-tiles 200 \
+    --stamp-size 71 \
+    --max-sources 48 --max-sources-per-step 24 \
+    --wandb-project jaisp-photometry \
+    --wandb-name rendered_stamp_v2_bigstamp \
+    --wandb-log-images
+```
+
 ---
 
 ## Checkpoints
@@ -1142,12 +1204,14 @@ python models/psf/train_psf_field.py \
 | **StemCenterNet detector** | `checkpoints/stem_centernet_v7_rms_aware_200/stem_centernet_best.pt` | Native-resolution stem detector on top of `jaisp_v7_concat`. No v8 retrain yet. |
 | **PSFField v3** | `models/checkpoints/psf_field_v3.pt` | Continuous SIREN-based PSF for all 10 bands. Trained on CenterNet v8 stellar selections; centroid drift median 14.6 mas, best loss 779. |
 | **Latent position head (current)** | `models/checkpoints/latent_position_v8_no_psf/best.pt` | Current per-object astrometry correction. Uses v8 foundation, Gaussian centroid targets, no PSFField labels. |
+| **Foundation photometry head** | `models/checkpoints/photometry_foundation_200_fast/checkpoint_best.pt` | Current main learned photometry-head run on frozen v8 features; Euclid-native VIS/Y/J/H first, with PSFField-rendered templates and residual chi-square training. |
+| **RenderedStampHead experiment** | `models/checkpoints/rendered_stamp_v2_bigstamp/checkpoint_best.pt` | End-to-end photometry experiment that predicts rendered per-band stamps directly from v8 features; useful for ablation against explicit PSF/template paths. |
 | **Astrometry V7 matcher** | `models/checkpoints/astro_v7_psffit/checkpoint_best.pt` | Historical V7 multiband matcher with PSF-fit centroids, trained on 200 tiles. Use for matcher experiments, not the current headline correction. |
 | **Latent position head (v7 baseline)** | `models/checkpoints/latent_position_head/best.pt` | Earlier v7 per-object alignment head. |
 
 ### Archived (historical reference only)
 
-These checkpoints are outdated -- trained on wrong NISP pixel scales (0.3"/px assumed instead of 0.1"/px) or on older, weaker foundation models. Do not use for new downstream work.
+These checkpoint names are historical references from earlier runs; most are not present in this checkout. They are outdated -- trained on wrong NISP pixel scales (0.3"/px assumed instead of 0.1"/px) or on older, weaker foundation models. Do not use for new downstream work.
 
 | Checkpoint | Location | Issue |
 |------------|----------|-------|
@@ -1194,7 +1258,8 @@ These checkpoints are outdated -- trained on wrong NISP pixel scales (0.3"/px as
 
 **Photometry**
 - `models/photometry/PSFFieldPhotometryPipeline` renders PSFField templates and runs the existing matched-filter flux estimator. It accepts either shared source positions or per-band astrometry-head-corrected positions. This remains the compact-source baseline.
-- `models/photometry/foundation_head.py` is the learned V8 photometry head: CenterNet detections are corrected by the latent astrometry head, frozen V8 features predict morphology refinements, PSFField supplies per-band PSFs, and the training objective is local scene residual chi-square.
+- `models/photometry/foundation_head.py` is the learned V8 photometry head; the current main checkpoint is `models/checkpoints/photometry_foundation_200_fast/checkpoint_best.pt`. CenterNet detections are corrected by the latent astrometry head, frozen V8 features predict morphology refinements, PSFField supplies per-band PSFs, and the training objective is local scene residual chi-square. `models/checkpoints/photometry_foundation_200_emppsf/` is a newer empirical-PSF ablation, not the default path.
+- `models/photometry/rendered_stamp_head.py` is the newest end-to-end photometry experiment: it predicts per-source rendered stamps directly from frozen V8 features, avoiding explicit PSF/template decomposition. Current checkpoint: `models/checkpoints/rendered_stamp_v2_bigstamp/checkpoint_best.pt`.
 - `models/photometry/scarlet_like.py` adds a scarlet-like residual scene optimizer for galaxies and blends: VIS-derived positive morphologies are convolved with PSFField per band, then non-negative fluxes are fitted by reducing pixel residuals over the whole local scene. This is now the optimizer baseline/refinement reference rather than the checkpointed neural head. PSFField is still not part of the current best astrometric target convention.
 
 **Open milestones**
