@@ -447,7 +447,7 @@ The detection stack supports three complementary source-finding choices. The fus
 
 1. **Classical VIS baseline**: native-resolution Euclid VIS peak-finding with bright-star masking. This is fast, robust, and remains the bootstrap source list for pseudo-label generation.
 2. **Foundation + CenterNet (current: v8)**: a dense detector on top of the frozen foundation **fused bottleneck**. This is the strongest current option for broad 10-band semantic fusion, especially when the signal is spread across multiple bands rather than carried by one sharp VIS peak. The v8 round-2 checkpoint is used to produce the 790-tile detection label set (`data/detection_labels/centernet_v8_r2_790.pt`, ~188 detections/tile) that PSFField v3 and the foundation photometry head consume.
-3. **Foundation + StemCenterNet**: a dense detector on top of the frozen foundation **BandStems** at native resolution. This preserves more local spatial detail than the bottleneck path. The current checkpoint is on v7 stems (`checkpoints/stem_centernet_v7_rms_aware_200/`); a v8 retrain is tracked as a follow-up but has not been a bottleneck for downstream work.
+3. **Foundation + StemCenterNet**: a dense detector on top of the frozen foundation **BandStems** at native resolution. This preserves more local spatial detail than the bottleneck path. The reference checkpoint is `checkpoints/stem_centernet_v7_rms_aware_200/` (on v7 stems); a v8 retrain (`checkpoints/stem_centernet_v8_fine/`) is now also possible via the same `self_train_stem.py` script after `load_foundation()` was made V7/V8-agnostic. The v7 stem checkpoint is the live comparison baseline in `io/05_detection_comparison.ipynb`.
 
 The point of keeping all three is scientific comparison, not redundancy. Classical VIS is the baseline and pseudo-label source. The fused-bottleneck detector tests whether the self-supervised latent has learned genuinely multi-band source evidence. The stem detector tests whether native-resolution foundation features improve local source finding beyond what the coarser bottleneck can express.
 
@@ -584,7 +584,7 @@ The astrometry module now has two distinct roles:
 
 #### Key diagnostic finding (2026-04-17)
 
-Analysis of notebook 09 and the before/after astrometry comparison shows that the large raw offsets are dominated by **object-level centering / centroid-definition scatter**, not by a smooth WCS field.
+Analysis in notebook 06 (`io/06_astrometry_diagnostics.ipynb`) and the before/after summary in notebook 07 (`io/07_astrometry_before_after.ipynb`) show that the large raw offsets are dominated by **object-level centering / centroid-definition scatter**, not by a smooth WCS field.
 
 Latest diagnostic numbers:
 
@@ -648,6 +648,17 @@ The supporting chromatic diagnostic is kept in `docs/figures/astrometry_chromati
 **Latent position head (current correction)**: detect/centroid each source in a native band, project it into the VIS frame, and let the head predict a residual offset toward the VIS reference centroid. This is the path used for the latest before/after notebook and the `latent_position_v8_no_psf` checkpoint.
 
 **Smooth field solvers (QA/fallback)**: `fit_direct_pinn.py` fits raw or head-residual anchors with PINN/NN smoothness priors. On raw anchors, the field amplitude is only ~5-9 mas and barely changes the tens-of-mas per-source residuals. On head residual anchors, the residual field amplitude is ~1 mas, confirming that the head has already removed the coherent component.
+
+#### Sparse-field implication: the head as an anchor amplifier
+
+A classical bright-only PINN concordance fit needs many high-SNR sources per tile. ECDFS supplies them, so the bright/raw fit recovers the ~5 mas smooth field directly. In sparser fields (shallow footprints, high galactic latitude, few unsaturated stars) the bright-anchor count per tile collapses. Notebook 07's Part 4 (SNR-stratified PINN refits) and Part 5 (sparse-field recovery) make this quantitative on ECDFS by stratifying the 9-band anchor pool into per-band SNR terciles and refitting the PINN on each slice:
+
+- **bright / raw** PINN field RMS reproduces the ECDFS ~5 mas reference: classical concordance works when bright stars are plentiful.
+- **faint / raw** PINN is noise-dominated and overshoots the bright-only reference, exactly the failure mode of a bright-only workflow on a sparse field.
+- **all head_resid slices** sit near ~1 mas, confirming the head's per-object correction is genuinely SNR-independent (the head works on faint sources too).
+- **Head-implied field** (the smoothed `raw - head_resid` PINN fit on all anchors) tracks the bright-only raw fit within a few mas, so the head's per-source predictions act as a dense sampling of the smooth concordance field.
+
+The takeaway: in a sparse field where bright anchors are too few to constrain the smooth WCS field directly, the head can stand in -- it converts plentiful faint sources into effective anchors, and its averaged predictions are a usable proxy for the classical concordance measurement. This generalises the head's role from "per-object correction for forced photometry" to "concordance-grade WCS measurement in fields without enough bright stars."
 
 #### Pipeline
 
@@ -821,7 +832,7 @@ The PSF is a fundamental survey property consumed by three downstream tasks (ast
 
 #### Why PSFs matter for this project
 
-Astrometry2 initially plateaued at 40-50 mas MAE, and notebook 09 traces that raw-anchor residual to **centering / centroid-definition scatter** rather than a missing smooth concordance field. PSF modelling is still important, but the v8 astrometry migration showed that PSFField-refined centroids are not automatically better latent-head labels: used directly as targets they create a ~29-30 mas plateau. The current role of PSFField is PSF diagnostics and future forced photometry, with astrometric label use deferred until the centroid convention is made explicit in a joint PSF+head training loop.
+Astrometry2 initially plateaued at 40-50 mas MAE, and notebook 06 traces that raw-anchor residual to **centering / centroid-definition scatter** rather than a missing smooth concordance field. PSF modelling is still important, but the v8 astrometry migration showed that PSFField-refined centroids are not automatically better latent-head labels: used directly as targets they create a ~29-30 mas plateau. The current role of PSFField is PSF diagnostics and future forced photometry, with astrometric label use deferred until the centroid convention is made explicit in a joint PSF+head training loop.
 
 #### PSFField architecture
 
@@ -888,7 +899,7 @@ V3 tightens the centroid drift and NISP residuals but leaves VIS and some Rubin 
 
 #### Notebook
 
-`io/10_psf_visualization.ipynb` renders the per-band median PSF and its spatial variation across the tile (3×3 grid of tile positions).
+`io/08_psf_visualization.ipynb` renders the per-band median PSF and its spatial variation across the tile (3×3 grid of tile positions).
 
 #### Photometry heads
 
@@ -904,7 +915,7 @@ and NISP images share the same 0.1"/px grid. Rubin support should either
 resample the VIS morphology to Rubin's 0.2"/px native grid or reproject Rubin to
 the VIS grid before sharing templates.
 
-`io/11_psf_field_photometry_validation.ipynb` validates the compact-source PSF baseline using a CenterNet VIS master catalog. `io/12_scarlet_like_photometry.ipynb` visualizes the per-scene optimizer. `io/13_foundation_photometry_head.ipynb` loads a trained V8 photometry-head checkpoint and compares learned-head residuals against PSF-only residuals on the same CenterNet + astrometry-corrected catalog.
+`io/09_psf_field_photometry_validation.ipynb` validates the compact-source PSF baseline using a CenterNet VIS master catalog. `io/10_scarlet_like_photometry.ipynb` visualizes the per-scene optimizer. `io/11_foundation_photometry_head.ipynb` loads a trained V8 photometry-head checkpoint and compares learned-head residuals against PSF-only residuals on the same CenterNet + astrometry-corrected catalog.
 
 ---
 
@@ -1008,6 +1019,25 @@ JAISP/
 +-- wandb/                             Experiment tracking logs
 ```
 
+### Notebooks (`io/`)
+
+The notebooks are numbered to reflect a rough pipeline order: data ingestion -> matching -> coverage -> detection -> astrometry -> PSF -> photometry.
+
+| # | Notebook | Purpose |
+|---|----------|---------|
+| 00 | `00_joint_visual_check.ipynb` | First-principles Euclid+Rubin visual check on one ECDFS region. Motivates the offset scale that the rest of the pipeline removes. |
+| 01 | `01_getdata_patch.ipynb` | Per-patch Rubin coadd ingestion with overlapping 512x512 tiles plus matched Euclid VIS+NISP cutouts. Canonical NPZ schema producer. |
+| 02 | `02_getdata_tract.ipynb` | Tract-wide variant of 01: loops over every patch in a tract. Used for bulk tile production. |
+| 03 | `03_euclid_matching_MER.ipynb` | Euclid MER mosaic alignment to Rubin tiles via `EuclidAligner`; writes per-tile Euclid NPZs. |
+| 04 | `04_coverage_map.ipynb` | Coverage stats and tract/patch breakdown for the flat tile set. |
+| 05 | `05_detection_comparison.ipynb` | Three detection views overlaid on one VIS tile: classical, V8 + CenterNet (current), V7 + StemCenterNet (legacy comparison). |
+| 06 | `06_astrometry_diagnostics.ipynb` | Centering / centroid-noise / SNR / morphology diagnostic study on ~20 sample tiles. Source of the ~50 mas centering finding. |
+| 07 | `07_astrometry_before_after.ipynb` | Headline before/after across 790 tiles, 9 non-VIS bands. Bar chart, histograms, 9x4 spatial field grid, SNR-stratified PINN refits, sparse-field recovery analysis. |
+| 08 | `08_psf_visualization.ipynb` | PSFField v3 viz: per-band median PSFs, radial profiles, spatial variation, chromatic blue/red SED comparison. |
+| 09 | `09_psf_field_photometry_validation.ipynb` | PSFField forced photometry validation against CenterNet VIS master catalog. |
+| 10 | `10_scarlet_like_photometry.ipynb` | Per-scene scarlet-like residual photometry optimizer for galaxies and blends. |
+| 11 | `11_foundation_photometry_head.ipynb` | V8 foundation photometry head visualization on Euclid-native scenes; compares learned vs PSF-only residuals. |
+
 ---
 
 ## Quick Start
@@ -1066,12 +1096,24 @@ python models/detection/self_train.py \
     --rounds 2 --epochs 100 --batch_size 4 \
     --wandb_project jaisp-detection
 
-# Option B: native-resolution StemCenterNet (v7 baseline)
+# Option B: native-resolution StemCenterNet (v7 baseline; current `stem_centernet_v7_rms_aware_200`)
 python models/detection/self_train_stem.py \
     --encoder_ckpt models/checkpoints/jaisp_v7_concat/checkpoint_best.pt \
     --rubin_dir    data/rubin_tiles_200 \
     --euclid_dir   data/euclid_tiles_200 \
     --out_dir      checkpoints/stem_centernet_v7_rms_aware_200 \
+    --rounds 2 --epochs 60 --batch_size 1 \
+    --stream_ch 16 --base_ch 32 \
+    --promotion_spike_radius 20 \
+    --wandb_project jaisp-detection
+
+# Option B (v8 retrain): same call, swap encoder + output dir. `self_train_stem.py`
+# loads the foundation through `load_foundation()`, which auto-dispatches V7/V8.
+python models/detection/self_train_stem.py \
+    --encoder_ckpt models/checkpoints/jaisp_v8_fine/checkpoint_best.pt \
+    --rubin_dir    data/rubin_tiles_200 \
+    --euclid_dir   data/euclid_tiles_200 \
+    --out_dir      checkpoints/stem_centernet_v8_fine \
     --rounds 2 --epochs 60 --batch_size 1 \
     --stream_ch 16 --base_ch 32 \
     --promotion_spike_radius 20 \
@@ -1084,7 +1126,7 @@ The current astrometry correction is the latent position head: it predicts a per
 
 Key features:
 - **Latent head correction**: current v8 no-PSF checkpoint reduces raw 41-62 mas optical/NISP medians to ~9-15 mas, with Rubin u at ~30 mas.
-- **Centering diagnosis**: notebook 09 shows the large raw offsets are source-level centering scatter; the smooth field is only ~5 mas.
+- **Centering diagnosis**: notebook 06 shows the large raw offsets are source-level centering scatter; the smooth field is only ~5 mas.
 - **Residual field QA**: PINN/NN fields fitted to head residuals have ~1 mas amplitude and do not materially change the median residuals.
 - **Historical matcher path**: `train_astro_v7.py` remains available for per-patch matcher experiments and concordance exports.
 
@@ -1238,20 +1280,20 @@ These checkpoint names are historical references from earlier runs; most are not
 - **CenterNet v8**: `checkpoints/centernet_v8_fine/centernet_round2.pt` — on v8 features, 200 tiles. Best checkpoint used for inference on all 790 tiles → `data/detection_labels/centernet_v8_r2_790.pt` (~188 detections/tile at conf=0.3).
 - Classical VIS detection remains a fast baseline.
 
-**PSF modelling (new — 2026-04-13)**
+**PSF modelling**
 - **PSFField v3**: `models/checkpoints/psf_field_v3.pt` — continuous SIREN-based PSF for all 10 bands.
   - Architecture: SIREN 192×6, w0=15, per-band radial envelope (Rubin 1.7"/Euclid 0.85"), SED-conditioned chromatic PSF, DCR term for Rubin bands.
   - Training: 3312 stars across 429 tiles (of 790), joint PSF + sub-pixel centroid optimisation, robust chi² (Huber + variance floor), percentile outlier rejection, SED refresh.
   - Results: best loss=779, centroid drift median=14.6 mas, Euclid NIR chi²/ndof 0.28–0.61 (excellent), chromatic FWHM difference 6% in VIS (blue vs red, physically correct).
   - Known issue: u-band is noise-limited (chi²=0.54 which is within noise; radial profile shows cosmetic artefact at edge, not practical concern).
   - Diagnostics: `models/psf/validate_psf_field.py`, W&B panels (gallery, radial profiles, example stamps, centroid drift).
-  - Notebook: `io/10_psf_visualization.ipynb`.
+  - Notebook: `io/08_psf_visualization.ipynb`.
 
 **Astrometry — current v8 result (2026-04-17)**
 - Latent position head migrated to v8 foundation via `load_foundation()` auto-detection. Dual-GPU prefetch wired (`--dual-gpu`: encoder on GPU 0, head on GPU 1).
 - Current checkpoint: `models/checkpoints/latent_position_v8_no_psf/best.pt`.
 - Cross-instrument evaluation on 790 ECDFS tiles: raw medians of 41-62 mas for Rubin g/r/i/z/y and NISP Y/J/H are reduced to **9-15 mas** after the head; Rubin u is reduced from **119 mas** to **30.5 mas**. Improvement is **~74-79%** in the median radial residual.
-- Notebook 09 diagnosis: the large raw residual is **centering / centroid-definition scatter**. Smooth per-tile bulk field is **5.4 mas**, post-bulk source residual is **47.5 mas**, and the measured offset changes by **54.0 mas** when recentered from detection to PSF-fit centroids.
+- Notebook 06 diagnosis: the large raw residual is **centering / centroid-definition scatter**. Smooth per-tile bulk field is **5.4 mas**, post-bulk source residual is **47.5 mas**, and the measured offset changes by **54.0 mas** when recentered from detection to PSF-fit centroids.
 - Residual PINN/concordance after the head is a QA/fallback product. Its field amplitude is ~1 mas and changes the head residual medians by only ~0.0-0.2 mas.
 - **Key lesson**: PSFField-refined centroids introduce a ~16 mas target mismatch when used as training labels; v7/v8 PSFField-label runs plateau at **29-30 mas**. Use Gaussian-fit photon centroids for the current head target convention.
 - Field solvers (PINN / NN / control-grid) are foundation-agnostic. `eval_latent_position.py` exports per-source anchors via `--save-anchors` directly consumable by `fit_direct_pinn.py --cache`; use `--use-head-resid` to fit the post-head residual field.
