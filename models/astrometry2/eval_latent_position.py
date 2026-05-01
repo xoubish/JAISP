@@ -188,6 +188,21 @@ def evaluate(args):
         psf_field.load_state_dict(pckpt['psf_field_state'])
         print(f'Loaded PSFField from {args.psf_checkpoint}')
 
+    # Optional neural detector for VIS seed positions (replaces classical peak-finder).
+    # Re-uses the same foundation as the head, so memory cost is one extra wrapper + small CenterNet head.
+    neural_detector = None
+    if args.detector_checkpoint:
+        from detection.centernet_detector import CenterNetDetector
+        from detection.detector import JAISPEncoderWrapper
+        from load_foundation import load_foundation
+        det_foundation = load_foundation(args.foundation_checkpoint, device=device, freeze=True)
+        det_encoder = JAISPEncoderWrapper(det_foundation, freeze=True).to(device)
+        neural_detector = CenterNetDetector.load(
+            args.detector_checkpoint, encoder=det_encoder, device=device,
+        ).eval()
+        print(f'Loaded CenterNet detector from {args.detector_checkpoint} '
+              f'(conf >= {args.detector_conf_threshold}); replacing classical VIS detection.')
+
     pairs = discover_tile_pairs(args.rubin_dir, args.euclid_dir)
     print(f'Evaluating on {len(pairs)} tiles')
 
@@ -222,10 +237,21 @@ def evaluate(args):
         except Exception:
             continue
 
-        # Detect in VIS and PSF-refine → these are the "true" positions
-        vx, vy = detect_sources_classical(
-            vis_img, nsig=4.0, smooth_sigma=1.2, min_dist=9, max_sources=400,
-        )
+        # Detect in VIS (classical or neural) and PSF-refine → these are the "true" positions
+        if neural_detector is not None:
+            from astrometry2.dataset import build_full_context_detector_inputs, detect_sources_neural
+            rubin_var = rdata['var'] if 'var' in rdata.files else None
+            tile_images, tile_rms, tile_hw = build_full_context_detector_inputs(
+                edata, rubin_cube, rubin_var=rubin_var,
+            )
+            vx, vy = detect_sources_neural(
+                tile_images, tile_rms, neural_detector, device,
+                conf_threshold=args.detector_conf_threshold, tile_hw=tile_hw,
+            )
+        else:
+            vx, vy = detect_sources_classical(
+                vis_img, nsig=4.0, smooth_sigma=1.2, min_dist=9, max_sources=400,
+            )
         if vx.size < 10:
             continue
         vis_seed = np.stack([vx, vy], axis=1).astype(np.float32)
@@ -586,6 +612,14 @@ def main():
     p.add_argument('--min-snr', type=float, default=5.0,
                    help='Minimum band-centroid peak SNR to include a source. '
                         'Low-SNR sources have unreliable centroids. Default 5.')
+    p.add_argument('--detector-checkpoint', type=str, default=None,
+                   help='Optional: replace the classical VIS peak finder with a trained '
+                        'CenterNet detector for the seed positions. The same v8 foundation '
+                        'is shared with the head. Recommended: '
+                        'checkpoints/centernet_v8_fine/centernet_best.pt')
+    p.add_argument('--detector-conf-threshold', type=float, default=0.30,
+                   help='Confidence threshold for the neural detector. '
+                        'Only used with --detector-checkpoint. Default 0.30.')
     p.add_argument('--device', type=str, default='')
     args = p.parse_args()
     evaluate(args)

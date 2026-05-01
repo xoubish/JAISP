@@ -651,14 +651,31 @@ The supporting chromatic diagnostic is kept in `docs/figures/astrometry_chromati
 
 #### Sparse-field implication: the head as an anchor amplifier
 
-A classical bright-only PINN concordance fit needs many high-SNR sources per tile. ECDFS supplies them, so the bright/raw fit recovers the ~5 mas smooth field directly. In sparser fields (shallow footprints, high galactic latitude, few unsaturated stars) the bright-anchor count per tile collapses. Notebook 07's Part 4 (SNR-stratified PINN refits) and Part 5 (sparse-field recovery) make this quantitative on ECDFS by stratifying the 9-band anchor pool into per-band SNR terciles and refitting the PINN on each slice:
+A classical bright-only PINN concordance fit needs many high-SNR sources per resolution element of the smooth field. ECDFS supplies them, so the bright/raw fit recovers the ~5 mas smooth field directly. In sparser fields (shallow footprints, high galactic latitude, few unsaturated stars) the bright-anchor density collapses. Notebook 07 ([io/07_astrometry_before_after.ipynb](io/07_astrometry_before_after.ipynb)) makes this quantitative on ECDFS in five stages:
+
+- **Part 3b — Anchor leverage and per-source precision.** Anchors are binned on a 1 arcmin × 1 arcmin grid (the same 60" scale used by the existing concordance field maps; the natural correlation-length scale for a smooth WCS distortion). Per band we report the median anchor density per cell at the classical (SNR≥30) and head-enabled (all SNR) thresholds, the cell-coverage curve, and the per-source MADxy improvement (head vs raw). The arcmin² density is the right metric for the field fit because the smooth-field uncertainty scales as `σ_field ∝ σ_anchor / √(anchors per resolution element)`, not per tile.
+- **Part 4 — SNR-stratified PINN refits.** Stratifies the 9-band anchor pool into per-band SNR terciles and refits the PINN jointly across bands on each slice, on raw and head-residual anchors. Establishes the headline RMS per slice/kind.
+- **Part 4b — Bootstrap and shuffled-null tests.** Bootstrap resamples each slice three times to put a 1σ_boot bar on the field RMS; permutes anchor positions while keeping offsets to measure the noise floor — the field RMS the PINN extracts when there is no spatial coherence by construction. Real RMS / null RMS is the cleanest single-number significance.
+- **Part 4c — Gaussian Process cross-check.** Independent measurement of the smooth field on the bright/raw slice with a sklearn GP (RBF + white kernel, calibrated posterior). Three checks: GP RMS vs PINN RMS (method-independence), GP − PINN difference map (regulariser-vs-kernel cross-check), and a hold-out z-score histogram (calibration). The GP also reports its data-preferred length scale, a self-consistency check on the arcmin² resolution element.
+- **Part 5 — Sparse-field recovery.** Side-by-side maps of bright-only, faint-only, all-anchors, and head-implied fields, plus the field-amplitude vs anchor-count summary.
+
+Headline takeaways on ECDFS:
 
 - **bright / raw** PINN field RMS reproduces the ECDFS ~5 mas reference: classical concordance works when bright stars are plentiful.
-- **faint / raw** PINN is noise-dominated and overshoots the bright-only reference, exactly the failure mode of a bright-only workflow on a sparse field.
-- **all head_resid slices** sit near ~1 mas, confirming the head's per-object correction is genuinely SNR-independent (the head works on faint sources too).
+- **faint / raw** PINN is noise-dominated and overshoots the bright-only reference, exactly the failure mode of a bright-only workflow on a sparse field; the bootstrap σ is large and signal/null ratio is small.
+- **all head_resid slices** sit near ~1 mas, hugging their shuffled-null floor — the head has already removed the coherent component, so there is genuinely nothing left for the PINN to fit.
 - **Head-implied field** (the smoothed `raw - head_resid` PINN fit on all anchors) tracks the bright-only raw fit within a few mas, so the head's per-source predictions act as a dense sampling of the smooth concordance field.
+- **GP cross-check** (Part 4c) returns a field RMS within a couple of mas of the PINN on the same anchors, with std(z) ≈ 1 on the held-out calibration set — independent confirmation that the smooth field amplitude is method-independent and the PINN regulariser is not introducing artefacts.
 
-The takeaway: in a sparse field where bright anchors are too few to constrain the smooth WCS field directly, the head can stand in -- it converts plentiful faint sources into effective anchors, and its averaged predictions are a usable proxy for the classical concordance measurement. This generalises the head's role from "per-object correction for forced photometry" to "concordance-grade WCS measurement in fields without enough bright stars."
+The takeaway: in a sparse field where bright anchors are too few to constrain the smooth WCS field directly, the head can stand in — it converts plentiful faint sources into effective anchors, and its averaged predictions are a usable proxy for the classical concordance measurement. This generalises the head's role from "per-object correction for forced photometry" to "concordance-grade WCS measurement in fields without enough bright stars."
+
+![Anchor leverage gain](docs/figures/anchor_leverage_gain.png)
+*Anchor leverage per arcmin² (Part 3b). Left: per-band median anchor density at the classical SNR≥30 threshold versus the head-enabled all-SNR pool. The annotated multiplier is the per-band density gain at the natural 1 arcmin² resolution element of the smooth concordance field. Right: cell-coverage curve for the i band — the fraction of occupied 1 arcmin² cells with at least N anchors. The classical curve falls off rapidly; the head-enabled curve maintains tens of anchors per cell across 95% of the field. This is the statistical leverage that makes a head-enabled concordance fit work in regions where bright stars are too sparse.*
+
+![Field amplitude with bootstrap error bars vs shuffled-null floor](docs/figures/snr_field_amp_with_null.png)
+*Trust diagnostics (Part 4b). Bootstrap field RMS with 1σ_boot error bars (filled markers) vs shuffled-null floor (×) per SNR slice. Squares = head-residual fits, circles = raw-anchor fits. A real smooth-field measurement sits well above its corresponding null cross with a small fractional bootstrap σ. The head_resid slices are expected to land near zero and near their null floor — the head has already absorbed the coherent component, so the PINN has nothing left to fit.*
+
+The remaining supporting figures from notebook 07 are saved by the notebook to `io/` and synced into `docs/figures/`: `per_source_precision.png` (Part 3b precision floor + SNR scaling) and `gp_vs_pinn_field.png` (Part 4c GP vs PINN map and calibration). The headline before/after bar chart and 9×4 spatial grid (`astrometry_before_after.png`, `concordance_3way.png`) are referenced earlier in this section.
 
 #### Pipeline
 
