@@ -1,0 +1,44 @@
+{
+  "n_tiles": 6,
+  "diag1_mean_cross_over_within": 2009.0713105300122,
+  "diag1_per_target_within_frac": {
+    "rubin_u": 0.0002675015524436055,
+    "rubin_g": 0.0002993645028036093,
+    "rubin_r": 0.0005443289974556349,
+    "rubin_i": 0.0003911649890536804,
+    "rubin_z": 0.00027958171859102527,
+    "rubin_y": 0.00019811419654781762,
+    "euclid_VIS": 0.9507987105223468,
+    "euclid_Y": 0.9999970503486628,
+    "euclid_J": 0.9999974713162068,
+    "euclid_H": 0.9999977450512905
+  },
+  "diag1_per_target_cross_frac": {
+    "rubin_u": 0.9997324984475564,
+    "rubin_g": 0.9997006354971962,
+    "rubin_r": 0.9994556710025444,
+    "rubin_i": 0.9996088350109461,
+    "rubin_z": 0.9997204182814087,
+    "rubin_y": 0.9998018858034522,
+    "euclid_VIS": 0.04920128947765316,
+    "euclid_Y": 2.9496513372884955e-06,
+    "euclid_J": 2.5286837932986414e-06,
+    "euclid_H": 2.2549487095315206e-06
+  },
+  "diag2_r2_per_band": {
+    "rubin_u": 0.13442569971084595,
+    "rubin_g": 0.38313106695810956,
+    "rubin_r": 0.4053324858347575,
+    "rubin_i": 0.40015578269958496,
+    "rubin_z": 0.3329571982224782,
+    "rubin_y": 0.22273053725560507,
+    "euclid_VIS": 0.1618457535902659,
+    "euclid_Y": 0.11629227797190349,
+    "euclid_J": 0.13107536236445108,
+    "euclid_H": 0.14983245730400085
+  },
+  "diag2_rubin_mean_r2": 0.31312212844689685,
+  "diag2_euclid_mean_r2": 0.13976146280765533,
+  "diag2_euclid_over_rubin": 0.4463480862910582,
+  "verdict": "Encoder uses Euclid for reconstruction but bottleneck does not preserve Euclid info linearly. Investigate further."
+}

@@ -8,27 +8,6 @@ This document is intentionally both a user guide and a project history. It recor
 
 ---
 
-## Table of Contents
-
-1. [How to Read This Document](#how-to-read-this-document)
-2. [Current Stack Snapshot](#current-stack-snapshot)
-3. [Motivation](#motivation)
-4. [Data](#data)
-5. [Foundation Model](#foundation-model)
-   - [Architecture History (v1 through v8)](#architecture-history-v1-through-v8)
-   - [v7 Mixed-Resolution MAE (Prior Production)](#v7-mixed-resolution-mae-prior-production)
-   - [v8 Fine-Scale MAE (Current)](#v8-fine-scale-mae-current)
-6. [Downstream Heads](#downstream-heads)
-   - [Detection](#1-detection)
-   - [Astrometry and Concordance](#2-astrometry-and-concordance)
-   - [Latent Position Head](#latent-position-head-per-object-multi-band-alignment)
-   - [PSF Modelling and Photometry](#3-psf-modelling-and-photometry)
-7. [Project Structure](#project-structure)
-8. [Quick Start](#quick-start)
-9. [Checkpoints](#checkpoints)
-
----
-
 ## How to Read This Document
 
 The documentation is organized to serve two audiences at once. A new human reader can begin with the motivation, data, and current stack to understand the scientific problem and the active code path. A returning developer or AI agent can use the architecture history, downstream-head sections, checkpoint tables, and command blocks to recover the state of the project without reconstructing it from notebooks.
