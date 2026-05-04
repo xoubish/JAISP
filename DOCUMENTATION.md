@@ -1,30 +1,41 @@
 # JAISP (Joint AI Survey Processing)
 
-## Full Documentation
+## Full Documentation and Experimental Report
 
-A self-supervised multi-instrument foundation model for precision cosmology with Rubin Observatory and Euclid. The project was developed first on a 144-tile ECDFS subset and is now being retrained on a larger flat Rubin+Euclid tile extraction (`data/rubin_tiles_all/`, `data/euclid_tiles_all/`) containing 790 matched pairs.
+JAISP is a self-supervised, multi-instrument representation-learning project for joint Rubin Observatory and Euclid image analysis. Its immediate goal is to learn a spatially precise shared representation from Rubin optical imaging and Euclid VIS/NISP imaging, then reuse that representation for source detection, astrometric alignment, PSF modelling, and photometry. The longer-term motivation is survey-scale precision cosmology: reducing the model-dependent error budget introduced when detection, astrometry, PSF estimation, and photometry are solved as separate classical stages.
+
+This document is intentionally both a user guide and a project history. It records the current runnable stack, the scientific motivation, the data products, the architecture evolution, negative results, active checkpoints, and open milestones. The history is kept because future developers, collaborators, and AI agents need to understand not only what the current code does, but why earlier approaches were abandoned and which claims are already supported by tests.
 
 ---
 
 ## Table of Contents
 
-1. [Current Stack Snapshot](#current-stack-snapshot)
-2. [Motivation](#motivation)
-3. [Data](#data)
-4. [Foundation Model](#foundation-model)
+1. [How to Read This Document](#how-to-read-this-document)
+2. [Current Stack Snapshot](#current-stack-snapshot)
+3. [Motivation](#motivation)
+4. [Data](#data)
+5. [Foundation Model](#foundation-model)
    - [Architecture History (v1 through v8)](#architecture-history-v1-through-v8)
    - [v7 Mixed-Resolution MAE (Prior Production)](#v7-mixed-resolution-mae-prior-production)
    - [v8 Fine-Scale MAE (Current)](#v8-fine-scale-mae-current)
-5. [Downstream Heads](#downstream-heads)
+6. [Downstream Heads](#downstream-heads)
    - [Detection](#1-detection)
    - [Astrometry and Concordance](#2-astrometry-and-concordance)
    - [Latent Position Head](#latent-position-head-per-object-multi-band-alignment)
    - [PSF Modelling and Photometry](#3-psf-modelling-and-photometry)
-6. [Project Structure](#project-structure)
-7. [Quick Start](#quick-start)
-8. [Checkpoints](#checkpoints)
+7. [Project Structure](#project-structure)
+8. [Quick Start](#quick-start)
+9. [Checkpoints](#checkpoints)
 
 ---
+
+## How to Read This Document
+
+The documentation is organized to serve two audiences at once. A new human reader can begin with the motivation, data, and current stack to understand the scientific problem and the active code path. A returning developer or AI agent can use the architecture history, downstream-head sections, checkpoint tables, and command blocks to recover the state of the project without reconstructing it from notebooks.
+
+A recurring pattern in this file is: **scientific question -> method -> result -> interpretation -> current limitation**. This is deliberate. JAISP is not a single finished model; it is an active research system whose current design emerged from several failed or superseded alternatives. Negative results are therefore part of the scientific content. For example, the move from contrastive/JEPA-style latent alignment to masked pixel reconstruction is not an implementation detail; it is one of the central experimental lessons of the project.
+
+When using this file operationally, prefer the checkpoints and commands marked as current. When using it scientifically, pay attention to the distinction between production components, baselines, QA/model-selection tools, and historical experiments. Several modules remain intentionally hybrid: classical centroiding, peak-finding, and PSF-based measurements are still used as labels, controls, or diagnostics while the learned representation matures.
 
 ## Current Stack Snapshot
 
@@ -34,11 +45,13 @@ A self-supervised multi-instrument foundation model for precision cosmology with
 | Detection | `checkpoints/centernet_v8_fine/centernet_round2.pt` | Fused-bottleneck CenterNet on v8 features; all-790-tile labels cached at `data/detection_labels/centernet_v8_r2_790.pt`. |
 | Astrometry | `models/checkpoints/latent_position_v8_no_psf/best.pt` | Current no-PSF latent position head. Gaussian-fit photon centroids are the present target convention. |
 | Smooth field QA | `models/astrometry2/fit_direct_pinn.py` | Fits raw or head-residual anchors from `anchors.npz` or `anchors_centernet.npz`; CenterNet post-head PINN fields are about 1 mas and do not improve anchor residuals. |
-| Concordance uncertainty / model check | `models/astrometry2/fit_hierarchical_gp_concordance.py` | Experimental hierarchical GP-style field with posterior std maps. Current CenterNet post-head HGP does not agree with PINN or beat the zero-field baseline, so it is QA/model-selection only, not a production correction. Default priors overfit per-tile noise on raw; for a fair PINN cross-check use `--length-scales 300,900 --prior-common-mas 4 --prior-group-mas 2 --prior-band-mas 1` (super-tight) — at this setting HGP and PINN converge on raw within ~2 mas RMS and 0.03 mas anchor-level improvement. |
+| Concordance uncertainty / model check | `models/astrometry2/fit_hierarchical_gp_concordance.py` | Experimental hierarchical GP-style field with posterior std maps. Current CenterNet post-head HGP does not agree with PINN or beat the zero-field baseline, so it is QA/model-selection only, not a production correction. Default priors overfit per-tile noise on raw; for a fair PINN cross-check use `--length-scales 300,900 --prior-common-mas 4 --prior-group-mas 2 --prior-band-mas 1` (super-tight) -- at this setting HGP and PINN converge on raw within ~2 mas RMS and 0.03 mas anchor-level improvement. |
 | PSF | `models/checkpoints/psf_field_v3.pt` | Continuous SIREN PSFField for all 10 bands, used for PSF diagnostics and photometry. |
 | Photometry | `models/checkpoints/photometry_foundation_200_fast/checkpoint_best.pt`; experiment: `models/checkpoints/rendered_stamp_v2_bigstamp/checkpoint_best.pt` | Current main learned v8 photometry head, plus PSFField matched-filter, scarlet-like residual-scene, and rendered-stamp experimental paths. |
 
 Figure policy for this file: keep only figures that change the reader's understanding. Repetitive good/worst galleries, per-epoch W&B panels, and minor variants should stay in notebooks or checkpoint folders unless they support a new conclusion.
+
+The table above should be read as a maturity map rather than a simple list of files. The foundation checkpoint is the current representation backbone. Detection and photometry are active downstream products. The latent astrometry head is the current per-object correction layer. The smooth-field solvers, especially HGP, are presently diagnostic and model-selection tools, not production corrections. This distinction matters because a correction that improves an intermediate residual map is not automatically a correction that improves held-out source positions.
 
 ---
 
@@ -50,7 +63,7 @@ The challenge is that these instruments have different pixel scales, point-sprea
 
 The classical state of the art for Euclid astrometry is demonstrated by Libralato et al. (2024, arXiv:2411.02487), who achieve 0.7 mas precision on VIS through iterative effective PSF modelling and geometric distortion calibration -- but this requires individual unresampled exposures, bright point sources (globular cluster stars at SNR > 100), Gaia DR3 as an external reference, and processes each filter independently with empirical colour corrections applied post-hoc. These conditions are rarely met in extragalactic survey fields.
 
-**The core thesis of JAISP is that data-driven methods can surpass these model-dependent approaches.** A neural network that sees thousands of galaxies across 10 bands learns what PSFs actually look like, how centroids shift with wavelength due to differential chromatic refraction, how noise correlates with field position -- all implicitly, from the pixels themselves, without anyone specifying parametric forms. The model doesn't assume a Gaussian PSF; it learns the actual instrument response. It doesn't assume quadrature uncertainty propagation; it learns the true error distribution. As the dataset grows, the learned representations should converge on reality rather than on the assumptions of any particular analytical model.
+**The working thesis of JAISP is that a data-driven representation can reduce the accumulation of model-dependent errors across the joint-survey pipeline.** A neural network that sees thousands of galaxies across 10 bands can learn empirical regularities that are difficult to capture with independent parametric stages: the effective PSF, wavelength-dependent centroid shifts, field-dependent noise structure, chip-edge behavior, and cross-instrument morphology changes. The goal is not to discard physical modeling, but to move as much of the representation as possible from hand-specified assumptions into quantities learned directly from the pixels and then validated against classical controls.
 
 JAISP addresses this by learning a single spatially precise shared representation from both instruments through self-supervised pretraining, then attaching lightweight task-specific heads for detection, astrometry, and photometry. The central insight -- arrived at after five failed iterations -- is that **pixel-space reconstruction** via a Masked Autoencoder (MAE), where the model hides one band and learns to reconstruct it from the remaining bands, forces the encoder to preserve the exact spatial layout needed by precision cosmology tasks. Latent-space objectives like JEPA and contrastive learning optimize for "feature similarity" but allow the network to discard sub-pixel spatial information, which is precisely what astrometry and photometry demand.
 
@@ -88,21 +101,21 @@ The intended progression, as the dataset and methods mature:
 
 This is not speculative -- each transition is a concrete engineering step. The foundation model already encodes enough spatial precision for pixel-level reconstruction across instruments. The remaining work is propagating that precision through the downstream heads and eventually closing the loop to let the tasks inform the representation.
 
-### Why a Foundation Model — Transfer and Marginal Cost per Task
+### Why a Foundation Model -- Transfer and Marginal Cost per Task
 
-The case for the foundation isn't "does it beat a task-specific baseline on this field's test split" — it's about **what we can do with the foundation that we cannot do without it**. Three properties matter:
+The case for the foundation isn't "does it beat a task-specific baseline on this field's test split" -- it's about **what we can do with the foundation that we cannot do without it**. Three properties matter:
 
-1. **Multi-band entanglement, learned once.** A u-band source and its NISP-H counterpart are the same physical object, but they appear very differently in pixels: different PSF, different noise, different flux, different morphology. The MAE objective (reconstruct the held-out band from the other nine) FORCES the encoder to learn these cross-band correspondences. A task-specific model trained from scratch on 790 tiles of ECDFS data doesn't have the sample budget to learn u-to-H mapping and also learn the downstream task. The foundation amortises that learning once.
+1. **Multi-band entanglement, learned once.** A u-band source and its NISP-H counterpart are the same physical object, but they appear very differently in pixels: different PSF, different noise, different flux, different morphology. The MAE objective (reconstruct the held-out band from the other nine) forces the encoder to learn these cross-band correspondences. A task-specific model trained from scratch on 790 tiles of ECDFS data doesn't have the sample budget to learn u-to-H mapping and also learn the downstream task. The foundation amortises that learning once.
 
-2. **Instrumental-effect awareness.** PSF differences between Rubin (seeing-limited, broad, ~0.7" FWHM) and Euclid (diffraction-limited, sharp, ~0.2" FWHM VIS), pixel-scale differences (0.2 vs 0.1"/px), bandpass shapes, noise correlations, chip-edge effects, DCR — these are all implicit in what the encoder reconstructs. The per-band, per-instrument BandStems make this explicit in the architecture; MAE pretraining makes it explicit in the learned weights.
+2. **Instrumental-effect awareness.** PSF differences between Rubin (seeing-limited, broad, ~0.7" FWHM) and Euclid (diffraction-limited, sharp, ~0.2" FWHM VIS), pixel-scale differences (0.2 vs 0.1"/px), bandpass shapes, noise correlations, chip-edge effects, DCR -- these are all implicit in what the encoder reconstructs. The per-band, per-instrument BandStems make this explicit in the architecture; MAE pretraining makes it explicit in the learned weights.
 
-3. **Marginal cost per downstream task approaches zero.** Detection, astrometry, photometry, and (eventually) shape measurement all consume the same frozen features. The foundation's pretraining cost is paid once; each new task only trains a small head. The more downstream tasks we add, the smaller the foundation's amortised cost becomes. This is also why "does the foundation help THIS task" is the wrong question in isolation — the right question is "does the foundation help ALL tasks, collectively, enough to justify its cost."
+3. **Marginal cost per downstream task approaches zero.** Detection, astrometry, photometry, and (eventually) shape measurement all consume the same frozen features. The foundation's pretraining cost is paid once; each new task only trains a small head. The more downstream tasks we add, the smaller the foundation's amortised cost becomes. This is also why "does the foundation help THIS task" is the wrong question in isolation -- the right question is "does the foundation help ALL tasks, collectively, enough to justify its cost."
 
 The fourth property is the one we value most and have tested least:
 
 4. **Transfer to new fields without retraining.** A foundation that learned multi-band physics from ECDFS tiles SHOULD work zero-shot on EDF-North, EDF-South, or any new LSST+Euclid deep field. The expensive part (foundation pretraining) should not need to be repeated per field. Downstream heads trained on ECDFS SHOULD continue to apply, provided the new field's sources have the same statistical properties. This is exactly what a foundation model is for. All training and evaluation in this repo so far has been in-distribution on ECDFS tract5063. Out-of-distribution evaluation on a different field is a milestone not yet executed. Without it we cannot distinguish "foundation helps on this field" from "foundation learned this specific field's idiosyncrasies."
 
-The long-term plan is to (a) extend evaluation to at least one non-ECDFS field as soon as the astrometry pipeline settles, and (b) use that OOD performance number — not the in-distribution train/val split — as the primary success metric for future foundation versions.
+The long-term plan is to (a) extend evaluation to at least one non-ECDFS field as soon as the astrometry pipeline settles, and (b) use that OOD performance number -- not the in-distribution train/val split -- as the primary success metric for future foundation versions.
 
 ---
 
@@ -237,7 +250,7 @@ Each band has its own `BandStem` -- a small per-band CNN that handles noise norm
 
 ### Architecture History (v1 through v8)
 
-The foundation model went through eight major iterations over the course of this project. Understanding this history is important because each version's failure revealed a specific insight about what self-supervised astronomical representations need. The overall arc is a progression from **latent-space alignment** (v1-v5) to **pixel-space reconstruction** (v6-v8), driven by the realization that precision cosmology demands sub-pixel spatial fidelity that contrastive and JEPA objectives fundamentally cannot enforce.
+The foundation model went through eight major iterations over the course of this project. This history is retained as experimental evidence, not nostalgia. Each failed or superseded version revealed a specific constraint on self-supervised astronomical representations: sources are sparse, sky background dominates the pixels, instruments have incompatible native resolutions, and precision cosmology depends on sub-pixel spatial fidelity rather than only semantic similarity. The overall arc is a progression from **latent-space alignment** (v1-v5) to **pixel-space reconstruction** (v6-v8), driven by the realization that contrastive and JEPA-style objectives can learn useful similarity metrics while still discarding the exact spatial information needed by astrometry, detection, deblending, and photometry.
 
 > *If you only need the current architecture, skip to [v8 Fine-Scale MAE (Current)](#v8-fine-scale-mae-current). V7 is described first because v8 inherits the v7 architecture with small changes.*
 
@@ -440,9 +453,13 @@ cd models && torchrun --nproc_per_node=2 train_jaisp_foundation_v8.py \
 
 All current downstream heads reuse the frozen **V8** foundation encoder (`models/checkpoints/jaisp_v8_fine/checkpoint_best.pt`). Only lightweight task-specific layers are trained on top. This means each head gets the benefit of the full 10-band multi-instrument representation without the cost of encoding from scratch, and training each head is fast (hours, not days). The V7-based checkpoints (CenterNet v7, latent position v7) remain available as comparison baselines but are superseded by their v8 counterparts.
 
+The downstream modules should be read as scientific tests of the representation. Detection tests whether the foundation latent contains multi-band source evidence beyond VIS peak-finding. Astrometry tests whether the latent preserves enough local spatial information to improve cross-instrument centering. PSF and photometry test whether the representation can support physically interpretable flux extraction and blend modeling. A downstream head is therefore not only a utility script; it is an experiment asking what information the foundation has actually learned.
+
 ### 1. Detection
 
 **Directory**: `models/detection/`
+
+Detection is the first downstream test of whether the foundation representation contains useful multi-band structure. A source finder based only on Euclid VIS is sharp and conservative, but it cannot use colour, low-surface-brightness evidence, or NISP/Rubin information in a learned way. The JAISP detection experiments ask whether a frozen multi-instrument encoder can provide a better source-evidence field while remaining stable enough to generate labels for later stages such as PSF modelling and photometry.
 
 The detection stack supports three complementary source-finding choices. The fused-bottleneck CenterNet is now trained against the v8 foundation (`checkpoints/centernet_v8_fine/centernet_round2.pt`) with cached v8 bottleneck features in `data/cached_features_v8_fine/`.
 
@@ -451,6 +468,8 @@ The detection stack supports three complementary source-finding choices. The fus
 3. **Foundation + StemCenterNet**: a dense detector on top of the frozen foundation **BandStems** at native resolution. This preserves more local spatial detail than the bottleneck path. The reference checkpoint is `checkpoints/stem_centernet_v7_rms_aware_200/` (on v7 stems); a v8 retrain (`checkpoints/stem_centernet_v8_fine/`) is now also possible via the same `self_train_stem.py` script after `load_foundation()` was made V7/V8-agnostic. The v7 stem checkpoint is the live comparison baseline in `io/05_detection_comparison.ipynb`.
 
 The point of keeping all three is scientific comparison, not redundancy. Classical VIS is the baseline and pseudo-label source. The fused-bottleneck detector tests whether the self-supervised latent has learned genuinely multi-band source evidence. The stem detector tests whether native-resolution foundation features improve local source finding beyond what the coarser bottleneck can express.
+
+The current operational choice is the v8 fused-bottleneck CenterNet because it is stable, fast, and already produces the all-790-tile label cache used by later modules. The stem path remains important as an ablation: if it outperforms the bottleneck path, that would suggest that the bottleneck still compresses away local spatial information needed for detection.
 
 ![Detection overview](models/detection/detect.png)
 
@@ -540,7 +559,7 @@ Since there is no curated source catalog for this field, both neural detectors u
 
 **Self-training rounds**:
 1. **Round 1**: Train on VIS pseudo-labels. The model learns what sources look like in 10-band feature space.
-2. **Label refinement**: Run the trained detector on all tiles. High-confidence (>0.8) novel detections that don't match any VIS pseudo-label are **promoted** as new labels (sources visible in other bands but not VIS). Existing pseudo-labels where the model has low confidence (<0.3) are **demoted** (artifacts like diffraction spikes that appear only in VIS — the other 9 bands show nothing, so the model assigns low confidence). This is self-consistent: the model's multi-band understanding cleans its own training data.
+2. **Label refinement**: Run the trained detector on all tiles. High-confidence (>0.8) novel detections that don't match any VIS pseudo-label are **promoted** as new labels (sources visible in other bands but not VIS). Existing pseudo-labels where the model has low confidence (<0.3) are **demoted** (artifacts like diffraction spikes that appear only in VIS -- the other 9 bands show nothing, so the model assigns low confidence). This is self-consistent: the model's multi-band understanding cleans its own training data.
 3. **Round 2**: Retrain on VIS labels + promoted labels - demoted labels.
 
 For the stem path, round-2 promotion uses a lighter bright-star veto mask (`promotion_spike_radius=20`) that allows the model to promote real novel sources near bright objects while still suppressing long spike chains from becoming training labels.
@@ -580,8 +599,8 @@ Detection development originally used 130 training tiles and 14 validation tiles
 
 The astrometry module aligns sources across the 10 bands of the joint Rubin + Euclid stack so that downstream forced photometry, SED fitting, and shape measurement can sample every band at the same physical location. It does this through two complementary mechanisms:
 
-- A **per-object correction** — the **latent position head** — that predicts a source-specific offset from image features. This is the primary correction.
-- A **smooth WCS-residual field** — fit by PINN, NN, control-grid, or HGP solvers — that captures any remaining coherent distortion. After the head runs this field is small (~1 mas) and is treated as QA, not as a correction.
+- A **per-object correction** -- the **latent position head** -- that predicts a source-specific offset from image features. This is the primary correction.
+- A **smooth WCS-residual field** -- fit by PINN, NN, control-grid, or HGP solvers -- that captures any remaining coherent distortion. After the head runs this field is small (~1 mas) and is treated as QA, not as a correction.
 
 #### Glossary
 
@@ -589,22 +608,22 @@ The astrometry section uses several recurring acronyms. Definitions collected he
 
 | Term | Meaning |
 |---|---|
-| **WCS** | World Coordinate System — the FITS-standard mapping from pixel `(x, y)` to sky `(RA, Dec)`. Each instrument's pipeline solves its own WCS, and the offsets between two solutions on the same source are what the concordance field tries to capture. |
+| **WCS** | World Coordinate System -- the FITS-standard mapping from pixel `(x, y)` to sky `(RA, Dec)`. Each instrument's pipeline solves its own WCS, and the offsets between two solutions on the same source are what the concordance field tries to capture. |
 | **Concordance field** | A smooth 2D function `F(x, y) → (dRA, dDec)` that captures the residual mismatch between two WCS solutions across a tile. Built from many matched-source offsets. |
 | **Anchor** | A single matched source pair (Rubin band ↔ VIS) that contributes one measured `(dRA, dDec)` at a known sky position. Anchors are the data points a smooth-field solver fits. |
 | **Centroid** | The sub-pixel position of a source. Three flavours appear: detection peak (cheap), Gaussian fit (current default for head training/eval), PSF-fit (King-style optimal for point sources), and PSFField-refined (uses learned PSF model). |
-| **MADxy** | Median Absolute Deviation across both pixel axes — a robust scatter metric for centroid uncertainty. Quoted in mas. |
+| **MADxy** | Median Absolute Deviation across both pixel axes -- a robust scatter metric for centroid uncertainty. Quoted in mas. |
 | **mas / arcsec** | Milliarcsecond / arcsecond. 1 arcsec = 1000 mas. ECDFS Rubin coadds have ~0.7 arcsec FWHM; VIS is ~0.16 arcsec. |
 | **CenterNet** | Anchor-free object detector that emits a per-pixel "centerness" heatmap plus a sub-pixel offset. Used as a 10-band-aware alternative to classical peak finding. |
 | **PINN** | Physics-Informed Neural Network. An MLP `(x, y) → (dRA, dDec)` trained with auxiliary loss terms that encode physical priors: curl-free (`∂dRA/∂y = ∂dDec/∂x`, true for optical distortion), Laplacian smoothness, and band consistency (one shared geometric field plus a small per-band chromatic residual). |
 | **NN solver** | A plain MLP (no physics terms) trained with smooth L1 / Huber loss; the less-constrained baseline against which PINN is compared. |
 | **GP** | Gaussian Process. Models the field as a Bayesian random function with a covariance kernel that controls smoothness. *Single-kernel GP* = one length scale (the notebook 07 cross-check). *HGP* = multiple scales plus hierarchical multi-band structure (notebook 12). |
-| **RBF** | Radial Basis Function — kernel of the form `φ(x) = exp(−‖x − c‖² / 2ℓ²)` centered at `c` with width `ℓ`. HGP expands the field as a sum of RBFs at multiple length scales. |
-| **HGP** | Hierarchical Gaussian Process — the multi-scale Bayesian field solver. Decomposes each band's field as `field_band = common + instrument_group + band_specific`, fitted by a single linear solve, returning posterior uncertainty maps and a calibrated holdout. |
+| **RBF** | Radial Basis Function -- kernel of the form `φ(x) = exp(−‖x − c‖² / 2ℓ²)` centered at `c` with width `ℓ`. HGP expands the field as a sum of RBFs at multiple length scales. |
+| **HGP** | Hierarchical Gaussian Process -- the multi-scale Bayesian field solver. Decomposes each band's field as `field_band = common + instrument_group + band_specific`, fitted by a single linear solve, returning posterior uncertainty maps and a calibrated holdout. |
 | **King 1983 floor** | Photon-noise centroid precision, `σ ≈ FWHM / (2.35 · SNR)` per axis. The theoretical lower bound for centering accuracy. |
 | **SITCOMTN-159** | Wilson & Naylor 2025 Rubin commissioning technical note on astrometric uncertainty; the source of the ~5 mas WCS-solution floor we model with `--label-noise-floor`. |
-| **ECDFS** | Extended Chandra Deep Field South — the development field. ~3 deg², 790 tiles. |
-| **MER** | Euclid's MERge pipeline — produces resampled multi-band coadded mosaics on a common 0.1 arcsec/px grid for VIS, Y, J, H. |
+| **ECDFS** | Extended Chandra Deep Field South -- the development field. ~3 deg², 790 tiles. |
+| **MER** | Euclid's MERge pipeline -- produces resampled multi-band coadded mosaics on a common 0.1 arcsec/px grid for VIS, Y, J, H. |
 | **dRA*** | RA offset corrected for the `cos(Dec)` factor so that 1 mas in dRA* equals 1 mas in dDec on the sky. |
 | **Head** | Shorthand for the latent position head. "Raw" = before-head residual, "head" = after-head residual, "head_resid" = the per-anchor head-corrected `(dRA, dDec)` used as input to a residual-field fit. |
 
@@ -623,10 +642,10 @@ When sources detected in Rubin and VIS are matched purely by sky coordinates, th
 | Change in measured VIS−Rubin offset from re-centering | **54.0 mas** |
 | Rubin r-vs-i band-centering offset | **47.8 mas** |
 
-The smooth bulk field is small (5.4 mas); switching from detection-peak to PSF-fit centroids changes the measured offset by 54 mas — comparable to the offset itself. **Centering, not WCS distortion, is the dominant raw error.** This is consistent with the King 1983 photon-noise scaling: at the typical Rubin coadd FWHM ≈ 1.56 px and SNR 10–30 the predicted floor is ≈33 mas per axis, exactly what we observe.
+The smooth bulk field is small (5.4 mas); switching from detection-peak to PSF-fit centroids changes the measured offset by 54 mas -- comparable to the offset itself. **Centering, not WCS distortion, is the dominant raw error.** This is consistent with the King 1983 photon-noise scaling: at the typical Rubin coadd FWHM ≈ 1.56 px and SNR 10–30 the predicted floor is ≈33 mas per axis, exactly what we observe.
 
 ![Centering diagnostic](docs/figures/astrometry_centering_diagnostic.png)
-*Switching from detection-peak to PSF-fit centroids changes the measured Rubin–VIS offset by ~54 mas, comparable to the raw offset itself — evidence that the residual is source-level centroid ambiguity, not a smooth WCS field.*
+*Switching from detection-peak to PSF-fit centroids changes the measured Rubin–VIS offset by ~54 mas, comparable to the raw offset itself -- evidence that the residual is source-level centroid ambiguity, not a smooth WCS field.*
 
 The implication: a global WCS correction can only remove the small ~5 mas coherent component. The dominant per-source centroid scatter has to be corrected one source at a time, conditioned on the actual image content. That is what the latent position head does. The smooth field is then a secondary QA product.
 
@@ -640,18 +659,18 @@ Libralato et al. (2024, A&A, arXiv:2411.02487) achieved **0.7 mas (1D, VIS)** an
 
 The current v8 pipeline runs in six stages. The head is the primary correction; the smooth-field solvers are diagnostic / QA.
 
-1. **Source detection / centroiding** (classical peak-finder, default — or CenterNet, optional). VIS centroids are refined to Gaussian-fit photon centroids in both cases.
+1. **Source detection / centroiding** (classical peak-finder, default -- or CenterNet, optional). VIS centroids are refined to Gaussian-fit photon centroids in both cases.
 2. **Cross-instrument matching**: sky-coordinate match each non-VIS band to VIS, with quality cuts (raw offset < 200 mas, SNR > 5).
 3. **Latent feature extraction**: run the frozen v8 foundation encoder once per tile to get the fused 10-band bottleneck (0.4 arcsec/px, 256 channels) and the raw VIS BandStem feature map (0.1 arcsec/px, 64 channels).
 4. **Per-object offset prediction**: `latent_position_head.py` extracts local windows from both feature maps (5×5 bottleneck, 11×11 VIS-stem), processes them through a small ConvNeXt + Conv + MLP head (687K parameters), and outputs `(dx, dy, log σ)` in VIS pixel space, converted to sky arcsec via the local WCS Jacobian.
 5. **Evaluation**: `eval_latent_position.py` reports raw and head-corrected residuals per band and exports an `anchors.npz` cache for any downstream field fit.
-6. **Optional smooth residual field**: `fit_direct_pinn.py` (PINN/NN) or `fit_hierarchical_gp_concordance.py` (HGP) fit a smooth field to raw or head-residual anchors — QA, not a correction unless it beats the zero-field baseline on held-out anchors.
+6. **Optional smooth residual field**: `fit_direct_pinn.py` (PINN/NN) or `fit_hierarchical_gp_concordance.py` (HGP) fit a smooth field to raw or head-residual anchors -- QA, not a correction unless it beats the zero-field baseline on held-out anchors.
 
 ##### The latent position head
 
 The bottleneck path captures chromatic morphology from all 10 bands (star vs galaxy, colour gradients, DCR); the VIS-stem path provides fine spatial precision. The combination can in principle place positions more accurately than any single-band centroid.
 
-**Training** uses jitter-based self-supervision: VIS Gaussian-fit centroids are the targets, controlled Gaussian jitter (~30 mas) creates approximate input positions, and the head learns to recover the photon centroid that the local features encode. Training augments with random 90°/180°/270° rotations and horizontal/vertical flips (16 orientations per source) — the pixel-to-sky Jacobian is correctly transformed for each augmentation so the sky-space loss stays valid. The Rayleigh NLL loss includes a per-source label-noise term `σ_eff = sqrt(σ_pred² + σ_label²)` with `σ_label = 5 mas` by default, capturing the SITCOMTN-159 WCS-solution systematic floor and preventing overfitting to noisy bright-source labels.
+**Training** uses jitter-based self-supervision: VIS Gaussian-fit centroids are the targets, controlled Gaussian jitter (~30 mas) creates approximate input positions, and the head learns to recover the photon centroid that the local features encode. Training augments with random 90°/180°/270° rotations and horizontal/vertical flips (16 orientations per source) -- the pixel-to-sky Jacobian is correctly transformed for each augmentation so the sky-space loss stays valid. The Rayleigh NLL loss includes a per-source label-noise term `σ_eff = sqrt(σ_pred² + σ_label²)` with `σ_label = 5 mas` by default, capturing the SITCOMTN-159 WCS-solution systematic floor and preventing overfitting to noisy bright-source labels.
 
 **Why we do not use PSFField centroids as labels.** The head extracts features at the jittered position; the features encode "where the photon centroid is in the window." PSFField-refined centroids differ from photon centroids by ~16 mas because they incorporate a learned PSF model the head cannot see. Training the head to match a target it cannot construct from features creates an irreducible ~29–30 mas plateau in both v7 and v8 runs (table below). **Use Gaussian-fit photon centroids for head training/evaluation; use PSFField only as a separate PSF/photometry product.**
 
@@ -663,7 +682,7 @@ The bottleneck path captures chromatic morphology from all 10 bands (star vs gal
 | **v8 no-PSF** | **v8** | **Gaussian fit** | **classical anchors** | **headline result; see below** |
 | **v8 no-PSF** | **v8** | **Gaussian fit** | **CenterNet anchors** | **high-density downstream pipeline; see below** |
 
-The v7 and v8 PSFField runs converge to the *same* ~29 mas plateau, proving the foundation is not the bottleneck — the target/feature mismatch is.
+The v7 and v8 PSFField runs converge to the *same* ~29 mas plateau, proving the foundation is not the bottleneck -- the target/feature mismatch is.
 
 A second v8-specific lesson: **`bottleneck_window=5` works best even though v8 runs at 0.4 arcsec/px.** The auto-scaling default of 11×11 (~4 arcsec coverage) is too large for the head's 3×3 ConvNeXt kernel to integrate effectively, and dilutes the signal.
 
@@ -672,7 +691,7 @@ A second v8-specific lesson: **`bottleneck_window=5` works best even though v8 r
 The first pipeline stage can use either:
 
 - **Classical** (default): median-background subtraction, Gaussian smoothing, local-maximum detection above an N-sigma threshold in Rubin (`g+r+i+z` coadd) and VIS independently, then WCS-based cross-match. Simple, fast, well understood.
-- **CenterNet**: a trained 10-band-aware neural detector that produces source positions directly in the VIS frame — no cross-matching step. Recovers sources that are ambiguous in a 3-band coadd and produces a cleaner anchor pool.
+- **CenterNet**: a trained 10-band-aware neural detector that produces source positions directly in the VIS frame -- no cross-matching step. Recovers sources that are ambiguous in a 3-band coadd and produces a cleaner anchor pool.
 
 The two caches are kept side-by-side as a first-class experimental variable:
 
@@ -681,22 +700,22 @@ The two caches are kept side-by-side as a first-class experimental variable:
 | `anchors.npz` | classical VIS peak finder | 630,120 | 36,574 | 44.2 mas | 10.2 mas |
 | `anchors_centernet.npz` | CenterNet VIS seeds | 491,748 | 34,510 | 39.8 mas | 8.5 mas |
 
-This is deliberately a *catalogue-level* comparison, not object-matched — the two detectors select different source pools. CenterNet anchors have lower raw and post-head medians, but fewer of them. Notebook 07 defaults to `anchors_centernet.npz`; "the head helps by X" claims should be read as conditional on the selected anchor pool unless the classical cache is explicitly chosen.
+This is deliberately a *catalogue-level* comparison, not object-matched -- the two detectors select different source pools. CenterNet anchors have lower raw and post-head medians, but fewer of them. Notebook 07 defaults to `anchors_centernet.npz`; "the head helps by X" claims should be read as conditional on the selected anchor pool unless the classical cache is explicitly chosen.
 
 ##### The four smooth-field solvers
 
 All four are diagnostic in the current workflow. The latent head is the correction; a smooth field is applied only if it beats the zero-field baseline on held-out anchors.
 
-- **Control grid** (`field_solver.py`) — bilinear basis on a regular grid, weighted least squares with finite-difference smoothness regularisation and adaptive per-node anchor weights. Grid resolution auto-reduces in sparse regions.
-- **NN** (`nn_field_solver.py`) — plain MLP with residual connections, Adam + cosine LR + gradient clipping + best-state tracking. Optional Huber loss. No grid hyperparameter, infinitely differentiable, scales to any density.
-- **PINN** (`pinn_field_solver.py`) — same MLP + automatic-differentiation auxiliary losses for curl-free, Laplacian, and band-consistency priors. Preferred for the global field diagnostic because the physics priors keep noisy anchors from becoming spurious structure.
-- **HGP** (`fit_hierarchical_gp_concordance.py`) — global finite-rank Bayesian field. Multi-scale RBF features and the hierarchical decomposition `field_band(x, y) = common(x, y) + instrument_group(x, y) + band_specific(x, y)`. Output FITS adds `{BAND}.DRA_STD` / `{BAND}.DDE_STD` posterior std maps and a JSON summary with spatial-holdout calibration. Note: its `COVERAGE` extension is *distance to nearest anchor in arcsec*, not anchor density, and must be used to mask unsupported extrapolation.
+- **Control grid** (`field_solver.py`) -- bilinear basis on a regular grid, weighted least squares with finite-difference smoothness regularisation and adaptive per-node anchor weights. Grid resolution auto-reduces in sparse regions.
+- **NN** (`nn_field_solver.py`) -- plain MLP with residual connections, Adam + cosine LR + gradient clipping + best-state tracking. Optional Huber loss. No grid hyperparameter, infinitely differentiable, scales to any density.
+- **PINN** (`pinn_field_solver.py`) -- same MLP + automatic-differentiation auxiliary losses for curl-free, Laplacian, and band-consistency priors. Preferred for the global field diagnostic because the physics priors keep noisy anchors from becoming spurious structure.
+- **HGP** (`fit_hierarchical_gp_concordance.py`) -- global finite-rank Bayesian field. Multi-scale RBF features and the hierarchical decomposition `field_band(x, y) = common(x, y) + instrument_group(x, y) + band_specific(x, y)`. Output FITS adds `{BAND}.DRA_STD` / `{BAND}.DDE_STD` posterior std maps and a JSON summary with spatial-holdout calibration. Note: its `COVERAGE` extension is *distance to nearest anchor in arcsec*, not anchor density, and must be used to mask unsupported extrapolation.
 
 **Why HGP exists at all when PINN already works.** Four things HGP gives that PINN doesn't, all from a single Bayesian linear solve:
 
-1. **Per-pixel posterior uncertainty** (`{BAND}.DRA_STD` / `{BAND}.DDE_STD`) — PINN can only quote uncertainty indirectly via bootstrap/null tests.
-2. **Spatial-holdout calibration of that uncertainty** — z-score std should be ≈1; HGP can self-check this, PINN can't.
-3. **Hierarchical decomposition** — `COMMON` shared by all bands, `GROUP` separating Rubin from NISP, per-band residual. PINN is one global field with no per-instrument attribution.
+1. **Per-pixel posterior uncertainty** (`{BAND}.DRA_STD` / `{BAND}.DDE_STD`) -- PINN can only quote uncertainty indirectly via bootstrap/null tests.
+2. **Spatial-holdout calibration of that uncertainty** -- z-score std should be ≈1; HGP can self-check this, PINN can't.
+3. **Hierarchical decomposition** -- `COMMON` shared by all bands, `GROUP` separating Rubin from NISP, per-band residual. PINN is one global field with no per-instrument attribution.
 4. **Overfitting check** via train-vs-holdout residual matching. HGP self-diagnoses when its priors are too loose.
 
 ---
@@ -705,7 +724,7 @@ All four are diagnostic in the current workflow. The latent head is the correcti
 
 Notebook 07 (`io/07_astrometry_before_after.ipynb`) is the head's evaluation chain. Seven tests, each answering a specific question.
 
-##### Test 1 — Cross-instrument before/after (Part 1)
+##### Test 1 -- Cross-instrument before/after (Part 1)
 
 **Question**: how much does the head improve per-object alignment, per band?
 
@@ -729,21 +748,21 @@ Rubin g/r/i/z and NISP Y/J/H reach **9–11 mas median**; Rubin y is **14.7 mas*
 *Headline v8 no-PSF classical-anchor result: raw (grey) vs head-corrected (blue) radial offset distributions per band, 630K source×band measurements across 790 tiles.*
 
 ![Headline before/after per-band](docs/figures/astrometry_before_after.png)
-*Notebook 07 Part 1 — CenterNet anchor cache, 491,748 source-band measurements. Raw / Raw+PINN / Head / Head+PINN medians per band. After the head, the residual PINN field changes medians by ≤0.2 mas on every band.*
+*Notebook 07 Part 1 -- CenterNet anchor cache, 491,748 source-band measurements. Raw / Raw+PINN / Head / Head+PINN medians per band. After the head, the residual PINN field changes medians by ≤0.2 mas on every band.*
 
-##### Test 2 — Detector vs head credit separation (Parts 1b, 4a)
+##### Test 2 -- Detector vs head credit separation (Parts 1b, 4a)
 
 **Question**: how much of the gain comes from CenterNet vs from the head?
 
-The two contributions are separable. Combined-pool field RMS goes from **5.72 mas (classical, raw)** to **1.00 mas (CenterNet, head_resid)** — CenterNet alone knocks ~0.9 mas off the raw field, the head knocks another ~3–4 mas off. Combined-gain numbers: **80.8 % (all SNR)** and **35.4 % (SNR ≥ 30)**.
+The two contributions are separable. Combined-pool field RMS goes from **5.72 mas (classical, raw)** to **1.00 mas (CenterNet, head_resid)** -- CenterNet alone knocks ~0.9 mas off the raw field, the head knocks another ~3–4 mas off. Combined-gain numbers: **80.8 % (all SNR)** and **35.4 % (SNR ≥ 30)**.
 
 ![Anchor source comparison](docs/figures/anchor_source_comparison.png)
-*Part 1b — classical vs CenterNet anchor pools, raw and head columns separated.*
+*Part 1b -- classical vs CenterNet anchor pools, raw and head columns separated.*
 
 ![Detector-source concordance comparison](docs/figures/anchor_source_concordance_comparison.png)
-*Part 4a — field-RMS panel for the 2×2 of `(classical / CenterNet) × (raw / head_resid)`. The detector and head contributions are additive and must be reported separately.*
+*Part 4a -- field-RMS panel for the 2×2 of `(classical / CenterNet) × (raw / head_resid)`. The detector and head contributions are additive and must be reported separately.*
 
-##### Test 3 — SNR-stratified PINN refits (Part 4)
+##### Test 3 -- SNR-stratified PINN refits (Part 4)
 
 **Question**: does the smooth field amplitude depend on which anchors we feed in?
 
@@ -762,9 +781,9 @@ Stratify the 9-band CenterNet anchor pool by per-band SNR terciles, refit PINN j
 | middle tercile | head_resid | 163,943 | 8.8 | 9.2 | 3.4 | 3.8 |
 | bottom tercile | head_resid | 163,902 | 9.3 | 9.6 | 2.8 | 3.8 |
 
-**Bright-only raw recovers the ~5 mas reference** (classical SNR ≥ 30: 3.8 mas, brightest tercile: 8.4 mas — the tercile is dominated by *brighter* faint stars and overshoots). **All head_resid slices sit near 1–2 mas**, regardless of where on the SNR ladder we sample — the head has removed the coherent signal and the PINN has nothing left to fit.
+**Bright-only raw recovers the ~5 mas reference** (classical SNR ≥ 30: 3.8 mas, brightest tercile: 8.4 mas -- the tercile is dominated by *brighter* faint stars and overshoots). **All head_resid slices sit near 1–2 mas**, regardless of where on the SNR ladder we sample -- the head has removed the coherent signal and the PINN has nothing left to fit.
 
-##### Test 4 — Bootstrap and shuffled-null significance (Part 4b)
+##### Test 4 -- Bootstrap and shuffled-null significance (Part 4b)
 
 **Question**: are the recovered field amplitudes statistically real?
 
@@ -781,25 +800,25 @@ Bootstrap each slice five times for a 1σ_boot bar; permute anchor positions whi
 The all-anchor and bottom-tercile slices are noise-dominated. **The classical SNR ≥ 30 raw signal/null of 0.5× is the surprising result**: bright-only raw RMS is *not* statistically distinguishable from the shuffled-null on this anchor pool. Smooth-field detection on this geometry rests on the *structured* / physics-prior solvers (PINN, NN, super-tight HGP), not on raw bright-only RMS.
 
 ![Field amplitude with bootstrap error bars vs shuffled-null floor](docs/figures/snr_field_amp_with_null.png)
-*Part 4b — bootstrap field RMS with 1σ_boot bars (filled) vs shuffled-null floor (×) per SNR slice. Squares = head_resid, circles = raw. A real measurement sits well above its null cross with a small fractional bootstrap σ.*
+*Part 4b -- bootstrap field RMS with 1σ_boot bars (filled) vs shuffled-null floor (×) per SNR slice. Squares = head_resid, circles = raw. A real measurement sits well above its null cross with a small fractional bootstrap σ.*
 
-##### Test 5 — Single-kernel GP cross-check (Part 4c) — *negative result*
+##### Test 5 -- Single-kernel GP cross-check (Part 4c) -- *negative result*
 
 **Question**: does an independent Gaussian Process with a calibrated kernel agree with PINN?
 
 On the i band, classical SNR ≥ 30, 1,200 anchors, with an RBF + white-noise kernel:
 
-- The kernel hits its **15 arcsec lower length-scale bound** (three sklearn `ConvergenceWarning`s on length scale, constant amplitude, and noise level — the optimiser cannot find a data-preferred scale).
+- The kernel hits its **15 arcsec lower length-scale bound** (three sklearn `ConvergenceWarning`s on length scale, constant amplitude, and noise level -- the optimiser cannot find a data-preferred scale).
 - GP field RMS: **15.53 mas** vs PINN's **10.29 mas**.
-- Vector-difference RMS: **15.57 mas** (dRA 10.43, dDec 11.56) — the methods disagree at the same scale as the GP signal itself.
-- Hold-out z-score std: **1.39** (target 1.0) — the GP is under-calibrated.
+- Vector-difference RMS: **15.57 mas** (dRA 10.43, dDec 11.56) -- the methods disagree at the same scale as the GP signal itself.
+- Hold-out z-score std: **1.39** (target 1.0) -- the GP is under-calibrated.
 
 ![GP vs PINN, i band classical SNR≥30](docs/figures/gp_vs_pinn_field.png)
-*Part 4c — GP field, PINN field, GP–PINN difference, hold-out z-score histogram. The GP fails its own calibration and disagrees with PINN at ~5 mas. Read this as a model-mismatch warning, not as confirmation.*
+*Part 4c -- GP field, PINN field, GP–PINN difference, hold-out z-score histogram. The GP fails its own calibration and disagrees with PINN at ~5 mas. Read this as a model-mismatch warning, not as confirmation.*
 
 This is **why notebook 12 brings in HGP**. A single-kernel GP at one length scale cannot represent the actual field structure on this geometry; a hierarchical multi-scale Bayesian model can.
 
-##### Test 6 — Anchor leverage and per-source precision (Part 3b)
+##### Test 6 -- Anchor leverage and per-source precision (Part 3b)
 
 **Question**: how does the head change the anchor density available for a smooth-field fit, and how good is each anchor?
 
@@ -820,16 +839,16 @@ Bin anchors on a 1 arcmin × 1 arcmin grid (the natural correlation-length scale
 For i band: faint:bright = 3.7× (faint <10 SNR: 23,964; mid: 18,502; bright ≥30: 6,526). The head turns **8–41× more anchors per arcmin²** into useful field constraints.
 
 ![Anchor leverage gain](docs/figures/anchor_leverage_gain.png)
-*Part 3b — per-band anchor density at SNR ≥ 30 vs all-SNR (left); cell-coverage curve for i band (right). The classical curve falls off rapidly; the head-enabled curve maintains tens of anchors per cell across 95 % of the field.*
+*Part 3b -- per-band anchor density at SNR ≥ 30 vs all-SNR (left); cell-coverage curve for i band (right). The classical curve falls off rapidly; the head-enabled curve maintains tens of anchors per cell across 95 % of the field.*
 
 ![Per-source precision vs SNR](docs/figures/per_source_precision.png)
-*Per-source precision floor (Part 3b). Left: median MADxy per band, raw vs head — improvement factors 3.8–5.3×. Right: median MADxy vs SNR for raw anchors, with the King 1983 floor `FWHM/(2.35·SNR)` overlaid. The head reaches a flat ~8 mas regime well below the SNR-dependent classical floor for all but the brightest anchors.*
+*Per-source precision floor (Part 3b). Left: median MADxy per band, raw vs head -- improvement factors 3.8–5.3×. Right: median MADxy vs SNR for raw anchors, with the King 1983 floor `FWHM/(2.35·SNR)` overlaid. The head reaches a flat ~8 mas regime well below the SNR-dependent classical floor for all but the brightest anchors.*
 
-##### Test 7 — Sparse-field recovery, source-disjointly (Part 5)
+##### Test 7 -- Sparse-field recovery, source-disjointly (Part 5)
 
 **Question**: in a sparse field with too few bright anchors for a classical concordance fit, can the head's predictions on faint sources stand in?
 
-Fit the head-implied non-classical field — `raw − head_resid` smoothed via PINN, only on `SNR < 30` anchors (457,238 sources) — and compare it to the classical bright-only field (`SNR ≥ 30`) which uses *disjoint* anchors. Results:
+Fit the head-implied non-classical field -- `raw − head_resid` smoothed via PINN, only on `SNR < 30` anchors (457,238 sources) -- and compare it to the classical bright-only field (`SNR ≥ 30`) which uses *disjoint* anchors. Results:
 
 - Head-implied non-classical field RMS: **2.4 mas**.
 - Vector RMS vs classical bright-only: **4.79 mas**.
@@ -848,7 +867,7 @@ The takeaway: in a sparse field where bright stars are too few to fit a smooth W
 
 Notebook 12 (`io/12_astrometry_hgp_vs_pinn.ipynb`) brings in HGP as the proper Bayesian cross-validator that the single-kernel GP could not be. It compares HGP and PINN on the same CenterNet anchor cache (`anchors_centernet.npz`), on raw and head-residual offsets, in nine sections.
 
-##### Test 1 — Loose-prior holdout calibration (§1)
+##### Test 1 -- Loose-prior holdout calibration (§1)
 
 **Question**: is the published HGP product (`concordance_hgp_head_resid_richer.fits`, length scales 45/120/300/900 arcsec, priors 25/12/6 mas) self-consistent?
 
@@ -863,7 +882,7 @@ The sidecar JSON answers no:
 
 Train ≪ holdout (a 40 % gap) and z-score std at ~1.7 (target 1.0) means the loose-prior posteriors are not self-consistent on a held-out spatial fold. **The on-disk product cannot be used as published.** The super-tight refit closes this gap.
 
-##### Test 2 — HGP head-residual vs PINN head-residual maps (§2–§3)
+##### Test 2 -- HGP head-residual vs PINN head-residual maps (§2–§3)
 
 **Question**: on head-residual anchors, how does HGP compare to PINN per band?
 
@@ -881,12 +900,12 @@ Same supported pixels (86–93 % of the grid mask, defined by nearest-anchor < 3
 | NISP J | 0.926 | 1.70 | 0.89 | 1.46 | 7.40 |
 | NISP H | 0.926 | 1.69 | 0.81 | 1.48 | 6.86 |
 
-PINN head_resid is consistently **0.8–1.4 mas** (essentially zero residual smooth field). HGP head_resid shows several-mas amplitude in some bands — this is residual prior ringing, not residual signal. `|HGP − PINN|` is comparable to the HGP RMS in non-NISP bands: when there is nothing to fit, the two methods can disagree at the few-mas level just from prior mismatch. NISP bands are the cleanest (smoother field, more anchors).
+PINN head_resid is consistently **0.8–1.4 mas** (essentially zero residual smooth field). HGP head_resid shows several-mas amplitude in some bands -- this is residual prior ringing, not residual signal. `|HGP − PINN|` is comparable to the HGP RMS in non-NISP bands: when there is nothing to fit, the two methods can disagree at the few-mas level just from prior mismatch. NISP bands are the cleanest (smoother field, more anchors).
 
 ![HGP vs PINN on head residuals (i band)](docs/figures/hgp_vs_pinn_head_resid_maps.png)
-*§3 — HGP, PINN, and `|HGP − PINN|` on head-residual anchors (i band). Bottom: HGP posterior radial std and supported-pixel mask. PINN sits at ~0.85 mas RMS on the supported pixels; HGP shows several-mas prior ringing.*
+*§3 -- HGP, PINN, and `|HGP − PINN|` on head-residual anchors (i band). Bottom: HGP posterior radial std and supported-pixel mask. PINN sits at ~0.85 mas RMS on the supported pixels; HGP shows several-mas prior ringing.*
 
-##### Test 3 — HGP raw with default loose priors (§6)
+##### Test 3 -- HGP raw with default loose priors (§6)
 
 **Question**: how does default-prior HGP compare to PINN on *raw* anchors, where there is a real ~5 mas field to fit?
 
@@ -899,9 +918,9 @@ PINN head_resid is consistently **0.8–1.4 mas** (essentially zero residual smo
 HGP overshoots PINN by 4–5 mas in the worst bands and produces visible per-tile criss-cross structure that PINN's curl-free + Laplacian + band-consistency physics priors correctly suppress.
 
 ![HGP vs PINN on raw anchors (default priors)](docs/figures/hgp_vs_pinn_raw_default.png)
-*§6 i band — top row: HGP, PINN, `|HGP − PINN|`. Bottom row: HGP posterior radial std, supported-pixel mask. The criss-cross ridges are a basis-function artefact (see §7c); the PINN priors suppress them.*
+*§6 i band -- top row: HGP, PINN, `|HGP − PINN|`. Bottom row: HGP posterior radial std, supported-pixel mask. The criss-cross ridges are a basis-function artefact (see §7c); the PINN priors suppress them.*
 
-##### Test 4 — Prior-sensitivity ladder (§7, §7b)
+##### Test 4 -- Prior-sensitivity ladder (§7, §7b)
 
 **Question**: how much can HGP recover by tightening priors?
 
@@ -912,24 +931,24 @@ HGP overshoots PINN by 4–5 mas in the worst bands and produces visible per-til
 | Super-tight | 300, 900 | 4 / 2 / 1 | 4.07 mas | 2.1 mas | 0.5147 mas |
 | PINN reference | (curl-free + Laplacian) | n/a | 4.63 mas | 0 mas | 0.4851 mas |
 
-At super-tight priors, HGP raw RMS lands within **1.6–2.3 mas of PINN** for Rubin g/r/i/z and NISP Y/J/H. The criss-cross structure visible at loose priors disappears once the short basis scales (45 and 120 arcsec) are removed. **HGP can serve as a like-for-like cross-validator on the smooth field — but only at degree-scale priors that match PINN's effective resolution.** u-band remains the hardest (low SNR + sparse anchors, |HGP−PINN| ~5 mas at all settings); y-band is borderline (~3.5 mas).
+At super-tight priors, HGP raw RMS lands within **1.6–2.3 mas of PINN** for Rubin g/r/i/z and NISP Y/J/H. The criss-cross structure visible at loose priors disappears once the short basis scales (45 and 120 arcsec) are removed. **HGP can serve as a like-for-like cross-validator on the smooth field -- but only at degree-scale priors that match PINN's effective resolution.** u-band remains the hardest (low SNR + sparse anchors, |HGP−PINN| ~5 mas at all settings); y-band is borderline (~3.5 mas).
 
 ![HGP prior sensitivity](docs/figures/hgp_prior_sensitivity.png)
 *HGP raw RMS per band at three prior settings versus the PINN reference. Loose priors overshoot by 4–5 mas in the worst bands; super-tight closes the gap to ≤2.3 mas for Rubin g/r/i/z and NISP Y/J/H.*
 
 ![Super-tight HGP vs PINN on raw anchors](docs/figures/hgp_vs_pinn_raw_supertight.png)
-*§7b i band — super-tight HGP raw fit (length scales 300/900 arcsec, priors 4/2/1 mas) next to the PINN raw fit on the same grid. The two large-scale fields agree to ~2 mas RMS.*
+*§7b i band -- super-tight HGP raw fit (length scales 300/900 arcsec, priors 4/2/1 mas) next to the PINN raw fit on the same grid. The two large-scale fields agree to ~2 mas RMS.*
 
-##### Test 5 — Anchor density vs HGP basis lattice (§7c)
+##### Test 5 -- Anchor density vs HGP basis lattice (§7c)
 
 **Question**: is the residual super-tight HGP criss-cross driven by data clumping or by the basis function geometry?
 
-Bin actual anchor positions on the same 5 arcsec mesh as the HGP grid and overlay the high-density contours on the HGP field. The bright HGP ridges sit *between* basis centres at the 300 arcsec spacing, *not* on the high-density anchor regions. The criss-cross is therefore a finite-rank basis-function lattice — saddle ridges between RBF centres — not a data-driven structure (multi-tile detections, anchor clumps).
+Bin actual anchor positions on the same 5 arcsec mesh as the HGP grid and overlay the high-density contours on the HGP field. The bright HGP ridges sit *between* basis centres at the 300 arcsec spacing, *not* on the high-density anchor regions. The criss-cross is therefore a finite-rank basis-function lattice -- saddle ridges between RBF centres -- not a data-driven structure (multi-tile detections, anchor clumps).
 
 ![Anchor density vs HGP super-tight (i band)](docs/figures/hgp_anchor_density_overlay.png)
-*§7c i band — HGP super-tight `|F|` (left), arcmin-binned anchor density (centre), HGP map with density contours overlaid (right). The bright HGP ridges do not track the high-density regions.*
+*§7c i band -- HGP super-tight `|F|` (left), arcmin-binned anchor density (centre), HGP map with density contours overlaid (right). The bright HGP ridges do not track the high-density regions.*
 
-##### Test 6 — Lattice-smoothing direct test (§8)
+##### Test 6 -- Lattice-smoothing direct test (§8)
 
 **Question**: how much of the super-tight HGP–PINN disagreement is the basis lattice, and how much is genuine prior difference?
 
@@ -947,12 +966,12 @@ Gaussian-smooth the super-tight HGP at 75 arcsec (≈ 1/4 the 300 arcsec basis s
 | NISP J | 1.61 | 1.43 | 0.18 |
 | NISP H | 2.07 | 1.79 | 0.28 |
 
-**Lattice ringing accounts for ~0.1–0.3 mas; the remaining 1.4–3.4 mas is genuine prior difference** between HGP's hierarchical-Gaussian basis and PINN's curl-free + Laplacian + band-consistency physics. Per-component scatter shows ΔRA* tracking PINN well while ΔDec is squeezed into a narrower PINN range and a wider HGP range — PINN's curl-free coupling forces a particular RA/Dec partition that HGP doesn't impose.
+**Lattice ringing accounts for ~0.1–0.3 mas; the remaining 1.4–3.4 mas is genuine prior difference** between HGP's hierarchical-Gaussian basis and PINN's curl-free + Laplacian + band-consistency physics. Per-component scatter shows ΔRA* tracking PINN well while ΔDec is squeezed into a narrower PINN range and a wider HGP range -- PINN's curl-free coupling forces a particular RA/Dec partition that HGP doesn't impose.
 
 ![Lattice-smoothed HGP vs PINN (i band)](docs/figures/hgp_lattice_smoothed_vs_pinn.png)
-*§8 i band — super-tight HGP after a 75 arcsec Gaussian smoothing (≈ 1/4 of the 300 arcsec basis spacing) next to PINN on the same raw grid. The smoothed map matches PINN visually, but `|HGP − PINN|` drops by only ~0.2 mas — the bulk of the residual is genuine prior difference, not lattice ringing.*
+*§8 i band -- super-tight HGP after a 75 arcsec Gaussian smoothing (≈ 1/4 of the 300 arcsec basis spacing) next to PINN on the same raw grid. The smoothed map matches PINN visually, but `|HGP − PINN|` drops by only ~0.2 mas -- the bulk of the residual is genuine prior difference, not lattice ringing.*
 
-##### Test 7 — Anchor-level convergence ladder (§5–§6)
+##### Test 7 -- Anchor-level convergence ladder (§5–§6)
 
 **Question**: at the actual anchor positions (not on the gridded field map), how much does each solver improve the median residual?
 
@@ -967,9 +986,9 @@ Source-weighted median improvement, raw anchors:
 
 After the head, the same comparison gives **HGP 0.011 mas vs PINN 0.027 mas**: the head has consumed the smooth signal, and both solvers reduce to noise-floor improvements.
 
-The **25–70× gap between raw and head-residual anchor-level improvements** is the cleanest single-number evidence that the head absorbed a real ~5 mas coherent component — the smooth-field correction is large where it should be (raw) and vanishingly small where the head has done the work.
+The **25–70× gap between raw and head-residual anchor-level improvements** is the cleanest single-number evidence that the head absorbed a real ~5 mas coherent component -- the smooth-field correction is large where it should be (raw) and vanishingly small where the head has done the work.
 
-##### Test 8 — Hierarchical decomposition (§4)
+##### Test 8 -- Hierarchical decomposition (§4)
 
 **Question**: how does the smooth field break down into instrument-shared, instrument-group, and per-band components?
 
@@ -985,12 +1004,12 @@ The on-disk loose-prior product gives:
 | BAND_y | 3.59 |
 | BAND_NISP_Y/J/H | 0.64–0.74 |
 
-COMMON carries most of the WCS/concordance signal (5.4 mas, matches the smooth-field amplitude in test 3). At super-tight priors the inflated tiers (BAND_u, BAND_y) compress to ≤2 mas while COMMON stays similar. Note that BAND_u and BAND_y inflation under loose priors is partly real (low SNR / sparse anchors) and partly noise absorbed via the 45 arcsec basis — the super-tight fit separates these.
+COMMON carries most of the WCS/concordance signal (5.4 mas, matches the smooth-field amplitude in test 3). At super-tight priors the inflated tiers (BAND_u, BAND_y) compress to ≤2 mas while COMMON stays similar. Note that BAND_u and BAND_y inflation under loose priors is partly real (low SNR / sparse anchors) and partly noise absorbed via the 45 arcsec basis -- the super-tight fit separates these.
 
 ![HGP hierarchical decomposition](docs/figures/hgp_hierarchical_decomposition.png)
-*§4 — HGP hierarchical decomposition under loose priors. COMMON (5.4 mas) carries the WCS/concordance signal; GROUP_RUBIN (2.3 mas) and GROUP_NISP (1.7 mas) capture the instrument-level differential; BAND_u (5.6 mas) and BAND_y (3.6 mas) are inflated under loose priors. Super-tight priors compress the inflated tiers to ≤2 mas.*
+*§4 -- HGP hierarchical decomposition under loose priors. COMMON (5.4 mas) carries the WCS/concordance signal; GROUP_RUBIN (2.3 mas) and GROUP_NISP (1.7 mas) capture the instrument-level differential; BAND_u (5.6 mas) and BAND_y (3.6 mas) are inflated under loose priors. Super-tight priors compress the inflated tiers to ≤2 mas.*
 
-##### Test 9 — Three-way concordance on the tile grid (notebook 06/07 hand-off)
+##### Test 9 -- Three-way concordance on the tile grid (notebook 06/07 hand-off)
 
 The original 9-band × 4-column concordance comparison shows the role each solver plays per band: per-source raw anchors → PINN-fit-to-raw → per-source head-residual anchors → PINN-fit-to-head-residual.
 
@@ -1005,17 +1024,17 @@ The original 9-band × 4-column concordance comparison shows the role each solve
 
 **The head is the correction, the smooth field is QA.** After the head, the residual smooth field is **~1 mas** (PINN head_resid), the anchor-level improvement is **0.011–0.027 mas**, and applying the smooth field changes per-source medians by ≤0.2 mas on every band. The smooth field is a diagnostic and a fallback for sparse fields, not a production correction layer.
 
-**The raw smooth field is real at ~5σ per pixel and detected by three converging structured methods.** PINN, NN, and super-tight HGP agree on the raw smooth field amplitude within ~1.5 mas RMS and on the anchor-level improvement within 0.03 mas. Super-tight HGP gives a calibrated posterior std of **1.0–1.1 mas** median over a **~5 mas** field — a ~5σ per-pixel detection. The single-kernel GP from notebook 07 is *not* in this convergence list: it failed its own calibration (std(z) = 1.39, kernel hits 15 arcsec bound, RMS disagrees with PINN by ~5 mas). The bright-only raw signal/null of 0.5× shows that smooth-field detection rests on the structured priors, not on bright-only RMS.
+**The raw smooth field is real at ~5σ per pixel and detected by three converging structured methods.** PINN, NN, and super-tight HGP agree on the raw smooth field amplitude within ~1.5 mas RMS and on the anchor-level improvement within 0.03 mas. Super-tight HGP gives a calibrated posterior std of **1.0–1.1 mas** median over a **~5 mas** field -- a ~5σ per-pixel detection. The single-kernel GP from notebook 07 is *not* in this convergence list: it failed its own calibration (std(z) = 1.39, kernel hits 15 arcsec bound, RMS disagrees with PINN by ~5 mas). The bright-only raw signal/null of 0.5× shows that smooth-field detection rests on the structured priors, not on bright-only RMS.
 
-**HGP is a QA / model-selection layer, not a correction product.** HGP delivers per-pixel posterior uncertainty, spatial-holdout calibration, instrument/band attribution, and an overfitting check — none of which PINN provides. But HGP is prior-sensitive: the published loose-prior product (`concordance_hgp_head_resid_richer.fits`) fails its own holdout calibration (calibration factor 1.67, train ≪ holdout) and overshoots PINN by 4–5 mas in the worst bands. **Cross-validation requires super-tight priors** (length scales 300/900 arcsec, hierarchy 4/2/1 mas). Even at super-tight, ~1.5 mas of residual HGP–PINN disagreement is genuine prior difference (only ~0.3 mas is the basis-function lattice), so HGP and PINN should be reported as two complementary models, not a single agreed-upon field. HGP graduates to a correction product only if it beats the zero-field baseline on held-out post-head anchors — currently it does not.
+**HGP is a QA / model-selection layer, not a correction product.** HGP delivers per-pixel posterior uncertainty, spatial-holdout calibration, instrument/band attribution, and an overfitting check -- none of which PINN provides. But HGP is prior-sensitive: the published loose-prior product (`concordance_hgp_head_resid_richer.fits`) fails its own holdout calibration (calibration factor 1.67, train ≪ holdout) and overshoots PINN by 4–5 mas in the worst bands. **Cross-validation requires super-tight priors** (length scales 300/900 arcsec, hierarchy 4/2/1 mas). Even at super-tight, ~1.5 mas of residual HGP–PINN disagreement is genuine prior difference (only ~0.3 mas is the basis-function lattice), so HGP and PINN should be reported as two complementary models, not a single agreed-upon field. HGP graduates to a correction product only if it beats the zero-field baseline on held-out post-head anchors -- currently it does not.
 
 **The head also enables sparse-field WCS measurement.** The head-implied non-classical field (smoothed `raw − head_resid` on `SNR < 30` anchors only) reproduces the classical bright-only field within **~5 mas vector RMS** on disjoint anchor pools. In a field with too few bright stars to fit a classical concordance, the head's predictions on faint sources stand in. Density gain at 1 arcmin²: **8–41× more anchors** in the head-enabled pool than in the bright-only pool.
 
-**Detector and head credit must be reported separately.** The CenterNet anchor pool (491,748 source-band measurements) is a different, better-selected source pool than the classical pool (630,120 source-band measurements) — not a superset. CenterNet alone reduces the field RMS by ~0.9 mas; the head reduces it by another ~3–4 mas. Combined-pool field RMS goes from **5.72 mas (classical, raw)** to **1.00 mas (CenterNet, head_resid)**. Headline phrasing should always specify which anchor cache is used.
+**Detector and head credit must be reported separately.** The CenterNet anchor pool (491,748 source-band measurements) is a different, better-selected source pool than the classical pool (630,120 source-band measurements) -- not a superset. CenterNet alone reduces the field RMS by ~0.9 mas; the head reduces it by another ~3–4 mas. Combined-pool field RMS goes from **5.72 mas (classical, raw)** to **1.00 mas (CenterNet, head_resid)**. Headline phrasing should always specify which anchor cache is used.
 
 **Operational rules-of-thumb.**
 - Train and evaluate the head with **Gaussian-fit photon centroids**, never PSFField-refined centroids (the latter creates a 16 mas target/feature mismatch and a 29 mas plateau).
-- Use **`bottleneck_window=5`** even on v8 — the auto-scaling 11×11 default dilutes the signal.
+- Use **`bottleneck_window=5`** even on v8 -- the auto-scaling 11×11 default dilutes the signal.
 - Use **PINN/NN/control-grid** for the smooth-field diagnostic and **super-tight HGP** for the calibrated cross-check; do not use loose-prior HGP for cross-validation.
 - The **`SNR ≥ 30`** classical-anchor cut is calibrated to the King 1983 floor at 0.7 arcsec FWHM (~10 mas centroid precision). If a result depends strongly on it, rerun with `SNR ≥ 50` and `SNR ≥ 100`.
 
@@ -1027,7 +1046,7 @@ The original 9-band × 4-column concordance comparison shows the role each solve
 
 | File | Description |
 |------|-------------|
-| `matcher_v7.py` | V7-based patch matcher (frozen V7 BandStems + optional stream stages + trainable adapters, per-pixel RMS support) — historical concordance experiments. |
+| `matcher_v7.py` | V7-based patch matcher (frozen V7 BandStems + optional stream stages + trainable adapters, per-pixel RMS support) -- historical concordance experiments. |
 | `dataset.py` | Patch + RMS extraction, WCS matching, CenterNet detector integration, rotation/flip augmentation. |
 | `source_matching.py` | Classical peak-finding, WCS-based source matching, PSF-fit centroiding, SNR estimation. |
 | `field_solver.py` | Control-grid least-squares field solver. |
@@ -1126,6 +1145,8 @@ The chromatic and morphology diagnostics are kept in `docs/figures/` but not emb
 
 **Directory**: `models/psf/`
 
+PSF modelling and photometry form the bridge between representation learning and physically interpretable survey products. Detection and astrometry can be evaluated mostly through positions and residuals; photometry must additionally explain the observed pixel intensities under blending, noise, morphology, and PSF convolution. The current implementation therefore keeps several paths alive: a compact-source PSFField matched-filter baseline, a learned v8 photometry head, a scarlet-like residual-scene optimizer, and an experimental rendered-stamp head. These are not redundant implementations; they encode different assumptions about how much physics should remain explicit.
+
 The PSF is a fundamental survey property consumed by three downstream tasks (astrometry centroiding, forced photometry, eventually shape measurement). It lives in its own module rather than under `photometry/` because it is not a sub-concept of any one task.
 
 #### Why PSFs matter for this project
@@ -1142,22 +1163,22 @@ f(xy_sub, x_tile, y_tile, band, sed) → intensity
 
 - **Continuous** (SIREN-based, Sitzmann et al. 2020). The PSF is represented as an implicit function in arcsec coordinates, not a discretised stamp. Querying at sub-pixel offsets is exact rather than interpolated. This is what makes the next two items clean.
 - **Pixel integration**: when comparing to data, each data pixel is integrated by evaluating the PSF on a K×K sub-grid (K=4) inside the pixel footprint. Rubin pixels integrate 0.2"×0.2" boxes, Euclid 0.1"×0.1". Same PSFField handles both with physically correct sampling.
-- **Chromatic**: a per-source SED embedding (from the 10-band flux vector) conditions the SIREN. The PSF shape inside each band depends on the source's SED — a hot blue star has a slightly sharper r-band PSF than a cool red star in the *same* r filter, because the filter isn't monochromatic.
+- **Chromatic**: a per-source SED embedding (from the 10-band flux vector) conditions the SIREN. The PSF shape inside each band depends on the source's SED -- a hot blue star has a slightly sharper r-band PSF than a cool red star in the *same* r filter, because the filter isn't monochromatic.
 - **DCR term**: a small learnable 6×2 parameter block applies a colour-dependent centroid shift in Rubin bands only (space-based Euclid is immune). Captures residual differential chromatic refraction in stacked mosaics as a linear function of g−i colour.
 
 `render_stamps(...)` produces pixel-integrated PSF stamps in batch for N stars in one band.
 
 #### Training: jointly learn PSF *and* sub-pixel centroids
 
-The centroid-smearing bug in naive PSF fitting is: stars are extracted at integer-pixel detection peaks, so each stamp has a random ~0.5-pixel sub-pixel offset. Averaging chi² over many stars trains the model to reproduce a PSF *convolved with the centroid-error distribution* — broader than the real PSF.
+The centroid-smearing bug in naive PSF fitting is: stars are extracted at integer-pixel detection peaks, so each stamp has a random ~0.5-pixel sub-pixel offset. Averaging chi² over many stars trains the model to reproduce a PSF *convolved with the centroid-error distribution* -- broader than the real PSF.
 
-The fix is structural, not procedural: each star carries a **learnable sub-pixel centroid** as an `nn.Parameter`, optimised jointly with the SIREN via SGD. The converged centroids are by construction the sub-pixel refinement PSF-fitting gives you — astrometric labels fall out of PSF training for free.
+The fix is structural, not procedural: each star carries a **learnable sub-pixel centroid** as an `nn.Parameter`, optimised jointly with the SIREN via SGD. The converged centroids are by construction the sub-pixel refinement PSF-fitting gives you -- astrometric labels fall out of PSF training for free.
 
 Star selection (`models/psf/star_selection.py`):
 
-1. **VIS-based detection** (sharpest PSF, no seeing variation, cleanest stellar locus). Candidates come from either CenterNet v8 pseudo-labels or classical `_pseudo_labels_vis` — both include bright-core detection and diffraction-spike masking.
+1. **VIS-based detection** (sharpest PSF, no seeing variation, cleanest stellar locus). Candidates come from either CenterNet v8 pseudo-labels or classical `_pseudo_labels_vis` -- both include bright-core detection and diffraction-spike masking.
 2. **2D moment fit** on each candidate for FWHM and sub-pixel centroid.
-3. **Stellar locus cut**: keep `|FWHM − median| < 8% × median` — the locus is a pencil-thin stripe in VIS because the VIS PSF is so sharp.
+3. **Stellar locus cut**: keep `|FWHM − median| < 8% × median` -- the locus is a pencil-thin stripe in VIS because the VIS PSF is so sharp.
 4. **Isolation cut**: no neighbour within 3".
 5. **Per-band saturation cut**: reject stars whose peak pixel in any band falls in the top 5% for the tile.
 6. **Cross-match VIS → Rubin via WCS** and extract 10-band stamps at sub-pixel positions (`F.grid_sample`).
@@ -1168,7 +1189,7 @@ Robust training (`models/psf/train_psf_field.py`):
 - **Huber loss**: per-pixel contributions switch from quadratic to linear at 3σ. Outlier pixels (cosmic rays, saturated spikes, binary companions) still contribute but stop dominating the gradient.
 - **Percentile outlier rejection**: after epoch 12, reject the worst 10% of stars (ranked by median across-band χ²). Drops the irreducible bad detections (blends, binaries that survived isolation).
 - **SED refresh every 5 epochs**: re-estimate each star's 10-band SED from analytic optimal fluxes. Chromatic PSF conditioning improves as the PSF improves.
-- **Gradient sanitisation**: `nan_to_num_` per-parameter before gradient clipping. Without this, any single Inf in a gradient turns the global `clip_grad_norm_` into a divide-by-Inf that zeros every other param — poisoning the step with NaN.
+- **Gradient sanitisation**: `nan_to_num_` per-parameter before gradient clipping. Without this, any single Inf in a gradient turns the global `clip_grad_norm_` into a divide-by-Inf that zeros every other param -- poisoning the step with NaN.
 
 #### Results (v3 checkpoint)
 
@@ -1611,17 +1632,19 @@ These checkpoint names are historical references from earlier runs; most are not
 
 ## Current Status
 
+This section is intentionally redundant with earlier parts of the report. It is the quick operational summary: which checkpoints to use, which results are current, which components are diagnostic only, and which experiments are still open. When the project changes, this section should be updated first, and the longer method sections should then be revised to preserve the reasoning behind the change.
+
 **Foundation models**
-- **V8 (current production)**: `models/checkpoints/jaisp_v8_fine/checkpoint_best.pt` — fine-scale 0.4"/px fused, 256×256 random-crop training. All current downstream heads (CenterNet, latent position, PSFField, photometry) are trained against this checkpoint.
+- **V8 (current production)**: `models/checkpoints/jaisp_v8_fine/checkpoint_best.pt` -- fine-scale 0.4"/px fused, 256×256 random-crop training. All current downstream heads (CenterNet, latent position, PSFField, photometry) are trained against this checkpoint.
 - **V7 (prior production)**: `models/checkpoints/jaisp_v7_concat/checkpoint_best.pt` (epoch 92), RMS-aware loss, 790 tiles, correct NISP MER pixel scales. Retained as a comparison baseline; the v7 CenterNet and v7 latent-position checkpoints are still valid for ablations but are no longer the recommended starting point.
 
 **Detection**
-- **CenterNet v7**: `checkpoints/centernet_v7_rms_aware/` — 2-round self-training on v7 foundation, 200 tiles.
-- **CenterNet v8**: `checkpoints/centernet_v8_fine/centernet_round2.pt` — on v8 features, 200 tiles. Best checkpoint used for inference on all 790 tiles → `data/detection_labels/centernet_v8_r2_790.pt` (~188 detections/tile at conf=0.3).
+- **CenterNet v7**: `checkpoints/centernet_v7_rms_aware/` -- 2-round self-training on v7 foundation, 200 tiles.
+- **CenterNet v8**: `checkpoints/centernet_v8_fine/centernet_round2.pt` -- on v8 features, 200 tiles. Best checkpoint used for inference on all 790 tiles → `data/detection_labels/centernet_v8_r2_790.pt` (~188 detections/tile at conf=0.3).
 - Classical VIS detection remains a fast baseline.
 
 **PSF modelling**
-- **PSFField v3**: `models/checkpoints/psf_field_v3.pt` — continuous SIREN-based PSF for all 10 bands.
+- **PSFField v3**: `models/checkpoints/psf_field_v3.pt` -- continuous SIREN-based PSF for all 10 bands.
   - Architecture: SIREN 192×6, w0=15, per-band radial envelope (Rubin 1.7"/Euclid 0.85"), SED-conditioned chromatic PSF, DCR term for Rubin bands.
   - Training: 3312 stars across 429 tiles (of 790), joint PSF + sub-pixel centroid optimisation, robust chi² (Huber + variance floor), percentile outlier rejection, SED refresh.
   - Results: best loss=779, centroid drift median=14.6 mas, Euclid NIR chi²/ndof 0.28–0.61 (excellent), chromatic FWHM difference 6% in VIS (blue vs red, physically correct).
@@ -1629,7 +1652,7 @@ These checkpoint names are historical references from earlier runs; most are not
   - Diagnostics: `models/psf/validate_psf_field.py`, W&B panels (gallery, radial profiles, example stamps, centroid drift).
   - Notebook: `io/08_psf_visualization.ipynb`.
 
-**Astrometry — current v8 result (2026-04-17)**
+**Astrometry -- current v8 result (2026-04-17)**
 - Latent position head migrated to v8 foundation via `load_foundation()` auto-detection. Dual-GPU prefetch wired (`--dual-gpu`: encoder on GPU 0, head on GPU 1).
 - Current checkpoint: `models/checkpoints/latent_position_v8_no_psf/best.pt`.
 - Cross-instrument evaluation on 790 ECDFS tiles: raw medians of 41-62 mas for Rubin g/r/i/z/y and NISP Y/J/H are reduced to **9-15 mas** after the head; Rubin u is reduced from **119 mas** to **30.5 mas**. Improvement is **~74-79%** in the median radial residual.
