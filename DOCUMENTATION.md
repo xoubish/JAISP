@@ -34,7 +34,7 @@ A self-supervised multi-instrument foundation model for precision cosmology with
 | Detection | `checkpoints/centernet_v8_fine/centernet_round2.pt` | Fused-bottleneck CenterNet on v8 features; all-790-tile labels cached at `data/detection_labels/centernet_v8_r2_790.pt`. |
 | Astrometry | `models/checkpoints/latent_position_v8_no_psf/best.pt` | Current no-PSF latent position head. Gaussian-fit photon centroids are the present target convention. |
 | Smooth field QA | `models/astrometry2/fit_direct_pinn.py` | Fits raw or head-residual anchors from `anchors.npz` or `anchors_centernet.npz`; CenterNet post-head PINN fields are about 1 mas and do not improve anchor residuals. |
-| Concordance uncertainty / model check | `models/astrometry2/fit_hierarchical_gp_concordance.py` | Experimental hierarchical GP-style field with posterior std maps. Current CenterNet post-head HGP does not agree with PINN or beat the zero-field baseline, so it is QA/model-selection only, not a production correction. |
+| Concordance uncertainty / model check | `models/astrometry2/fit_hierarchical_gp_concordance.py` | Experimental hierarchical GP-style field with posterior std maps. Current CenterNet post-head HGP does not agree with PINN or beat the zero-field baseline, so it is QA/model-selection only, not a production correction. Default priors overfit per-tile noise on raw; for a fair PINN cross-check use `--length-scales 300,900 --prior-common-mas 4 --prior-group-mas 2 --prior-band-mas 1` (super-tight) — at this setting HGP and PINN converge on raw within ~2 mas RMS and 0.03 mas anchor-level improvement. |
 | PSF | `models/checkpoints/psf_field_v3.pt` | Continuous SIREN PSFField for all 10 bands, used for PSF diagnostics and photometry. |
 | Photometry | `models/checkpoints/photometry_foundation_200_fast/checkpoint_best.pt`; experiment: `models/checkpoints/rendered_stamp_v2_bigstamp/checkpoint_best.pt` | Current main learned v8 photometry head, plus PSFField matched-filter, scarlet-like residual-scene, and rendered-stamp experimental paths. |
 
@@ -660,7 +660,20 @@ Notebook 12 ([io/12_astrometry_hgp_vs_pinn.ipynb](io/12_astrometry_hgp_vs_pinn.i
 - After masking unsupported pixels (`nearest anchor <= 30"` and radial posterior std `<= 10 mas`), the HGP field is smaller but still does not agree component-wise with PINN. For the `i` band, HGP RMS falls from **7.0 mas** on the full grid to **2.64 mas** on supported pixels, while PINN is **0.85 mas** on the same support.
 - The anchor-level zero-field test is the key result: sampling both fields at the actual CenterNet head-residual anchors gives a source-count-weighted median improvement of only **0.01 mas** for HGP and **0.027 mas** for PINN relative to applying no smooth field at all.
 
-Conclusion: **after the latent head, no robust smooth residual field is detected above the current noise/model floor**. The per-object head is the astrometric correction. Smooth post-head fields are QA diagnostics unless they beat the zero-field baseline on held-out anchors and agree across solvers. HGP must be treated as an uncertainty/model-selection experiment, not as a production correction product, until that criterion is met.
+**Raw-anchor sanity check (notebook 12 Section 6).** The same anchor-level test repeated on raw offsets (i.e. before the head subtracts anything) gives a weighted median improvement of **0.69 mas** for HGP and **0.49 mas** for PINN — about **25–70× larger** than the head-residual values above, on the same anchors and with the same solvers. This is direct evidence (not just a coincidence) that the head absorbed a real ~5 mas coherent component: the smooth-field correction is large where it should be (raw) and vanishingly small where the head has already done the work (head-residual). Field-level numbers tell the same story: PINN raw RMS is **4.6–5.0 mas** for Rubin g/r/i/z, **6.8–7.4 mas** for NISP. HGP raw RMS with default priors comes in higher — **6.5–9.2 mas** Rubin / **8.8–9.2 mas** NISP — and `|HGP - PINN|` on raw is comparable to the PINN signal itself, with visible per-tile criss-cross structure in the HGP map that PINN's curl-free / Laplacian / band-consistency priors correctly suppress.
+
+**HGP is prior-sensitive but recoverable (notebook 12 Sections 7 and 7b).** Refitting HGP on raw with progressively tighter priors gives a clean prior-sensitivity ladder:
+
+| Configuration | length-scales (arcsec) | priors common/group/band (mas) | g-band HGP RMS | `\|HGP-PINN\|` g | weighted Δ |
+|---|---|---|---|---|---|
+| Loose (default) | 45, 120, 300, 900 | 25 / 12 / 6 | 7.0 mas | 5.9 mas | 0.69 mas |
+| Tight | 120, 300, 900 | 8 / 6 / 4 | 5.4 mas | 3.9 mas | 0.60 mas |
+| Super-tight | 300, 900 | 4 / 2 / 1 | 4.1 mas | 2.1 mas | 0.51 mas |
+| PINN reference | (curl-free + Laplacian) | n/a | 4.6 mas | 0 mas | 0.49 mas |
+
+At super-tight settings HGP raw RMS lands within **1.6–2.3 mas of PINN** for Rubin g/r/i/z and NISP Y/J/H; the anchor-level weighted median improvement converges to **0.51 mas** versus PINN's **0.49 mas** (a 0.03 mas gap). The criss-cross per-tile structure visible in the loose-prior maps disappears once short basis scales (45 and 120 arcsec) are removed. So HGP *can* serve as a like-for-like cross-validator on the smooth field — but only at degree-scale priors that match PINN's effective resolution. The default config in the script is too loose for this geometry; production cross-checks should use the super-tight settings or rely on PINN/NN/sklearn-GP. u-band remains the hardest (low SNR, sparse anchors, `|HGP-PINN|` ~5 mas at all settings); y-band is borderline (|HGP-PINN|` ~3.5 mas).
+
+Conclusion: **after the latent head, no robust smooth residual field is detected above the current noise/model floor**. The per-object head is the astrometric correction. Smooth post-head fields are QA diagnostics unless they beat the zero-field baseline on held-out anchors and agree across solvers. HGP must be treated as an uncertainty/model-selection experiment, not as a production correction product, until that criterion is met. The trustworthy raw-anchor cross-validators for the smooth field remain PINN, NN, and the sklearn GP cross-check from notebook 07, all of which carry explicit smoothness/physics priors that prevent per-tile noise from being mistaken for coherent structure.
 
 #### Sparse-field implication: the head as an anchor amplifier
 
@@ -758,6 +771,13 @@ Why add HGP when PINN already exists? The PINN is a strong smooth-field diagnost
 - Use **PINN/NN/control-grid** to diagnose whether a smooth field is present and whether the head has removed it.
 - Use **notebook GP cross-checks** to verify that the PINN field is not a regularizer artifact on selected slices.
 - Use **HGP** as a conservative uncertainty/model-selection check. Do not apply an HGP post-head correction unless it (a) improves held-out anchor residuals relative to the zero-field baseline, (b) agrees with PINN/GP on supported regions, and (c) masks weak-support extrapolation using nearest-anchor distance and posterior std.
+
+**HGP prior sensitivity (do not run with default loose priors).** Notebook 12 Sections 7 and 7b found that the default `--length-scales 45,120,300,900` with `--prior-common-mas 25 / --prior-group-mas 12 / --prior-band-mas 6` overfits per-tile noise into a structured criss-cross field on raw anchors, with `|HGP - PINN|` RMS comparable to the PINN signal itself. The fix is to remove short basis scales and tighten the hierarchy:
+
+- **Tight**: `--length-scales 120,300,900 --prior-common-mas 8 --prior-group-mas 6 --prior-band-mas 4`. Reduces RMS by ~25-30% and `|HGP-PINN|` by ~30-40% but residual disagreement remains.
+- **Super-tight (recommended for cross-validation)**: `--length-scales 300,900 --prior-common-mas 4 --prior-group-mas 2 --prior-band-mas 1`. Brings HGP raw RMS to within ~1.6-2.3 mas of PINN for Rubin g/r/i/z and NISP Y/J/H; anchor-level improvements converge to 0.51 mas (HGP) vs 0.49 mas (PINN), a 0.03 mas gap.
+
+At super-tight settings HGP behaves as a like-for-like cross-validator on the smooth field. Use it alongside PINN/NN/sklearn-GP. Reserve loose-prior HGP for its hierarchical decomposition (common / instrument-group / band-specific amplitudes) and posterior uncertainty diagnostics, not as a smooth-field measurement.
 
 #### Files
 
@@ -865,7 +885,11 @@ The astrometry evidence chain is split across notebooks 06 and 07 plus the saved
 
 9. **HGP currently fails the post-head correction test.** Notebook 12 compares HGP against PINN on the same CenterNet head-residual anchors. HGP produces a several-mas supported field while PINN stays near ~1 mas, and the vector components do not agree. At the actual anchors, subtracting HGP improves the weighted median residual by only **0.01 mas**; subtracting PINN improves it by only **0.027 mas**. The zero-field baseline is effectively tied with both solvers, so the post-head smooth field is consistent with zero at the current noise/model floor.
 
-10. **HGP is a QA/model-selection layer, not a correction product yet.** The head solves the per-object centering problem. HGP only models the remaining smooth residual field, and its `COVERAGE` map is nearest-anchor distance in arcsec, so high-std/high-field edge extrapolation must be masked. HGP should only graduate to a correction product if it beats zero on held-out anchors and agrees with PINN/GP on supported regions.
+10. **The same anchor-level test on raw offsets shows the head ate a real field.** Notebook 12 Section 6 reruns the test on raw anchors: weighted median improvement is **0.69 mas (HGP)** and **0.49 mas (PINN)**, i.e. **25-70x larger** than the head-residual values. The smooth-field correction is large where it should be (raw) and vanishingly small where the head has already done the work (head-residual). This is the cleanest single-number evidence that the head absorbed the coherent ~5 mas concordance component rather than there simply being no field to find.
+
+11. **HGP prior sensitivity is real but tunable.** Notebook 12 Sections 7 and 7b show a clean ladder: default loose priors (45/120/300/900 arcsec, 25/12/6 mas hierarchy) overfit per-tile noise into structured criss-cross patterns that PINN suppresses. Tightening to 120/300/900 arcsec with 8/6/4 mas priors closes ~half the gap. **Super-tight priors** (300/900 arcsec only, 4/2/1 mas hierarchy) close the rest: HGP raw RMS lands within **1.6-2.3 mas of PINN** on Rubin g/r/i/z and NISP Y/J/H, and the anchor-level weighted median improvement converges to **0.51 mas (HGP) vs 0.49 mas (PINN)**. So HGP is recoverable as a like-for-like cross-validator at degree-scale priors. Default priors should not be used for cross-checking PINN.
+
+12. **HGP is a QA/model-selection layer, not a correction product yet.** The head solves the per-object centering problem. HGP only models the remaining smooth residual field, and its `COVERAGE` map is nearest-anchor distance in arcsec, so high-std/high-field edge extrapolation must be masked. HGP should only graduate to a correction product if it beats zero on held-out anchors and agrees with PINN/GP on supported regions. The trustworthy raw-anchor cross-validators are PINN, NN, and the sklearn GP from notebook 07.
 
 #### End-to-end v8 pipeline (ready to invoke)
 
