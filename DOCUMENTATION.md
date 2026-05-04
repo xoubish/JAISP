@@ -677,9 +677,60 @@ At super-tight settings HGP raw RMS lands within **1.6–2.3 mas of PINN** for R
 
 **Why super-tight is genuinely better, not just more PINN-like.** The tightening is justified by HGP's own internal metrics, independent of PINN agreement: (a) the holdout residual at super-tight matches the train residual (no overfitting), where loose-prior runs had train ≪ holdout; (b) the calibrated posterior std at super-tight is much smaller (~1.1 mas median for Rubin g/r/i/z vs 3+ mas at loose) — HGP says "I am actually confident about the smooth field at degree scale; I was uncertain about the small-scale wiggles in the loose fit because they were noise-driven"; (c) the hierarchical decomposition becomes physically interpretable at super-tight (COMMON ≈ 4 mas matches the WCS/concordance signal, GROUP ≈ 2 mas matches expected Rubin-vs-NISP differences, BAND ≤ 1 mas matches expected chromatic effects), where the loose run had COMMON dominated by per-tile noise absorbed via the 45 arcsec basis. Smoothing the loose fit at the visualization stage cannot recover any of these — it only fixes the appearance, not the uncertainties or the decomposition.
 
-**Field reality at super-tight (calibrated 5σ per pixel).** HGP's spatial-holdout test passes: holdout median residual matches train, z-score std is ~1 after a 1.41 calibration factor. With calibrated posterior std ~1.1 mas median (Rubin g/r/i/z) or ~1.0 mas (NISP) and a smooth-field amplitude of ~5 mas, this is a ~5σ detection of the raw smooth field at the per-pixel level. The classical detection chain — bright/raw real RMS well above shuffled-null floor (notebook 07 Part 4b), four independent methods (PINN, NN, sklearn GP, super-tight HGP) converging within ~1.5 mas method-spread, anchor-level subtraction improving raw residuals by 0.5 mas — all line up with HGP's own Bayesian uncertainty quantification.
+**Loose-prior holdout calibration (the published HGP product, `concordance_hgp_head_resid_richer.fits`).** The sidecar JSON for the on-disk loose run (length scales 45/120/300/900 arcsec, priors 25/12/6 mas) reports `train_resid_med = 7.69 mas` versus `holdout_resid_med = 10.85 mas`, a ~40% train→holdout gap, with hold-out z-score std `(1.65, 1.68)` for `(dRA, dDec)` and a calibration factor of **1.67**. The full-grid HGP raw RMS per band is `u 8.85, g 7.63, r 7.26, i 7.55, z 7.17, y 8.56, NISP Y 5.76, J 5.43, H 5.31` mas with median posterior std `u 5.84, g 1.39, r 1.21, i 1.26, z 1.55, y 2.79, Y 1.01, J 0.98, H 0.99` mas. This is the quantitative form of the "loose: train ≪ holdout" warning — the loose-prior posteriors are not self-consistent on a held-out spatial fold, so they cannot be used as published. The super-tight refit closes this gap (train ≈ holdout, calibration factor ≈ 1).
 
-Conclusion: **after the latent head, no robust smooth residual field is detected above the current noise/model floor**. The per-object head is the astrometric correction. Smooth post-head fields are QA diagnostics unless they beat the zero-field baseline on held-out anchors and agree across solvers. HGP must be treated as an uncertainty/model-selection experiment, not as a production correction product, until that criterion is met. The trustworthy raw-anchor cross-validators for the smooth field remain PINN, NN, and the sklearn GP cross-check from notebook 07, all of which carry explicit smoothness/physics priors that prevent per-tile noise from being mistaken for coherent structure.
+**Field reality at super-tight (calibrated ~5σ per pixel).** HGP's spatial-holdout test passes at super-tight priors: holdout median residual matches train, z-score std is ~1 after a 1.41 calibration factor. With calibrated posterior std ~1.1 mas median (Rubin g/r/i/z) or ~1.0 mas (NISP) and a smooth-field amplitude of ~5 mas, this is a ~5σ detection of the raw smooth field at the per-pixel level. Three converging Bayesian + physics-informed lines of evidence: (a) PINN curl-free + Laplacian + band-consistency fit, (b) NN smoothness fit, (c) super-tight HGP — agree on the field amplitude within ~1.5 mas RMS and on the anchor-level improvement within 0.03 mas. The single-kernel sklearn GP from notebook 07 Part 4c does **not** belong in this convergence list: on the i-band classical SNR≥30 slice it returned 15.5 mas RMS vs PINN's 10.3 mas with std(z) = 1.39 and the kernel hitting its 15 arcsec length-scale bound, so it is a model-mismatch warning, not a cross-validator. Notebook 07 Part 4b also shows that the classical SNR≥30 raw signal/null ratio is **0.5×** — bright-only field RMS is *not* statistically well above the shuffled-null floor — so the smooth-field detection rests on the structured PINN+HGP solvers, not on a single-kernel raw RMS.
+
+![HGP prior sensitivity](docs/figures/hgp_prior_sensitivity.png)
+*Notebook 12 Sections 6, 7, 7b — HGP raw smooth-field RMS per band at three prior settings, against the PINN reference. Loose priors (45/120/300/900 arcsec, 25/12/6 mas) overshoot PINN by 4–5 mas in the worst bands. Super-tight priors (300/900 arcsec, 4/2/1 mas) close the gap to ≤2.3 mas for Rubin g/r/i/z and ≤2.1 mas for NISP Y/J/H, while u-band and y-band remain harder (5.1 mas and 3.5 mas residual gap respectively).*
+
+**HGP head_resid per-band cross-check (NB12 §2):** on the same supported pixels (86–93% of the grid mask), the head-residual fields show:
+
+| Band | Support frac | HGP RMS (mas) | PINN head_resid RMS (mas) | `|HGP−PINN|` (mas) | PINN raw RMS (mas) |
+|---|---:|---:|---:|---:|---:|
+| u | 0.862 | 6.17 | 1.18 | 6.18 | 5.80 |
+| g | 0.925 | 3.01 | 0.79 | 2.86 | 4.62 |
+| r | 0.925 | 2.63 | 0.83 | 2.47 | 4.61 |
+| i | 0.925 | 2.64 | 0.85 | 2.46 | 5.02 |
+| z | 0.924 | 3.07 | 0.98 | 2.82 | 4.64 |
+| y | 0.919 | 5.43 | 1.41 | 5.05 | 4.27 |
+| NISP Y | 0.926 | 1.75 | 0.85 | 1.52 | 7.13 |
+| NISP J | 0.926 | 1.70 | 0.89 | 1.46 | 7.40 |
+| NISP H | 0.926 | 1.69 | 0.81 | 1.48 | 6.86 |
+
+Read this as: PINN head_resid is consistently ~0.8–1.4 mas (essentially zero residual smooth field), HGP head_resid is several mas in some bands (residual prior ringing rather than residual signal), and `|HGP−PINN|` is comparable to the HGP RMS in non-NISP bands — i.e., on a residual where there is nothing to fit, the two methods can disagree at the few-mas level just from prior mismatch. NISP bands behave best (smoother field, larger anchor count, lower disagreement).
+
+**Anchor-level convergence ladder (NB12 §6, raw anchors, source-weighted median improvement):**
+
+| Solver | weighted median Δ (mas) | gap vs PINN (mas) |
+|---|---:|---:|
+| HGP loose (default) | 0.6935 | +0.208 |
+| HGP tight | 0.6011 | +0.116 |
+| HGP super-tight | 0.5147 | +0.030 |
+| PINN reference | 0.4851 | 0 |
+
+The published loose-prior product (`concordance_hgp_head_resid_richer.fits`) sits 0.21 mas above PINN at the anchor level on raw; super-tight closes that to 0.03 mas. After the head, the same comparison gives HGP 0.011 mas vs PINN 0.027 mas — the head has consumed the smooth signal and both solvers reduce to noise-floor improvements.
+
+![HGP hierarchical decomposition](docs/figures/hgp_hierarchical_decomposition.png)
+*Notebook 12 Section 4 — HGP hierarchical decomposition under loose priors (the on-disk product). COMMON (5.4 mas) carries most of the WCS/concordance signal. GROUP_RUBIN (2.3 mas) and GROUP_NISP (1.7 mas) capture the instrument-level differential. BAND_u (5.6 mas) and BAND_y (3.6 mas) are inflated under loose priors — both are low-SNR / sparse-anchor bands, so the basis absorbs noise into the per-band tier. Super-tight priors compress these inflated band tiers to ≤2 mas while leaving COMMON nearly unchanged.*
+
+**Lattice-smoothing experiment (NB12 §8).** Gaussian-smoothing the super-tight HGP at 75 arcsec (≈1/4 the 300 arcsec basis spacing) gives small but measurable improvements in `|HGP−PINN|`:
+
+| Band | super-tight HGP–PINN (mas) | smoothed HGP–PINN (mas) | Δ (mas) |
+|---|---:|---:|---:|
+| u | 5.07 | 4.98 | 0.09 |
+| g | 2.12 | 1.94 | 0.18 |
+| r | 1.83 | 1.65 | 0.18 |
+| i | 2.09 | 1.89 | 0.20 |
+| z | 2.28 | 2.09 | 0.19 |
+| y | 3.54 | 3.44 | 0.10 |
+| NISP Y | 1.67 | 1.51 | 0.16 |
+| NISP J | 1.61 | 1.43 | 0.18 |
+| NISP H | 2.07 | 1.79 | 0.28 |
+
+The lattice ringing accounts for ~0.1–0.3 mas of the residual disagreement; the remaining 1.4–3.4 mas is genuine prior difference between HGP's hierarchical-Gaussian basis and PINN's curl-free + Laplacian + band-consistency physics.
+
+Conclusion: **after the latent head, no robust smooth residual field is detected above the current noise/model floor**. The per-object head is the astrometric correction. Smooth post-head fields are QA diagnostics unless they beat the zero-field baseline on held-out anchors and agree across solvers. HGP must be treated as an uncertainty/model-selection experiment, not as a production correction product, until that criterion is met. The trustworthy raw-anchor cross-validators for the smooth field are **PINN, NN, and super-tight HGP** — all of which carry explicit smoothness/physics priors that prevent per-tile noise from being mistaken for coherent structure. The single-kernel sklearn GP from notebook 07 Part 4c is *not* a usable cross-validator on this geometry; the multi-scale hierarchical HGP is its proper replacement.
 
 #### Sparse-field implication: the head as an anchor amplifier
 
@@ -688,7 +739,7 @@ A classical bright-only PINN concordance fit needs many high-SNR sources per res
 - **Part 3b — Anchor leverage and per-source precision.** Anchors are binned on a 1 arcmin × 1 arcmin grid (the same 60" scale used by the existing concordance field maps; the natural correlation-length scale for a smooth WCS distortion). Per band we report the median anchor density per cell at the classical (SNR≥30) and head-enabled (all SNR) thresholds, the cell-coverage curve, and the per-source MADxy improvement (head vs raw). The arcmin² density is the right metric for the field fit because the smooth-field uncertainty scales as `σ_field ∝ σ_anchor / √(anchors per resolution element)`, not per tile.
 - **Part 4 — SNR-stratified PINN refits.** Stratifies the 9-band anchor pool into per-band SNR terciles and refits the PINN jointly across bands on each slice, on raw and head-residual anchors. Establishes the headline RMS per slice/kind.
 - **Part 4b — Bootstrap and shuffled-null tests.** Bootstrap resamples each slice three times to put a 1σ_boot bar on the field RMS; permutes anchor positions while keeping offsets to measure the noise floor — the field RMS the PINN extracts when there is no spatial coherence by construction. Real RMS / null RMS is the cleanest single-number significance.
-- **Part 4c — Gaussian Process cross-check.** Independent measurement of the smooth field on the bright/raw slice with a sklearn GP (RBF + white kernel, calibrated posterior). Three checks: GP RMS vs PINN RMS (method-independence), GP − PINN difference map (regulariser-vs-kernel cross-check), and a hold-out z-score histogram (calibration). The GP also reports its data-preferred length scale, a self-consistency check on the arcmin² resolution element.
+- **Part 4c — Gaussian Process cross-check.** Independent measurement of the smooth field on the bright/raw slice with a sklearn GP (RBF + white kernel, calibrated posterior). Three checks: GP RMS vs PINN RMS (method-independence), GP − PINN difference map (regulariser-vs-kernel cross-check), and a hold-out z-score histogram (calibration). The GP also reports its data-preferred length scale, a self-consistency check on the arcmin² resolution element. **The actual run flags the GP as a poor cross-validator on this slice** (i band, classical SNR≥30, 1,200 anchors): the kernel hits its lower length-scale bound at 15 arcsec and three sklearn `ConvergenceWarning`s fire on the constant amplitude and noise level. Numerically the GP returns a field RMS of **15.53 mas** versus PINN's **10.29 mas**, a vector-difference RMS of **15.57 mas** (dRA 10.43, dDec 11.56), and a hold-out z-score std of **1.39** (target 1.0). The GP is therefore under-calibrated and disagrees with PINN at the ~5 mas level on this slice; this is a model-mismatch warning rather than a confirmation, and motivates the HGP Bayesian cross-check in notebook 12.
 - **Part 5 — Sparse-field recovery.** Side-by-side maps of bright-only, faint-only, all-anchors, and head-implied fields, plus the field-amplitude vs anchor-count summary.
 
 Headline takeaways on ECDFS:
@@ -697,7 +748,7 @@ Headline takeaways on ECDFS:
 - **faint / raw** PINN is noise-dominated and overshoots the bright-only reference, exactly the failure mode of a bright-only workflow on a sparse field; the bootstrap σ is large and signal/null ratio is small.
 - **all head_resid slices** sit near ~1 mas, hugging their shuffled-null floor — the head has already removed the coherent component, so there is genuinely nothing left for the PINN to fit.
 - **Head-implied field** (the smoothed `raw - head_resid` PINN fit on all anchors) tracks the bright-only raw fit within a few mas, so the head's per-source predictions act as a dense sampling of the smooth concordance field.
-- **GP cross-check** (Part 4c) returns a field RMS within a couple of mas of the PINN on the same anchors, with std(z) ≈ 1 on the held-out calibration set — independent confirmation that the smooth field amplitude is method-independent and the PINN regulariser is not introducing artefacts.
+- **GP cross-check** (Part 4c) is a *negative* result on this slice: the sklearn RBF+white GP fits a length scale at the 15 arcsec lower bound (kernel converges to its bound, not to a data-preferred scale), returns **15.5 mas** RMS versus PINN's **10.3 mas**, and the hold-out z-score std lands at **1.39** instead of ~1. The GP is under-calibrated and method-disagrees with PINN by ~5 mas. This rules out the "drop-in GP cross-check" reading and is one of the reasons notebook 12 brings in a properly hierarchical / multi-scale GP (HGP) for the Bayesian cross-validation.
 
 The takeaway: in a sparse field where bright anchors are too few to constrain the smooth WCS field directly, the head can stand in — it converts plentiful faint sources into effective anchors, and its averaged predictions are a usable proxy for the classical concordance measurement. This generalises the head's role from "per-object correction for forced photometry" to "concordance-grade WCS measurement in fields without enough bright stars."
 
@@ -707,7 +758,70 @@ The takeaway: in a sparse field where bright anchors are too few to constrain th
 ![Field amplitude with bootstrap error bars vs shuffled-null floor](docs/figures/snr_field_amp_with_null.png)
 *Trust diagnostics (Part 4b). Bootstrap field RMS with 1σ_boot error bars (filled markers) vs shuffled-null floor (×) per SNR slice. Squares = head-residual fits, circles = raw-anchor fits. A real smooth-field measurement sits well above its corresponding null cross with a small fractional bootstrap σ. The head_resid slices are expected to land near zero and near their null floor — the head has already absorbed the coherent component, so the PINN has nothing left to fit.*
 
-The remaining supporting figures from notebook 07 are saved by the notebook to `io/` and synced into `docs/figures/`: `per_source_precision.png` (Part 3b precision floor + SNR scaling) and `gp_vs_pinn_field.png` (Part 4c GP vs PINN map and calibration). The headline before/after bar chart and 9×4 spatial grid (`astrometry_before_after.png`, `concordance_3way.png`) are referenced earlier in this section.
+![Per-source precision vs SNR](docs/figures/per_source_precision.png)
+*Per-source precision floor (Part 3b). Left: median MADxy per band, raw vs head, illustrating per-source improvement factors of **3.8–5.3×** (Rubin u 5.3×, g 5.0×, r 4.5×, i 4.0×, z 3.8×, y 4.0×, NISP Y/J/H 4.6–4.7×). Right: median MADxy versus SNR for raw anchors with the King 1983 floor `FWHM/(2.35·SNR)` overlaid. The head reaches a flat ~8 mas regime that is well below the SNR-dependent classical floor for all but the brightest anchors.*
+
+![Headline before/after per-band](docs/figures/astrometry_before_after.png)
+*Notebook 07 Part 1 headline before/after bar chart (CenterNet anchor cache, 491,748 source-band measurements). Per-band raw / Raw+PINN / Head / Head+PINN medians; the head reduces the radial median by 76–80% for Rubin g/r/i/z and NISP Y/J/H. After the head the residual PINN field changes medians by ≤0.2 mas on every band.*
+
+![Anchor source comparison](docs/figures/anchor_source_comparison.png)
+*Notebook 07 Part 1b — classical vs CenterNet anchor pool, with raw and head columns separated. The combined "classical raw → CenterNet head" pipeline gain is **80.8% (all SNR)** and **35.4% (SNR ≥ 30)**. The decomposition shows that detector choice and head correction contribute different, additive improvements; both must be reported separately.*
+
+![Detector-source concordance comparison](docs/figures/anchor_source_concordance_comparison.png)
+*Notebook 07 Part 4a — field-RMS panel for the 2×2 of (classical / CenterNet) × (raw / head_resid). Combined-pool field RMS goes from **5.72 mas (classical, raw)** to **1.00 mas (CenterNet, head_resid)**, with the CenterNet pool consistently giving a cleaner head-residual smooth field. The detector and head contributions to the smooth-field amplitude are separable: choosing CenterNet anchors knocks ~0.9 mas off the raw field, the head knocks ~3-4 mas off on top.*
+
+![Sparse-field recovery: head-implied vs classical](docs/figures/head_implied_vs_classical_field.png)
+*Notebook 07 Part 5 source-disjoint sparse-field test. The head-implied non-classical field (`raw - head_resid` smoothed via PINN, only on `SNR < 30` anchors, 457,238 sources) is plotted against the classical bright-only field (`SNR ≥ 30` anchors). The head-implied field RMS is **2.4 mas**; vector RMS versus the classical field is **4.79 mas** with median vector disagreement **4.20 mas**. This is the strongest test that head-implied fields can stand in for the classical concordance measurement when bright stars are too sparse — the comparison uses *disjoint* anchors, eliminating the trivial "head_pred resembles raw because it is defined from raw" critique.*
+
+![GP vs PINN, i band classical SNR≥30](docs/figures/gp_vs_pinn_field.png)
+*Notebook 07 Part 4c — single-kernel GP vs PINN cross-check. Maps of the GP field, the PINN field, the GP–PINN difference, and the hold-out z-score histogram. The GP kernel hits its 15 arcsec lower length-scale bound, the GP RMS is **15.5 mas** versus PINN's **10.3 mas** (vector-difference RMS 15.6 mas), and the hold-out z-score std is **1.39** instead of ~1. Read this as a model-mismatch warning, not as a confirmation. Notebook 12's hierarchical multi-scale HGP is the proper Bayesian cross-validator and lands on PINN within 1.6–2.3 mas RMS at super-tight priors.*
+
+#### Quantitative summary tables (notebook 07)
+
+These collect the exact per-band numbers behind the figures above, so the doc and the notebook tell the same story.
+
+**Anchor leverage per arcmin² (Part 3b):**
+
+| Band | bright (SNR≥30) | head-enabled | density gain | per-source MADxy gain (raw → head) |
+|---|---:|---:|---:|---:|
+| rubin_u | 0 | 16 | ∞ | 5.3× |
+| rubin_g | 5 | 80 | 16× | 5.0× |
+| rubin_r | 8 | 95 | 11.9× | 4.5× |
+| rubin_i | 10 | 82 | 8.2× | 4.0× |
+| rubin_z | 7.5 | 57 | 7.6× | 3.8× |
+| rubin_y | 2 | 23 | 11.5× | 4.0× |
+| nisp_Y | 4 | 148 | 37× | 4.7× |
+| nisp_J | 4 | 164 | 41× | 4.6× |
+| nisp_H | 5 | 158 | 31.6× | 4.6× |
+
+For i band specifically, the faint:bright anchor ratio is **3.7×** (faint < 10: 23,964; mid: 18,502; bright ≥ 30: 6,526). This is the leverage that lets the head act as an "anchor amplifier" — turning faint sources into useful field constraints.
+
+**SNR-stratified PINN field RMS (Part 4, CenterNet anchor cache):**
+
+| Slice | kind | N | raw med (mas) | resid med (mas) | field RMS (mas) | field p95 (mas) |
+|---|---|---:|---:|---:|---:|---:|
+| all | raw | 491,748 | 39.8 | 39.3 | 1.6 | 2.3 |
+| classical SNR≥30 | raw | 34,510 | 11.6 | 11.0 | **3.8** | 7.2 |
+| top tercile (highest SNR) | raw | 163,903 | 22.4 | 21.3 | 8.4 | 14.7 |
+| middle tercile | raw | 163,943 | 42.2 | 41.8 | 2.8 | 3.8 |
+| bottom tercile (lowest SNR) | raw | 163,902 | 59.8 | 59.5 | 10.4 | 11.9 |
+| all | head_resid | 491,748 | 8.5 | 8.7 | **2.0** | 2.1 |
+| classical SNR≥30 | head_resid | 34,510 | 7.7 | 8.2 | 1.9 | 2.2 |
+| top tercile | head_resid | 163,903 | 7.6 | 7.9 | 1.2 | 1.6 |
+| middle tercile | head_resid | 163,943 | 8.8 | 9.2 | 3.4 | 3.8 |
+| bottom tercile | head_resid | 163,902 | 9.3 | 9.6 | 2.8 | 3.8 |
+
+**Bootstrap signal/null ratios (Part 4b):**
+
+| Slice | raw signal/null | head_resid signal/null |
+|---|---:|---:|
+| all | 0.7× | 0.8× |
+| classical SNR≥30 | 0.5× | 1.4× |
+| top tercile | 1.4× | 1.8× |
+| middle tercile | 1.4× | 1.7× |
+| bottom tercile | 0.6× | 1.2× |
+
+A real smooth-field measurement should sit well above the shuffled-null floor (signal/null ≫ 1) with a small fractional bootstrap σ. The all-anchor and bottom-tercile slices are noise-dominated; the classical SNR≥30 head_resid slice gives the cleanest residual field. **The classical-SNR≥30 raw signal/null of 0.5× indicates that even the bright-only field amplitude is not statistically distinguishable from noise on this anchor pool**, which is consistent with the doc's headline that the residual smooth field is at the few-mas / measurement-floor level.
 
 #### Pipeline
 
@@ -890,7 +1004,7 @@ The astrometry evidence chain is split across notebooks 06 and 07 plus the saved
 
 5. **`Head`, `Head+PINN`, and `|Fhead|` answer different questions.** `Head` is the per-object median `|head_resid|`. `|Fhead|` is the median amplitude of the smooth field fitted to those head residuals. `Head+PINN` is the per-object median after subtracting that fitted field: `|head_resid - Fhead(ra, dec)|`. Thus `|Fhead|` measures coherent leftover structure under the chosen field model, while `Head+PINN` measures final per-source scatter.
 
-6. **Smooth-field quantities are model-dependent.** PINN and GP estimates assume some form of smoothness/continuity. The PINN adds curl-free, Laplacian and band-consistency priors; the notebook GP cross-check uses a band-matched RBF+white-noise kernel on a subsampled classical/raw slice. Agreement between PINN and GP supports the presence of a real smooth field, but neither is independent data.
+6. **Smooth-field quantities are model-dependent.** PINN, single-kernel GP, and HGP all assume some form of smoothness/continuity. The PINN adds curl-free, Laplacian and band-consistency priors; the notebook 07 GP cross-check uses a single-kernel RBF+white-noise on the i-band classical/raw slice and **fails to give a usable cross-check** (kernel hits its 15 arcsec length-scale bound, std(z) = 1.39, GP–PINN vector RMS ≈ 15.6 mas). The hierarchical multi-scale HGP in notebook 12 is the model-comparison-grade cross-check: at super-tight priors it agrees with PINN at the per-pixel level for Rubin g/r/i/z and NISP Y/J/H within ~1.6–2.3 mas RMS and at the anchor level within 0.03 mas. None of these solvers is independent data — they share the same anchors with different smoothness models.
 
 7. **Notebook 07 now separates detector and head credit.** It adds a classical-vs-CenterNet anchor-source comparison and a field-level detector-source concordance comparison. The honest phrasing is: "with CenterNet-selected anchors, the latent-position head reduces the residual to X", not "the head alone turns a classical catalogue into X."
 
