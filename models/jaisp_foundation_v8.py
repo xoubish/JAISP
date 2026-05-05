@@ -123,6 +123,12 @@ class JAISPMixedEncoderV8(nn.Module):
 
     Identical to V7's encoder except ``stream_branch_depths`` is passed
     as a parameter rather than read from a module-level constant.
+
+    The ``rubin_concat`` flag (default ``False``, matching v8 production)
+    selects how Rubin BandStem outputs are combined.  Setting it to
+    ``True`` switches Rubin to concat+project fusion (matching the Euclid
+    stream) — used by v9 to remove the gradient-attenuation asymmetry
+    between Rubin and Euclid that notebook 13 diagnosed.
     """
 
     def __init__(
@@ -135,12 +141,14 @@ class JAISPMixedEncoderV8(nn.Module):
         transformer_heads: int = 8,
         fused_pixel_scale_arcsec: float = 0.4,
         stream_branch_depths: Optional[Dict[str, int]] = None,
+        rubin_concat: bool = False,
     ):
         super().__init__()
         self.band_names = list(band_names)
         self.stem_ch = stem_ch
         self.hidden_ch = hidden_ch
         self.fused_pixel_scale_arcsec = float(fused_pixel_scale_arcsec)
+        self.rubin_concat = bool(rubin_concat)
 
         if stream_branch_depths is None:
             stream_branch_depths = compute_stream_depths(fused_pixel_scale_arcsec)
@@ -150,7 +158,7 @@ class JAISPMixedEncoderV8(nn.Module):
         self.info_maps = nn.ModuleDict({b: InformationMap() for b in band_names})
 
         self.stream_fusers = nn.ModuleDict({
-            "rubin": StreamFuser(RUBIN_BANDS, stem_ch, stem_ch, use_concat=False),
+            "rubin":  StreamFuser(RUBIN_BANDS,  stem_ch, stem_ch, use_concat=self.rubin_concat),
             "euclid": StreamFuser(EUCLID_BANDS, stem_ch, stem_ch, use_concat=True),
         })
 
@@ -328,10 +336,12 @@ class JAISPFoundationV8(nn.Module):
         transformer_depth: int = 4,
         transformer_heads: int = 8,
         fused_pixel_scale_arcsec: float = 0.4,
+        rubin_concat: bool = False,
     ):
         super().__init__()
         self.band_names = list(band_names)
         self.band_to_idx = {b: i for i, b in enumerate(self.band_names)}
+        self.rubin_concat = bool(rubin_concat)
 
         stream_depths = compute_stream_depths(fused_pixel_scale_arcsec)
 
@@ -344,6 +354,7 @@ class JAISPFoundationV8(nn.Module):
             transformer_heads=transformer_heads,
             fused_pixel_scale_arcsec=fused_pixel_scale_arcsec,
             stream_branch_depths=stream_depths,
+            rubin_concat=self.rubin_concat,
         )
 
         num_bands = len(self.band_names)
@@ -362,6 +373,8 @@ class JAISPFoundationV8(nn.Module):
         print(f"  stem_ch={stem_ch}, hidden_ch={hidden_ch}, "
               f"fused_scale={fused_pixel_scale_arcsec:.2f}\"/px")
         print(f"  stream_depths={stream_depths}")
+        print(f"  rubin_concat={self.rubin_concat}  "
+              f"({'symmetric concat fusion (v9)' if self.rubin_concat else 'mean fusion (v8 default)'})")
         for stream in STREAM_ORDER:
             chs = decoder_stage_channels(stream_depths[stream], hidden_ch)
             print(f"  {stream} decoder channels: {chs}")

@@ -1,31 +1,31 @@
 {
   "n_tiles": 6,
-  "diag1_mean_cross_over_within": 2009.0713105300122,
+  "diag1_mean_cross_over_within": 2009.0714986537466,
   "diag1_per_target_within_frac": {
-    "rubin_u": 0.0002675015524436055,
-    "rubin_g": 0.0002993645028036093,
-    "rubin_r": 0.0005443289974556349,
-    "rubin_i": 0.0003911649890536804,
-    "rubin_z": 0.00027958171859102527,
-    "rubin_y": 0.00019811419654781762,
-    "euclid_VIS": 0.9507987105223468,
-    "euclid_Y": 0.9999970503486628,
-    "euclid_J": 0.9999974713162068,
-    "euclid_H": 0.9999977450512905
+    "rubin_u": 0.0002675014288400578,
+    "rubin_g": 0.0002993645274497134,
+    "rubin_r": 0.0005443290504327775,
+    "rubin_i": 0.0003911649598913132,
+    "rubin_z": 0.00027958175290724186,
+    "rubin_y": 0.00019811416294548671,
+    "euclid_VIS": 0.950798708414853,
+    "euclid_Y": 0.9999970503488854,
+    "euclid_J": 0.999997471316022,
+    "euclid_H": 0.999997745051134
   },
   "diag1_per_target_cross_frac": {
-    "rubin_u": 0.9997324984475564,
-    "rubin_g": 0.9997006354971962,
-    "rubin_r": 0.9994556710025444,
-    "rubin_i": 0.9996088350109461,
-    "rubin_z": 0.9997204182814087,
-    "rubin_y": 0.9998018858034522,
-    "euclid_VIS": 0.04920128947765316,
-    "euclid_Y": 2.9496513372884955e-06,
-    "euclid_J": 2.5286837932986414e-06,
-    "euclid_H": 2.2549487095315206e-06
+    "rubin_u": 0.9997324985711601,
+    "rubin_g": 0.9997006354725503,
+    "rubin_r": 0.9994556709495671,
+    "rubin_i": 0.9996088350401086,
+    "rubin_z": 0.9997204182470927,
+    "rubin_y": 0.9998018858370548,
+    "euclid_VIS": 0.04920129158514697,
+    "euclid_Y": 2.949651114626169e-06,
+    "euclid_J": 2.5286839781351853e-06,
+    "euclid_H": 2.254948866043898e-06
   },
-  "diag2_r2_per_band": {
+  "diag2_random_ridge_r2_per_band": {
     "rubin_u": 0.13442569971084595,
     "rubin_g": 0.38313106695810956,
     "rubin_r": 0.4053324858347575,
@@ -37,8 +37,34 @@
     "euclid_J": 0.13107536236445108,
     "euclid_H": 0.14983245730400085
   },
-  "diag2_rubin_mean_r2": 0.31312212844689685,
-  "diag2_euclid_mean_r2": 0.13976146280765533,
-  "diag2_euclid_over_rubin": 0.4463480862910582,
-  "verdict": "Encoder uses Euclid for reconstruction but bottleneck does not preserve Euclid info linearly. Investigate further."
+  "diag2_random_ridge_rubin_mean": 0.31312212844689685,
+  "diag2_random_ridge_euclid_mean": 0.13976146280765533,
+  "diag2b_source_centered_ridge_r2_per_band": {
+    "rubin_u": -0.010640670855840048,
+    "rubin_g": 0.4204927285512288,
+    "rubin_r": 0.2588808536529541,
+    "rubin_i": 0.431744247674942,
+    "rubin_z": 0.37579991420110065,
+    "rubin_y": 0.357069065173467,
+    "euclid_VIS": -0.33101560672124225,
+    "euclid_Y": -0.5652808745702108,
+    "euclid_J": -0.1145184338092804,
+    "euclid_H": -0.25623926520347595
+  },
+  "diag2b_source_centered_mlp_r2_per_band": {
+    "rubin_u": 0.14885794123013815,
+    "rubin_g": 0.47789306938648224,
+    "rubin_r": 0.42149612804253894,
+    "rubin_i": 0.45459043979644775,
+    "rubin_z": 0.4187552829583486,
+    "rubin_y": 0.4360856165488561,
+    "euclid_VIS": 0.29305770993232727,
+    "euclid_Y": 0.2603818327188492,
+    "euclid_J": 0.23452619711558023,
+    "euclid_H": 0.2375892698764801
+  },
+  "diag2b_mlp_rubin_mean": 0.392946412993802,
+  "diag2b_mlp_euclid_mean": 0.25638875241080916,
+  "diag2b_mlp_euclid_over_rubin": 0.6524776507244849,
+  "verdict": "Encoder pulls from cross-instrument inputs (likely VIS as a spatial scaffold) but the bottleneck does not store cross-instrument spectral info even nonlinearly. The bottleneck is acting as a Rubin-centric SED store with a VIS spatial anchor. Downstream Euclid heads work because their decoders compensate, but a foundation change (architectural symmetry \u2014 concat fusion for Rubin too \u2014 or adversarial masking) would be a meaningful upgrade."
 }

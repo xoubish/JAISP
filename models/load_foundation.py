@@ -49,6 +49,7 @@ def load_foundation(
     cfg = ckpt.get('config', {})
 
     fused_scale = cfg.get('fused_pixel_scale_arcsec', 0.8)
+    rubin_concat = bool(cfg.get('rubin_concat', False))
     common_kwargs = dict(
         band_names=cfg.get('band_names', ALL_BANDS),
         stem_ch=cfg.get('stem_ch', 64),
@@ -59,15 +60,16 @@ def load_foundation(
         fused_pixel_scale_arcsec=fused_scale,
     )
 
-    # V8 has auto-computed stream depths; V7 uses hardcoded depths.
-    # Detect v8 by checking if the fused scale differs from the v7 default
-    # or if the checkpoint model keys indicate different stream depths.
-    use_v8 = abs(fused_scale - 0.8) > 0.01
+    # V8/V9 have auto-computed stream depths; V7 uses hardcoded depths.
+    # Detect v8/v9 by checking if the fused scale differs from the v7 default
+    # or if the checkpoint config indicates rubin_concat=True (v9 marker).
+    use_v8_class = abs(fused_scale - 0.8) > 0.01 or rubin_concat
 
-    if use_v8:
+    if use_v8_class:
         from jaisp_foundation_v8 import JAISPFoundationV8
-        model = JAISPFoundationV8(**common_kwargs)
+        model = JAISPFoundationV8(rubin_concat=rubin_concat, **common_kwargs)
     else:
+        # V7 has no rubin_concat parameter; ignore the flag if it's set.
         model = JAISPFoundationV7(**common_kwargs)
 
     missing, unexpected = model.load_state_dict(ckpt['model'], strict=False)
@@ -85,6 +87,10 @@ def load_foundation(
         for p in model.parameters():
             p.requires_grad = False
 
-    version = 'v8' if use_v8 else 'v7'
-    print(f'Loaded {version} foundation (fused_scale={fused_scale}) from {checkpoint_path}')
+    if use_v8_class:
+        version = 'v9' if rubin_concat else 'v8'
+    else:
+        version = 'v7'
+    print(f'Loaded {version} foundation (fused_scale={fused_scale}, '
+          f'rubin_concat={rubin_concat}) from {checkpoint_path}')
     return model
