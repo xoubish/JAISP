@@ -50,6 +50,11 @@ def load_foundation(
 
     fused_scale = cfg.get('fused_pixel_scale_arcsec', 0.8)
     rubin_concat = bool(cfg.get('rubin_concat', False))
+    # v10 loss-shaping params (default to v8/v9 behaviour if absent)
+    loss_type           = str(cfg.get('loss_type', 'l1'))
+    charbonnier_eps     = float(cfg.get('charbonnier_eps', 1e-3))
+    core_l2_weight      = float(cfg.get('core_l2_weight', 0.0))
+    core_info_threshold = float(cfg.get('core_info_threshold', 0.5))
     common_kwargs = dict(
         band_names=cfg.get('band_names', ALL_BANDS),
         stem_ch=cfg.get('stem_ch', 64),
@@ -60,16 +65,24 @@ def load_foundation(
         fused_pixel_scale_arcsec=fused_scale,
     )
 
-    # V8/V9 have auto-computed stream depths; V7 uses hardcoded depths.
-    # Detect v8/v9 by checking if the fused scale differs from the v7 default
-    # or if the checkpoint config indicates rubin_concat=True (v9 marker).
-    use_v8_class = abs(fused_scale - 0.8) > 0.01 or rubin_concat
+    # V8/V9/V10 share the JAISPFoundationV8 class; V7 uses hardcoded stream depths.
+    # Detect v8+ class by fused_scale differing from v7's 0.8 OR by any of the
+    # v9/v10 markers being set.
+    is_v9_plus = rubin_concat or (loss_type != 'l1') or (core_l2_weight > 0)
+    use_v8_class = abs(fused_scale - 0.8) > 0.01 or is_v9_plus
 
     if use_v8_class:
         from jaisp_foundation_v8 import JAISPFoundationV8
-        model = JAISPFoundationV8(rubin_concat=rubin_concat, **common_kwargs)
+        model = JAISPFoundationV8(
+            rubin_concat=rubin_concat,
+            loss_type=loss_type,
+            charbonnier_eps=charbonnier_eps,
+            core_l2_weight=core_l2_weight,
+            core_info_threshold=core_info_threshold,
+            **common_kwargs,
+        )
     else:
-        # V7 has no rubin_concat parameter; ignore the flag if it's set.
+        # V7 has no v9/v10 parameters; ignore them if set.
         model = JAISPFoundationV7(**common_kwargs)
 
     missing, unexpected = model.load_state_dict(ckpt['model'], strict=False)
@@ -88,9 +101,15 @@ def load_foundation(
             p.requires_grad = False
 
     if use_v8_class:
-        version = 'v9' if rubin_concat else 'v8'
+        if loss_type == 'charbonnier' or core_l2_weight > 0:
+            version = 'v10'
+        elif rubin_concat:
+            version = 'v9'
+        else:
+            version = 'v8'
     else:
         version = 'v7'
     print(f'Loaded {version} foundation (fused_scale={fused_scale}, '
-          f'rubin_concat={rubin_concat}) from {checkpoint_path}')
+          f'rubin_concat={rubin_concat}, loss={loss_type}, '
+          f'core_l2={core_l2_weight}) from {checkpoint_path}')
     return model

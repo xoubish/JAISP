@@ -408,6 +408,7 @@ class JAISPTrainerV7:
         self.model.train()
         epoch_loss_total = 0.0
         band_losses = defaultdict(list)
+        band_norm_losses = defaultdict(list)   # v10: un-RMS-multiplied pixel loss for fair per-band comparison
         n_steps = 0
 
         self.optimizer.zero_grad(set_to_none=True)
@@ -445,6 +446,8 @@ class JAISPTrainerV7:
                     loss_scalar = float(out["loss"].detach())
                     step_loss_val += loss_scalar
                     band_losses[tgt["band"]].append(loss_scalar)
+                    if "pixel_loss_norm" in out:
+                        band_norm_losses[tgt["band"]].append(float(out["pixel_loss_norm"].detach()))
 
                 step_loss_val /= n_tgts
                 accum_count += 1
@@ -493,7 +496,8 @@ class JAISPTrainerV7:
 
         avg_loss = self._reduce_mean_stats(epoch_loss_total, n_steps)
         per_band = self._reduce_band_losses(band_losses)
-        return {"loss": avg_loss, "per_band": per_band}
+        per_band_norm = self._reduce_band_losses(band_norm_losses) if band_norm_losses else {}
+        return {"loss": avg_loss, "per_band": per_band, "per_band_norm": per_band_norm}
 
     @torch.no_grad()
     def _validate(self) -> float:
@@ -779,6 +783,8 @@ class JAISPTrainerV7:
                     }
                     for band, loss in train_metrics["per_band"].items():
                         log_dict[f"train/band_{band}"] = loss
+                    for band, loss in train_metrics.get("per_band_norm", {}).items():
+                        log_dict[f"train/band_{band}_norm"] = loss
                     wandb.log(log_dict)
 
                 print(

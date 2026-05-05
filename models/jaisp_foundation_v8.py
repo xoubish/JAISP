@@ -337,11 +337,23 @@ class JAISPFoundationV8(nn.Module):
         transformer_heads: int = 8,
         fused_pixel_scale_arcsec: float = 0.4,
         rubin_concat: bool = False,
+        # ---- v10 loss-shaping options (defaults preserve v8/v9 behaviour) ----
+        loss_type: str = "l1",                  # "l1" or "charbonnier"
+        charbonnier_eps: float = 1e-3,          # smooth-near-zero parameter
+        core_l2_weight: float = 0.0,            # extra L2 penalty on high-info pixels
+        core_info_threshold: float = 0.5,       # info_w threshold defining "core"
     ):
         super().__init__()
         self.band_names = list(band_names)
         self.band_to_idx = {b: i for i, b in enumerate(self.band_names)}
         self.rubin_concat = bool(rubin_concat)
+        # Loss-shaping config (used in forward)
+        self.loss_type = str(loss_type).lower()
+        if self.loss_type not in ("l1", "charbonnier"):
+            raise ValueError(f"loss_type must be 'l1' or 'charbonnier', got {loss_type!r}")
+        self.charbonnier_eps = float(charbonnier_eps)
+        self.core_l2_weight = float(core_l2_weight)
+        self.core_info_threshold = float(core_info_threshold)
 
         stream_depths = compute_stream_depths(fused_pixel_scale_arcsec)
 
@@ -374,7 +386,9 @@ class JAISPFoundationV8(nn.Module):
               f"fused_scale={fused_pixel_scale_arcsec:.2f}\"/px")
         print(f"  stream_depths={stream_depths}")
         print(f"  rubin_concat={self.rubin_concat}  "
-              f"({'symmetric concat fusion (v9)' if self.rubin_concat else 'mean fusion (v8 default)'})")
+              f"({'symmetric concat fusion (v9+)' if self.rubin_concat else 'mean fusion (v8 default)'})")
+        print(f"  loss_type={self.loss_type}  charbonnier_eps={self.charbonnier_eps:g}  "
+              f"core_l2_weight={self.core_l2_weight:g}  core_info_thr={self.core_info_threshold:g}")
         for stream in STREAM_ORDER:
             chs = decoder_stage_channels(stream_depths[stream], hidden_ch)
             print(f"  {stream} decoder channels: {chs}")
@@ -431,9 +445,33 @@ class JAISPFoundationV8(nn.Module):
 
         target_norm = (target_image / (target_rms + 1e-10)).clamp(-10.0, 100.0)
         info_w = self.encoder.info_maps[target_band](target_image, target_rms)
-        pixel_loss = (info_w * (pred - target_norm).abs()).mean()
+        pixel_diff = pred - target_norm
+
+        # ---- Per-pixel base loss ----
+        # L1 (v8/v9): robust at large residuals but no curvature near zero, so
+        #   the optimum collapses to the median and predictions broaden.
+        # Charbonnier (v10): sqrt(diff^2 + eps^2). L1-like for large residuals,
+        #   L2-like near zero — encourages sharp predictions at source cores while
+        #   staying robust on noisy edges.
+        if self.loss_type == "charbonnier":
+            per_pixel = torch.sqrt(pixel_diff * pixel_diff + self.charbonnier_eps ** 2)
+        else:  # "l1"
+            per_pixel = pixel_diff.abs()
+        pixel_loss = (info_w * per_pixel).mean()
+
+        # ---- Optional core-L2 term (v10) ----
+        # On pixels where the InformationMap declares "this is a source core"
+        # (info_w > threshold), apply an extra L2 penalty that explicitly
+        # rewards getting the peak right rather than median-broadening it.
+        if self.core_l2_weight > 0:
+            high_info = (info_w > self.core_info_threshold).float()
+            n_high = high_info.sum().clamp(min=1.0)
+            core_loss = (high_info * pixel_diff * pixel_diff).sum() / n_high
+        else:
+            core_loss = pixel_diff.new_zeros(())
+
         rms_weight = target_rms.mean().clamp(min=0.1)
-        loss = rms_weight * pixel_loss
+        loss = rms_weight * (pixel_loss + self.core_l2_weight * core_loss)
 
         return {
             "loss": loss,
@@ -441,6 +479,9 @@ class JAISPFoundationV8(nn.Module):
             "target_norm": target_norm.detach(),
             "info_weights": info_w.detach(),
             "rms_weight": rms_weight.detach(),
+            # Telemetry: un-multiplied losses for fair per-band comparison.
+            "pixel_loss_norm": pixel_loss.detach(),
+            "core_loss_norm": core_loss.detach(),
             "fused_hw": enc_out["fused_hw"],
         }
 
