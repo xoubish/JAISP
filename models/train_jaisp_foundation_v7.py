@@ -720,8 +720,15 @@ class JAISPTrainerV7:
     def load_checkpoint(self, path: str, weights_only: bool = False) -> int:
         ckpt = torch.load(path, map_location=self.device, weights_only=False)
         self._raw_model().load_state_dict(ckpt["model"])
-        self.best_val_loss = ckpt.get("best_val_loss", float("inf"))
-        self.global_step = ckpt.get("global_step", 0)
+        # Weights-only resume = warm-start a NEW training run from the loaded weights:
+        # don't inherit the prior best_val_loss / step counter / epoch (which would
+        # otherwise make `start_epoch >= self.epochs` and skip training entirely).
+        if weights_only:
+            self.best_val_loss = float("inf")
+            self.global_step = 0
+        else:
+            self.best_val_loss = ckpt.get("best_val_loss", float("inf"))
+            self.global_step = ckpt.get("global_step", 0)
         if "train_indices" in ckpt and "val_indices" in ckpt:
             self.train_indices = list(ckpt["train_indices"])
             self.val_indices = list(ckpt["val_indices"])
@@ -747,10 +754,11 @@ class JAISPTrainerV7:
         if torch.cuda.is_available() and ckpt.get("cuda_rng_state_all") is not None:
             if not weights_only:
                 torch.cuda.set_rng_state_all(ckpt["cuda_rng_state_all"])
+        # Weights-only resume returns -1 so start_epoch becomes 0 in train().
+        # Don't pre-step the scheduler — we want a fresh cosine schedule for the
+        # new run, not the tail end of the previous one.
         if weights_only:
-            resume_epoch = int(ckpt["epoch"])
-            for _ in range(resume_epoch + 1):
-                self.scheduler.step()
+            return -1
         return int(ckpt["epoch"])
 
     def train(self, resume_from: str = None, resume_weights_only: bool = False) -> None:

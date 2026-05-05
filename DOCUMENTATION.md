@@ -20,7 +20,7 @@ When using this file operationally, prefer the checkpoints and commands marked a
 
 | Layer | Current default | Notes |
 |-------|-----------------|-------|
-| Foundation | `models/checkpoints/jaisp_v8_fine/checkpoint_best.pt` | Fine-scale 0.4"/px fused MAE, trained with 256x256 Rubin random crops from the 512x512 tile product. |
+| Foundation | `models/checkpoints/jaisp_v8_fine/checkpoint_best.pt` | Fine-scale 0.4"/px fused MAE, trained with 256x256 Rubin random crops from the 512x512 tile product. **v9 is in training** (`models/checkpoints/jaisp_v9/`) — adds symmetric concat fusion for Rubin and adversarial cross-instrument masking, motivated by notebook 13's bottleneck-content diagnosis. **v10 code is staged** (`models/train_jaisp_foundation_v10.py`) — adds Charbonnier base loss + core-L2 weighting to fix the per-source PSF-profile residuals seen in v9 reconstructions; not yet trained. |
 | Detection | `checkpoints/centernet_v8_fine/centernet_round2.pt` | Fused-bottleneck CenterNet on v8 features; all-790-tile labels cached at `data/detection_labels/centernet_v8_r2_790.pt`. |
 | Astrometry | `models/checkpoints/latent_position_v8_no_psf/best.pt` | Current no-PSF latent position head. Gaussian-fit photon centroids are the present target convention. |
 | Smooth field QA | `models/astrometry2/fit_direct_pinn.py` | Fits raw or head-residual anchors from `anchors.npz` or `anchors_centernet.npz`; CenterNet post-head PINN fields are about 1 mas and do not improve anchor residuals. |
@@ -311,6 +311,8 @@ See the next section for the full v7 architecture.
 | v6 | Dense MAE | Pixel-space reconstruction | Works but VIS downsampled to Rubin grid |
 | v7 | Mixed-res MAE | 2-stream (Rubin mean / Euclid concat), native resolution | Prior production: preserves per-band PSF structure, RMS-aware loss. Superseded by v8 for all downstream work. |
 | v8 | Fine-scale MAE | v7 architecture + configurable fused scale + random crop | **Current production**: 2× finer bottleneck (0.4"/px), same token count via 256×256 crops. All current downstream heads (CenterNet, latent position, PSFField, photometry) use v8 features. |
+| v9 | Symmetric concat fusion + adversarial masking | v8 architecture + Rubin StreamFuser switched from mean to concat (`rubin_concat=True`) + adversarial drop of wavelength-adjacent same-instrument bands | **Currently training**. Motivated by notebook 13 — fixes the gradient asymmetry where Rubin per-band gradients were attenuated 1/6× by mean fusion. Source-centered probe Euclid R² jumped from −0.32 (v8) to +0.13 at the bottleneck level; all 10 bands now have std ratio ~1.0. ~25K extra params (0.27% of total). |
+| v10 | v9 + Charbonnier loss + core-L2 weighting | v9 architecture + per-pixel L1 replaced by Charbonnier (L2-like near zero, L1-like at large residuals) + extra L2 penalty on high-info "core" pixels | **Code ready, not yet trained**. Motivated by donut/dipole PSF residuals visible in v9 reconstruction diagnostics — these come from L1's median-broadening tendency at sharp source cores. Adds no parameters; small additional compute per step. |
 
 ### v7 Mixed-Resolution MAE (Prior Production)
 
@@ -425,6 +427,115 @@ cd models && torchrun --nproc_per_node=2 train_jaisp_foundation_v8.py \
 ```
 
 **Outcome**: the hypothesis held up. The v8 latent position head reaches ~9-11 mas median cross-instrument residual on Rubin g/r/i/z and NISP Y/J/H (vs. ~13-15 mas for the v7 head at the same evaluation protocol), and downstream heads have been retrained against v8 features across the board. V7 is retained as a comparison baseline but is no longer the recommended starting point for new downstream work.
+
+### Cross-instrument signal in the v8 bottleneck (notebook 13)
+
+**File**: `io/13_cross_instrument_attribution.ipynb`
+
+After v8 became production, a question remained from the original MAE design: when reconstructing one band from the other nine, does the encoder *actually* use cross-instrument signal, or does it shortcut on within-instrument neighbours? The MAE loss does not penalise the encoder for ignoring Euclid when reconstructing a Rubin band — Rubin r and i alone could be enough.
+
+This is not a question that a single ablation can answer cleanly: even a model that ignores cross-instrument inputs would degrade if you zeroed Euclid at inference, simply because Euclid is intrinsically more informative pixel-for-pixel (especially VIS at 0.1"/px). The wavelength-distance confound makes simple input ablations ambiguous.
+
+Notebook 13 introduces two complementary diagnostics that *do* discriminate:
+
+1. **Input gradient attribution.** For each `(target_band, source_band)` pair, mask the target during inference and compute the gradient of the reconstruction loss with respect to each source-band input. The mean absolute gradient (normalised by mean input magnitude) directly measures *what the encoder is using*, not *what would be intrinsically informative*. A model that has learned to ignore Euclid will produce essentially zero gradient on Euclid pixels.
+2. **Linear/MLP probe on the bottleneck.** Train ridge and small-MLP regressors `bottleneck → log(SNR per band)` for each of the 10 bands at random points and at source-centered points (VIS-detected peaks). If the bottleneck encodes a band's information, the probe should reach a comparable R² to the corresponding within-instrument prediction.
+
+Headline v8 result:
+
+- **Diagnostic 1.** When *any* Rubin band is masked, ~99.97% of the gradient lands on `euclid_VIS` — not on the other Rubin bands. When NISP Y/J/H is masked, again ~100% of attribution flows through other Euclid bands (mostly VIS again). When VIS itself is masked, attribution spreads across other Euclid bands and a small ~5% Rubin contribution. The encoder routes *everything* through VIS as a universal spatial scaffold.
+- **Diagnostic 2 (random+ridge).** Rubin mean R² 0.31, Euclid mean R² 0.14 — Rubin information dominates linearly.
+- **Diagnostic 2b (source-centered, MLP).** Rubin R² 0.39, Euclid R² 0.26 (ratio 0.65). Euclid info is in the bottleneck but stored *non-linearly* — ridge cannot recover it (negative R² at source positions); a 2-layer MLP can.
+
+Two reasons for the VIS monopoly emerged from inspecting the architecture:
+
+1. **Asymmetric stream fusion.** The Rubin `StreamFuser` mean-pools 6 BandStems before passing to the StreamEncoder; the Euclid `StreamFuser` uses concat+1×1-projection that preserves per-band identity. Backprop through the mean operation divides each Rubin band's gradient by 6, while each Euclid band's gradient flows through its own concat slot at full strength. The encoder structurally cannot learn per-Rubin-band features that the bottleneck would store linearly, and the gradient flow is biased toward Euclid by construction.
+2. **VIS is intrinsically the most informative single band.** 4× the native resolution of Rubin (0.1"/px vs 0.2"/px), the deepest Euclid band, broadband (550–900 nm) overlapping much of the Rubin range. Even with symmetric architecture, an unconstrained encoder may converge on VIS as a universal source.
+
+These two findings drive v9 (architectural symmetry) and the open question of whether v9 alone breaks the VIS monopoly or whether further intervention is needed.
+
+### v9 — Symmetric Concat Fusion + Adversarial Cross-instrument Masking
+
+**Files**: `models/jaisp_foundation_v8.py` (with `rubin_concat=True`), `models/jaisp_dataset_v9.py`, `models/train_jaisp_foundation_v9.py`
+
+**Status**: training in progress. Checkpoints in `models/checkpoints/jaisp_v9/`.
+
+V9 is two changes layered on top of v8:
+
+1. **Symmetric concat fusion.** The Rubin StreamFuser is now configured with `use_concat=True`, matching the Euclid stream. Each of the 6 Rubin BandStems gets its own channel slot in a 384-channel concat tensor that is projected back to 64 channels via a learned 1×1 convolution. This:
+   - Preserves per-Rubin-band identity through the encoder, so the bottleneck *can* represent per-filter colour structure rather than only the Rubin mean.
+   - Restores per-band gradient flow — each Rubin band now receives its full gradient signal at backprop, not 1/6.
+   - Costs **+24,704 parameters** (0.27% of v8 total). No spatial-resolution change anywhere.
+2. **Adversarial cross-instrument masking** (`adversarial_drop` in `jaisp_dataset_v9.py`). With probability `p_adversarial = 0.25`, the target band is masked together with 1–2 wavelength-adjacent within-instrument neighbours. For example, masking `rubin_g` may also drop `rubin_u` and `rubin_r`, forcing the encoder to reconstruct g from `rubin_i/z/y` plus all 4 Euclid bands. This applies symmetrically: masking `euclid_J` may drop `euclid_Y` and `euclid_H`, forcing reconstruction from VIS plus the 6 Rubin bands. The standard one-band masking is preserved for 75% of training steps so the inference distribution remains the dominant case.
+
+Wavelength neighbours (used by `_wavelength_neighbours`):
+
+| Target | nearest within-instrument neighbours |
+|---|---|
+| `rubin_u` | `rubin_g`, `rubin_r` |
+| `rubin_g` | `rubin_r`, `rubin_u` |
+| `rubin_r` / `rubin_i` / `rubin_z` | wavelength-adjacent Rubin pair |
+| `rubin_y` | `rubin_z`, `rubin_i` |
+| `euclid_VIS` | `euclid_Y`, `euclid_J` |
+| `euclid_Y` | `euclid_J`, `euclid_VIS` |
+| `euclid_J` | `euclid_H`, `euclid_Y` |
+| `euclid_H` | `euclid_J`, `euclid_Y` |
+
+The minimum guard `remaining < 2 → skip drop` ensures the encoder always receives at least 2 context bands. Both StreamFusers handle partial inputs gracefully (concat fusers fill missing slots with zeros; the projection learns to ignore them).
+
+**Outcomes (mid-training, epoch ~93 / 100)**:
+
+- val/best_loss = 5.697 (was 5.902 at v9 epoch 47, 5.872 at epoch 60, 5.792 at epoch 68 — improving steadily). For comparison, v8 final val/best_loss settled around the same range; v9 is at parity or slightly better in this aggregate metric.
+- All 10 bands reach **bright-source Pearson r ∈ [0.86, 0.997]** with **std ratio ∈ [0.94, 1.13]** — well-calibrated dynamic range across the board. v8 had Euclid std ratio 0.4–0.7 (regressing to mean); v9 has it ≈ 1.0. This is the single clearest v9 win.
+- `rubin_u` recovered the most: from r=0.93 std=0.25 in early v9 training to r=0.96 std=0.95 by epoch ~75. Concat fusion let the encoder learn u-band-specific features that mean fusion was averaging away.
+- The notebook 13 diagnostic was rerun against the v9 best.pt mid-training. Source-centered ridge probe **Euclid R² jumped from −0.32 to +0.13** (a 0.45 improvement over v8). MLP-probe Euclid/Rubin ratio went from **0.65 to 0.79**. The bottleneck genuinely encodes Euclid information now, not just VIS spatial scaffolding.
+- The VIS-monopoly at the gradient level **persists** in v9 (cross/within ratio 6241 vs 2009 in v8 — even more concentrated on VIS). The architectural fix did not change *what input the encoder pulls from*, only *what the bottleneck stores*. The interpretation: VIS is intrinsically the right source band given its resolution + depth + sharpness, and the encoder learned this in both v8 and v9. The v9 contribution is that the bottleneck no longer compresses Rubin info away — it stores Rubin SED variance linearly while still using VIS as the spatial scaffold.
+
+**Decision**: adopt v9 as the next production foundation when training completes. The bottleneck-content improvement is robust on the diagnostic, and there's no measurable regression on any downstream-relevant metric. **Don't go back to v8.**
+
+### v10 — PSF-aware Loss (Planned)
+
+**Files**: `models/train_jaisp_foundation_v10.py` (new); `models/jaisp_foundation_v8.py` (extended with `loss_type`, `core_l2_weight`, `charbonnier_eps`, `core_info_threshold` parameters; defaults preserve v8/v9 behaviour).
+
+**Status**: code staged, not yet trained.
+
+V10 addresses an issue that is independent of v9's cross-instrument question: **per-source PSF profile residuals**. v9's reconstruction diagnostics (and v8's, equally) show systematic donut/dipole patterns at source positions — the model's predicted PSF is slightly broader than the truth at sharp cores, and slightly narrower at the wings. Two diagnostic patterns:
+
+- *Donut*: red ring around white/blue centre → predicted PSF too narrow at peak, missing the wings (model under-predicts halo, over-predicts core).
+- *Dipole*: red on one side, blue on the other → sub-pixel centroid offset.
+
+The donut pattern is the more systematic effect and traces to the L1 base loss. L1 has a constant gradient ±1 regardless of residual magnitude, so the per-pixel optimum collapses to the *median* of the conditional pixel distribution. For a sharp PSF, the median is broader than the true PSF. The model is incentivised toward smoother predictions — exactly what we see.
+
+V10 makes two loss-side changes (both gated on new parameters with v8/v9-preserving defaults):
+
+1. **Charbonnier base loss** (`loss_type="charbonnier"`, default `charbonnier_eps=1e-3`):
+
+   ```
+   per_pixel = sqrt((pred - target_norm)^2 + eps^2)
+   ```
+
+   At large residuals (≫ eps) Charbonnier is L1-like — robust to noise outliers. Near zero (≲ eps) it's L2-like — gradient proportional to residual, no median-broadening incentive. This pushes predictions to match peaks exactly while staying robust on noisy edges. Verified: at residual = 1e-4, L1 gradient = ±1 (discontinuous), Charbonnier gradient = ±0.0995 (smooth, proportional to residual).
+
+2. **High-info L2 weighting** (`core_l2_weight=0.2`, `core_info_threshold=0.5`):
+
+   ```
+   high_info = (info_w > core_info_threshold).float()
+   core_loss = (high_info * (pred - target_norm)^2).sum() / high_info.sum()
+   loss = rms_weight * (pixel_loss + core_l2_weight * core_loss)
+   ```
+
+   On pixels the InformationMap declares "this is a source core", an extra L2 penalty explicitly rewards predicting the peak exactly. Doesn't require source detection — leverages the existing info-map infrastructure.
+
+Both changes are pure loss modifications: zero new parameters, ~5% additional FLOPs per training step from the extra `(pred-target)^2` reduction. The v9 architecture (concat fusion + adversarial masking) carries forward unchanged. The trainer also wires per-band normalised loss telemetry (`train/band_X_norm`) so dashboards show real per-band performance comparisons rather than RMS-weight-amplified loss values.
+
+**Order of operations**:
+
+1. Wait for v9 training to finish.
+2. Diagnose v9's PSF residuals on the same reconstruction notebook. If donut/dipole patterns are visibly smaller than v8, v9's adversarial masking already helped — only run the Charbonnier-only variant of v10 (`--core_l2_weight 0`) first.
+3. If v9 still shows significant residuals, run v10 with both Charbonnier + core-L2.
+4. If v10 still leaves visible PSF residuals, plan v11 with an explicit second-moment penalty per detected source (the previously-deferred Step 3).
+
+V10 can be warm-started from v9's best.pt (`--resume models/checkpoints/jaisp_v9/checkpoint_best.pt --resume_weights_only`) with a lower LR (~1e-4) and ~50 epochs, reusing the v9 representation rather than retraining from scratch.
 
 ---
 
@@ -1336,6 +1447,8 @@ The notebooks are numbered to reflect a rough pipeline order: data ingestion -> 
 | 09 | `09_psf_field_photometry_validation.ipynb` | PSFField forced photometry validation against CenterNet VIS master catalog. |
 | 10 | `10_scarlet_like_photometry.ipynb` | Per-scene scarlet-like residual photometry optimizer for galaxies and blends. |
 | 11 | `11_foundation_photometry_head.ipynb` | V8 foundation photometry head visualization on Euclid-native scenes; compares learned vs PSF-only residuals. |
+| 12 | `12_astrometry_hgp_vs_pinn.ipynb` | Hierarchical GP vs PINN comparison on CenterNet anchors. Headline post-head smooth-field non-detection; HGP prior-sensitivity ladder; lattice-smoothing experiment. |
+| 13 | `13_cross_instrument_attribution.ipynb` | Foundation-model diagnostic: input gradient attribution (10×10 matrix) + linear/MLP probes on the bottleneck. Shows v8 routes ~100% of attribution through Euclid VIS as a universal spatial scaffold. Used to motivate v9 architectural changes and to compare v8 vs v9 bottleneck content. |
 
 ---
 
@@ -1366,6 +1479,47 @@ cd models && python train_jaisp_foundation_v8.py \
     --epochs 100 --lr 3e-4 --accum_steps 4 \
     --persistent_workers --num_workers 4 \
     --wandb_name v8_fused04_crop256
+
+# V9 — symmetric concat fusion + adversarial cross-instrument masking.
+# Same architecture as v8 except Rubin StreamFuser uses concat (rubin_concat=True);
+# adversarial drop hides 1-2 wavelength-adjacent same-instrument bands with prob 0.25.
+cd models && torchrun --nproc_per_node=2 train_jaisp_foundation_v9.py \
+    --rubin_dir  ../data/rubin_tiles_all \
+    --euclid_dir ../data/euclid_tiles_all \
+    --output_dir ./checkpoints/jaisp_v9 \
+    --fused_pixel_scale_arcsec 0.4 --crop_size_rubin 256 \
+    --p_adversarial 0.25 --n_extra_max 2 \
+    --epochs 100 --lr 3e-4 --accum_steps 2 \
+    --wandb_project JAISP-Foundation-v9 \
+    --wandb_name v9_concat_adv25
+
+# V10 — v9 + Charbonnier base loss + core-L2 weighting (PSF-aware loss).
+# Two flavours: (a) from-scratch for clean comparison; (b) warm-start from v9 best.pt
+# with lower LR + half the epochs to polish on top of v9 weights.
+# (a) From scratch:
+cd models && torchrun --nproc_per_node=2 train_jaisp_foundation_v10.py \
+    --rubin_dir  ../data/rubin_tiles_all \
+    --euclid_dir ../data/euclid_tiles_all \
+    --output_dir ./checkpoints/jaisp_v10 \
+    --fused_pixel_scale_arcsec 0.4 --crop_size_rubin 256 \
+    --p_adversarial 0.25 \
+    --loss_type charbonnier --charbonnier_eps 1e-3 \
+    --core_l2_weight 0.2 --core_info_threshold 0.5 \
+    --epochs 100 --lr 3e-4 --accum_steps 2 \
+    --wandb_project JAISP-Foundation-v10 \
+    --wandb_name v10_charb_corel2_02
+
+# (b) Warm-start from v9 (faster, polish only):
+cd models && torchrun --nproc_per_node=2 train_jaisp_foundation_v10.py \
+    --rubin_dir  ../data/rubin_tiles_all \
+    --euclid_dir ../data/euclid_tiles_all \
+    --output_dir ./checkpoints/jaisp_v10_warmstart \
+    --resume ./checkpoints/jaisp_v9/checkpoint_best.pt --resume_weights_only \
+    --p_adversarial 0.25 \
+    --loss_type charbonnier --core_l2_weight 0.2 \
+    --epochs 50 --lr 1e-4 --accum_steps 2 \
+    --wandb_project JAISP-Foundation-v10 \
+    --wandb_name v10_warm_charb_corel2_02
 ```
 
 ### 2. Detection Head
