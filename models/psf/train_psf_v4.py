@@ -24,8 +24,12 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -133,6 +137,176 @@ def collate(batch):
 # Loss
 # ============================================================
 
+# ============================================================
+# Metrics + visualization
+# ============================================================
+
+def _gaussian_fwhm_pix(stamp: np.ndarray) -> float:
+    """Cheap FWHM estimate from second moments. Returns FWHM in pixels."""
+    H, W = stamp.shape
+    yy, xx = np.indices(stamp.shape, dtype=np.float32)
+    s = float(stamp.sum())
+    if s <= 0:
+        return float("nan")
+    cx = float((xx * stamp).sum() / s)
+    cy = float((yy * stamp).sum() / s)
+    sigx2 = max(float(((xx - cx) ** 2 * stamp).sum() / s), 1e-6)
+    sigy2 = max(float(((yy - cy) ** 2 * stamp).sum() / s), 1e-6)
+    sigma = 0.5 * (np.sqrt(sigx2) + np.sqrt(sigy2))
+    return 2.355 * sigma
+
+
+def _chi2_per_dof(pred: np.ndarray, obs: np.ndarray, rms: np.ndarray,
+                  alpha: float) -> float:
+    """Reduced chi² between alpha*pred and obs, weighted by 1/rms²."""
+    inv_var = 1.0 / np.maximum(rms, 1e-6) ** 2
+    resid = alpha * pred - obs
+    chi2 = float((resid ** 2 * inv_var).sum())
+    dof = max(int(obs.size - 1), 1)
+    return chi2 / dof
+
+
+def _pearson_r(a: np.ndarray, b: np.ndarray) -> float:
+    a = a.flatten().astype(np.float64); b = b.flatten().astype(np.float64)
+    a = a - a.mean(); b = b - b.mean()
+    den = (np.sqrt((a * a).sum()) * np.sqrt((b * b).sum()))
+    return float((a * b).sum() / max(den, 1e-12))
+
+
+@torch.no_grad()
+def _visualize_psf(model: PSFFieldV4, val_ds: "PSFTrainingSet",
+                   stamp_size: int, device: torch.device,
+                   epoch: int, n_per_band: int = 5,
+                   ) -> Dict[str, "wandb.Image"]:
+    """Per-band figure: held-out stars, model predictions, residuals, oversampled ePSF.
+
+    Returns a dict {wandb_key: wandb.Image} with per-band fitted-stamp galleries
+    plus a per-band 5×5 spatial-grid PSF mosaic. Logged at each call.
+    """
+    if wandb is None:
+        return {}
+    model.eval()
+    log = {}
+
+    rng = np.random.RandomState(123 + epoch)
+    band_chi2: Dict[str, float] = {}
+    band_fwhm: Dict[str, float] = {}
+    band_r:    Dict[str, float] = {}
+
+    for rec in val_ds.records:
+        band = rec["band"]; bi = rec["band_idx"]
+        n_stamps = len(rec["stamps"])
+        if n_stamps == 0:
+            continue
+
+        # Stable per-band picks: highest SNR first, then a few medium-SNR for variety
+        order = np.argsort(rec["snr"])[::-1]
+        pick = list(order[:max(1, n_per_band - 1)])
+        if n_stamps > 5 and len(pick) < n_per_band:
+            pick.append(int(rng.choice(order[len(pick): max(len(pick) + 50, 50)])))
+        pick = pick[:n_per_band]
+
+        pos    = torch.tensor(rec["pos_norm"][pick], dtype=torch.float32, device=device)
+        frac   = torch.tensor(rec["frac_xy"][pick],  dtype=torch.float32, device=device)
+        stamps = torch.tensor(rec["stamps"][pick],   dtype=torch.float32, device=device)
+        rms    = torch.tensor(rec["rms"][pick],      dtype=torch.float32, device=device)
+        bidx   = torch.full((len(pick),), bi, dtype=torch.long, device=device)
+
+        psf_oversampled = model(pos, bidx)
+        rendered = model.render_at_native(psf_oversampled, frac, stamp_size=stamp_size)
+
+        # Best-fit alpha per stamp (closed form) for residual visualisation
+        pred = rendered.squeeze(1)
+        inv_var = 1.0 / rms.clamp(min=1e-6) ** 2
+        num = (pred * stamps * inv_var).sum(dim=(-2, -1))
+        den = (pred * pred * inv_var).sum(dim=(-2, -1)).clamp(min=1e-12)
+        alpha = (num / den)
+        scaled = alpha.view(-1, 1, 1) * pred
+        resid = stamps - scaled
+
+        # Per-band aggregate metrics over the picked stamps
+        chi2s = [_chi2_per_dof(scaled[k].cpu().numpy(), stamps[k].cpu().numpy(),
+                               rms[k].cpu().numpy(), 1.0) for k in range(len(pick))]
+        # FWHM from oversampled (in oversampled pixels) → convert to native px
+        ovs = model.oversampling
+        fwhms = [_gaussian_fwhm_pix(psf_oversampled[k, 0].cpu().numpy()) / ovs
+                 for k in range(len(pick))]
+        rs = [_pearson_r(scaled[k].cpu().numpy(), stamps[k].cpu().numpy())
+              for k in range(len(pick))]
+        band_chi2[band] = float(np.median(chi2s))
+        band_fwhm[band] = float(np.median(fwhms))
+        band_r[band]    = float(np.median(rs))
+
+        # ----- per-band gallery figure -----
+        fig, axes = plt.subplots(4, len(pick), figsize=(2.2 * len(pick), 8.4),
+                                 squeeze=False)
+        for col in range(len(pick)):
+            obs_k    = stamps[col].cpu().numpy()
+            pred_k   = scaled[col].cpu().numpy()
+            resid_k  = resid[col].cpu().numpy()
+            psfo_k   = psf_oversampled[col, 0].cpu().numpy()
+            vmax_obs = max(np.nanpercentile(obs_k, 99), 1e-6)
+            rlim = max(np.nanpercentile(np.abs(resid_k), 99), 1e-6)
+
+            axes[0, col].imshow(obs_k, origin="lower", cmap="gray",
+                                vmin=0.0, vmax=vmax_obs)
+            axes[0, col].set_title(
+                f"SNR={rec['snr'][pick[col]]:.0f}  α={float(alpha[col]):.3g}",
+                fontsize=8,
+            )
+            axes[1, col].imshow(pred_k, origin="lower", cmap="gray",
+                                vmin=0.0, vmax=vmax_obs)
+            axes[2, col].imshow(resid_k, origin="lower", cmap="RdBu_r",
+                                vmin=-rlim, vmax=+rlim)
+            axes[3, col].imshow(psfo_k, origin="lower", cmap="inferno")
+            for r in range(4):
+                axes[r, col].axis("off")
+        for r, name in enumerate(["Observed", "Pred (α·PSF)", "Residual",
+                                  "Oversampled ePSF"]):
+            axes[r, 0].set_ylabel(name, fontsize=10)
+            # Re-enable axis just for ylabel
+            axes[r, 0].axis("on")
+            axes[r, 0].set_xticks([]); axes[r, 0].set_yticks([])
+        fig.suptitle(
+            f"PSF v4 — {band}  (epoch {epoch})  "
+            f"χ²/dof={band_chi2[band]:.2f}  FWHM={band_fwhm[band]:.2f} px  r={band_r[band]:.3f}",
+            fontsize=10, y=1.02,
+        )
+        fig.tight_layout()
+        log[f"vis/psf_{band}"] = wandb.Image(fig)
+        plt.close(fig)
+
+        # ----- spatial-grid PSF mosaic per band -----
+        gn = 5
+        gx = np.linspace(-0.9, 0.9, gn)
+        gy = np.linspace(-0.9, 0.9, gn)
+        gpos = np.stack(np.meshgrid(gx, gy, indexing="ij"), axis=-1).reshape(-1, 2)
+        gpos_t = torch.tensor(gpos, dtype=torch.float32, device=device)
+        gbi = torch.full((gn * gn,), bi, dtype=torch.long, device=device)
+        grid_psf = model(gpos_t, gbi)[:, 0].cpu().numpy()  # [25, P, P]
+
+        fig2, axes2 = plt.subplots(gn, gn, figsize=(7, 7))
+        for k in range(gn * gn):
+            r, c = k // gn, k % gn
+            axes2[r, c].imshow(grid_psf[k], origin="lower", cmap="inferno")
+            axes2[r, c].axis("off")
+        fig2.suptitle(f"PSF v4 — {band}  spatial grid (epoch {epoch})",
+                      fontsize=10)
+        fig2.tight_layout()
+        log[f"vis/psf_grid_{band}"] = wandb.Image(fig2)
+        plt.close(fig2)
+
+    # Per-band scalar metrics for headline curves in W&B
+    for b, v in band_chi2.items():  log[f"val/{b}_chi2_per_dof"] = v
+    for b, v in band_fwhm.items():  log[f"val/{b}_fwhm_native_px"] = v
+    for b, v in band_r.items():     log[f"val/{b}_pearson_r"]     = v
+    if band_chi2:
+        log["val/chi2_per_dof_mean"]    = float(np.mean(list(band_chi2.values())))
+        log["val/pearson_r_mean"]       = float(np.mean(list(band_r.values())))
+
+    return log
+
+
 def psf_loss(pred_unit: torch.Tensor,    # [B, 1, S, S]   unit-flux native render
              observed: torch.Tensor,      # [B, S, S]      flux-units
              rms: torch.Tensor,           # [B, S, S]      flux-units
@@ -180,7 +354,8 @@ def train(args: argparse.Namespace) -> None:
     print(f"Stamp size (native): {stamp_size} px")
 
     model = PSFFieldV4(psf_size=args.psf_size, oversampling=args.oversampling,
-                       hidden_ch=args.hidden_ch, n_freqs=args.n_freqs).to(device)
+                       hidden_ch=args.hidden_ch, n_freqs=args.n_freqs,
+                       gauss_init_sigma_ovs=args.gauss_init_sigma_ovs).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr,
                                   weight_decay=args.weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
@@ -248,6 +423,17 @@ def train(args: argparse.Namespace) -> None:
             for bi, vs in per_band_val.items():
                 if vs:
                     log[f"val/band_{ALL_BANDS[bi]}"] = float(np.mean(vs))
+
+            # Visualisation + per-band metrics (every vis_every epochs and on the last epoch).
+            if (epoch + 1) % args.vis_every == 0 or epoch == args.epochs - 1 or epoch == 0:
+                try:
+                    vlog = _visualize_psf(model, val_ds, stamp_size=stamp_size,
+                                          device=device, epoch=epoch + 1,
+                                          n_per_band=args.vis_n_per_band)
+                    log.update(vlog)
+                except Exception as e:
+                    print(f"  [warn] visualisation failed: {e}")
+
             wandb.log(log)
 
         if val_mean < best_val:
@@ -259,6 +445,7 @@ def train(args: argparse.Namespace) -> None:
                     "oversampling": args.oversampling,
                     "hidden_ch": args.hidden_ch,
                     "n_freqs": args.n_freqs,
+                    "gauss_init_sigma_ovs": args.gauss_init_sigma_ovs,
                     "band_names": ALL_BANDS,
                 },
                 "epoch": epoch + 1,
@@ -302,9 +489,17 @@ def build_argparser() -> argparse.ArgumentParser:
     p.add_argument("--oversampling", type=int, default=5)
     p.add_argument("--hidden-ch", type=int, default=128)
     p.add_argument("--n-freqs", type=int, default=8)
+    p.add_argument("--gauss-init-sigma-ovs", type=float, default=5.0,
+                   help="Initial sigma (in oversampled pixels) of the per-band "
+                        "Gaussian prior added to the decoder output. Sets the "
+                        "PSF shape the model starts from before learning residuals.")
     p.add_argument("--charbonnier-eps", type=float, default=1e-3)
     p.add_argument("--wandb-project", type=str, default=None)
     p.add_argument("--wandb-name", type=str, default=None)
+    p.add_argument("--vis-every", type=int, default=2,
+                   help="Log per-band PSF figures + spatial grids every N epochs (default 2).")
+    p.add_argument("--vis-n-per-band", type=int, default=5,
+                   help="Number of held-out stars per band in the gallery figure (default 5).")
     return p
 
 

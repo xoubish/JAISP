@@ -58,12 +58,14 @@ class PSFFieldV4(nn.Module):
         band_names: List[str] = ALL_BANDS,
         hidden_ch: int = 128,
         n_freqs: int = 8,
+        gauss_init_sigma_ovs: float = 5.0,
     ):
         super().__init__()
         self.psf_size = int(psf_size)
         self.oversampling = int(oversampling)
         self.band_names = list(band_names)
         self.band_to_idx = {b: i for i, b in enumerate(self.band_names)}
+        self.gauss_init_sigma_ovs = float(gauss_init_sigma_ovs)
         n_bands = len(self.band_names)
 
         self.n_freqs = int(n_freqs)
@@ -90,32 +92,56 @@ class PSFFieldV4(nn.Module):
             nn.Linear(hidden_ch, hidden_ch * base_h * base_h // 4),
         )
 
+        # Bilinear upsample + Conv (instead of ConvTranspose2d with stride 2).
+        # ConvTranspose2d has a well-known "checkerboard" failure mode that
+        # produces lattice ridges in the oversampled output (Odena et al. 2016,
+        # https://distill.pub/2016/deconv-checkerboard/). Replacing it with
+        # bilinear upsampling + regular Conv2d removes those artifacts entirely.
         self.upsample_net = nn.Sequential(
-            nn.ConvTranspose2d(hidden_ch // 4, hidden_ch // 2,
-                               kernel_size=4, stride=2, padding=1),
+            # Stage 1: base_h × base_h  → 2·base_h × 2·base_h
+            nn.Upsample(scale_factor=2, mode="bilinear", align_corners=False),
+            nn.Conv2d(hidden_ch // 4, hidden_ch // 2, kernel_size=3, padding=1),
             nn.GELU(),
             nn.Conv2d(hidden_ch // 2, hidden_ch // 2, kernel_size=3, padding=1),
             nn.GELU(),
-            nn.ConvTranspose2d(hidden_ch // 2, hidden_ch // 4,
-                               kernel_size=4, stride=2, padding=1),
+            # Stage 2: 2·base_h × 2·base_h  → 4·base_h × 4·base_h
+            nn.Upsample(scale_factor=2, mode="bilinear", align_corners=False),
+            nn.Conv2d(hidden_ch // 2, hidden_ch // 4, kernel_size=3, padding=1),
             nn.GELU(),
             nn.Conv2d(hidden_ch // 4, 1, kernel_size=3, padding=1),
         )
 
-        # Output bias initialised so the initial PSF is a soft Gaussian-ish
-        # blob (better than starting at zero or random — the network has a
-        # natural starting point closer to a real PSF).
         with torch.no_grad():
-            for m in self.upsample_net:
-                if isinstance(m, (nn.Conv2d, nn.ConvTranspose2d)):
-                    nn.init.kaiming_normal_(m.weight, nonlinearity="relu")
-                    if m.bias is not None:
-                        nn.init.zeros_(m.bias)
+            convs = [m for m in self.upsample_net if isinstance(m, nn.Conv2d)]
+            for m in convs:
+                nn.init.kaiming_normal_(m.weight, nonlinearity="relu")
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+            # Scale the LAST conv down so the decoder's initial output is small
+            # compared to the per-band Gaussian prior below. This makes the
+            # initial PSF a centred Gaussian that the decoder gradually refines,
+            # instead of a near-uniform blob (the failure mode v4 was hitting
+            # without a prior).
+            if convs:
+                convs[-1].weight.data *= 0.01
+
+        # Per-band learnable Gaussian prior, in pre-softplus log-space. The
+        # decoder's output is added to this before softplus + flux normalisation,
+        # so each band starts with a centred 2-D Gaussian PSF and the network
+        # only has to learn deviations.
+        P = self.psf_size
+        c = (P - 1) / 2.0
+        coords = torch.arange(P, dtype=torch.float32) - c
+        yy, xx = torch.meshgrid(coords, coords, indexing="ij")
+        log_gauss = -(xx * xx + yy * yy) / (2.0 * self.gauss_init_sigma_ovs ** 2)
+        self.psf_bias = nn.Parameter(
+            log_gauss.view(1, 1, P, P).repeat(n_bands, 1, 1, 1)
+        )  # [n_bands, 1, P, P]
 
         n_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
         print(f"PSFFieldV4: {n_params/1e6:.2f}M trainable params  "
               f"(psf_size={self.psf_size}, oversampling={self.oversampling}, "
-              f"n_bands={n_bands})")
+              f"n_bands={n_bands}, gauss_init_sigma_ovs={self.gauss_init_sigma_ovs})")
 
     # ----------------------------------------------------------
     # Public API
@@ -156,6 +182,9 @@ class PSFFieldV4(nn.Module):
             psf = F.pad(psf, (pw, self.psf_size - Wp - pw,
                               ph, self.psf_size - Hp - ph))
 
+        # Add the per-band Gaussian prior (in pre-softplus space) before
+        # rectifying. This anchors the model at a centred Gaussian shape.
+        psf = psf + self.psf_bias[band_idx]
         # Force non-negative (softplus is smooth, won't kill gradients) and
         # normalise to unit total flux per stamp.
         psf = F.softplus(psf)
@@ -190,9 +219,16 @@ class PSFFieldV4(nn.Module):
         # Build a sampling grid in oversampled-pixel coordinates and use
         # grid_sample with 'bilinear' on the integrated grid (sum-pool over ovs).
 
-        # Native pixel centres (relative to stamp centre): [-h, ..., +h]
-        h = (stamp_size - 1) / 2.0
-        coords = torch.arange(stamp_size, device=psf_oversampled.device, dtype=torch.float32) - h
+        # Convention: the source's "central pixel" in the stamp is at integer index
+        #   ix = stamp_size // 2 (= 16 for stamp_size=32, = 11 for stamp_size=23, etc).
+        # This matches the build_psf_v4_training_set.py stamp-extraction convention,
+        # where the stamp covers [ix - half, ix - half + stamp) and the source sits
+        # at stamp-pixel index `half + frac`. Native-pixel coords relative to the
+        # source's central pixel are then `(arange(stamp_size) - half)`, which
+        # yields zero exactly at the central pixel.
+        half = stamp_size // 2
+        coords = torch.arange(stamp_size, device=psf_oversampled.device,
+                              dtype=torch.float32) - float(half)
         # For each native pixel, we want to sample ovs×ovs sub-pixel points and average.
         sub = (torch.arange(ovs, device=psf_oversampled.device, dtype=torch.float32)
                - (ovs - 1) / 2.0) / ovs

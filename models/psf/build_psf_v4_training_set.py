@@ -40,7 +40,7 @@ for Euclid, both well above the relevant PSF FWHMs.
 import argparse
 import sys
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -151,14 +151,48 @@ def _cut_stamp(img: np.ndarray, rms: np.ndarray,
     return img[..., y0:y1, x0:x1].copy(), rms[..., y0:y1, x0:x1].copy(), frac_x, frac_y, True
 
 
+def _refine_centroid_in_stamp(stamp_img: np.ndarray, ap_radius: float = 3.0,
+                              n_iter: int = 5) -> Optional[Tuple[float, float]]:
+    """Iteratively-refined intensity-weighted centroid in stamp coordinates.
+
+    Trusts the stamp data, not the input detection's sub-pixel position.
+    Returns ``(cy, cx)`` in stamp pixel coords where the integer pixels are
+    indexed 0..H-1, or ``None`` if the source flux is too low to find a centroid.
+    """
+    img = stamp_img[0] if stamp_img.ndim == 3 else stamp_img
+    H, W = img.shape
+    yy, xx = np.indices(img.shape, dtype=np.float32)
+
+    # Background from a thin outer ring (tolerant to a single neighbouring source).
+    cx0, cy0 = (W - 1) * 0.5, (H - 1) * 0.5
+    r2 = (xx - cx0) ** 2 + (yy - cy0) ** 2
+    r_out = min(H, W) * 0.5
+    bg_mask = (r2 > (r_out - 3.0) ** 2) & (r2 < r_out ** 2)
+    bg = float(np.median(img[bg_mask])) if bg_mask.any() else 0.0
+    img_bs = np.clip(img - bg, 0.0, None)
+
+    cx, cy = cx0, cy0
+    for _ in range(n_iter):
+        r2 = (xx - cx) ** 2 + (yy - cy) ** 2
+        w = img_bs * (r2 < ap_radius ** 2)
+        s = float(w.sum())
+        if s < 1e-9:
+            return None
+        cx = float((xx * w).sum() / s)
+        cy = float((yy * w).sum() / s)
+    return cy, cx
+
+
 def _estimate_snr_flux(stamp_img: np.ndarray, stamp_rms: np.ndarray,
                        frac_x: float, frac_y: float, ap_radius: float = 3.0
                        ) -> Tuple[float, float]:
     """Aperture SNR + flux estimate inside ``ap_radius`` pixels of the centroid."""
     H, W = stamp_img.shape[-2:]
     yy, xx = np.indices(stamp_img.shape[-2:], dtype=np.float32)
-    cx = (W - 1) * 0.5 + frac_x
-    cy = (H - 1) * 0.5 + frac_y
+    # Source sits at stamp pixel (half + frac, half + frac), matching the
+    # `_cut_stamp` and renderer convention (half = stamp_size // 2).
+    cx = (W // 2) + frac_x
+    cy = (H // 2) + frac_y
     r2 = (xx - cx) ** 2 + (yy - cy) ** 2
     in_ap = r2 < ap_radius ** 2
     if not in_ap.any():
@@ -261,8 +295,28 @@ def build_training_set(args: argparse.Namespace) -> None:
 
             xy_pix, _ = _vis_norm_to_band_pixel(xy_norm, (H_vis, W_vis), band)
 
+            half = stamp // 2
             for k in range(len(xy_norm)):
-                xs, ys = float(xy_pix[k, 0]), float(xy_pix[k, 1])
+                xs0, ys0 = float(xy_pix[k, 0]), float(xy_pix[k, 1])
+                # First cut at the (possibly inaccurate) detection position so we
+                # have a stamp to centroid on.
+                stamp_img0, _, _, _, ok = _cut_stamp(img, rms, xs0, ys0, stamp)
+                if not ok:
+                    continue
+                # Refine the source position from the stamp itself — the dataset's
+                # CenterNet sub-pixel positions are systematically off by ~0.5 px.
+                refined = _refine_centroid_in_stamp(stamp_img0)
+                if refined is None:
+                    continue
+                cy_stamp, cx_stamp = refined
+                # Re-derive the source's image-coord position from the refined
+                # stamp centroid.
+                ix0, iy0 = int(round(xs0)), int(round(ys0))
+                xs = (ix0 - half) + cx_stamp
+                ys = (iy0 - half) + cy_stamp
+
+                # Re-cut the stamp at the refined integer pixel so the source
+                # sits within ±0.5 px of the central pixel.
                 stamp_img, stamp_rms, fx, fy, ok = _cut_stamp(img, rms, xs, ys, stamp)
                 if not ok:
                     continue
