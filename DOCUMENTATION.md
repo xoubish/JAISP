@@ -747,8 +747,9 @@ The current v8 pipeline runs in six stages. The head is the primary correction; 
 2. **Cross-instrument matching**: sky-coordinate match each non-VIS band to VIS, with quality cuts (raw offset < 200 mas, SNR > 5).
 3. **Latent feature extraction**: run the frozen v8 foundation encoder once per tile to get the fused 10-band bottleneck (0.4 arcsec/px, 256 channels) and the raw VIS BandStem feature map (0.1 arcsec/px, 64 channels).
 4. **Per-object offset prediction**: `latent_position_head.py` extracts local windows from both feature maps (5×5 bottleneck, 11×11 VIS-stem), processes them through a small ConvNeXt + Conv + MLP head (687K parameters), and outputs `(dx, dy, log σ)` in VIS pixel space, converted to sky arcsec via the local WCS Jacobian.
-5. **Evaluation**: `eval_latent_position.py` reports raw and head-corrected residuals per band and exports an `anchors.npz` cache for any downstream field fit.
-6. **Optional smooth residual field**: `fit_direct_pinn.py` (PINN/NN) or `fit_hierarchical_gp_concordance.py` (HGP) fit a smooth field to raw or head-residual anchors -- QA, not a correction unless it beats the zero-field baseline on held-out anchors.
+5. **Evaluation**: `eval_latent_position.py` reports raw and head-corrected residuals per band and exports an `anchors.npz` cache for any downstream field fit. The cache contains one entry per detection per tile -- **including duplicates from overlap regions**, where the same physical source is detected in adjacent tiles and projected to identical RA/Dec via the shared patch-boundary WCS.
+6. **Anchor deduplication**: `dedup_anchors.py` greedy-clusters per-band entries within `--radius-arcsec 0.05` (50 mas) and keeps the highest-SNR rep of each cluster, writing `anchors_centernet_dedup.npz` next to the original. Empirically ~69% of v8 CenterNet anchors are tile-overlap duplicates; dedup is the *default* downstream input for both density / number-count work and the smooth-field fits (see "Why dedup matters for the smooth-field fits" below). The original `anchors_centernet.npz` is retained only as the raw archive.
+7. **Optional smooth residual field**: `fit_direct_pinn.py` (PINN/NN) or `fit_hierarchical_gp_concordance.py` (HGP) fit a smooth field to raw or head-residual anchors -- QA, not a correction unless it beats the zero-field baseline on held-out anchors.
 
 ##### The latent position head
 
@@ -785,6 +786,18 @@ The two caches are kept side-by-side as a first-class experimental variable:
 | `anchors_centernet.npz` | CenterNet VIS seeds | 491,748 | 34,510 | 39.8 mas | 8.5 mas |
 
 This is deliberately a *catalogue-level* comparison, not object-matched -- the two detectors select different source pools. CenterNet anchors have lower raw and post-head medians, but fewer of them. Notebook 07 defaults to `anchors_centernet.npz`; "the head helps by X" claims should be read as conditional on the selected anchor pool unless the classical cache is explicitly chosen.
+
+The two anchor counts above (630,120 and 491,748) are pre-dedup. After 50 mas dedup the per-band kept fraction is 30–35% across all bands -- i.e. roughly **two thirds of every per-tile anchor cache is overlap-region duplicate**. The deduped CenterNet cache is 153,068 entries.
+
+##### Why dedup matters for the smooth-field fits
+
+Both PINN ([fit_direct_pinn.py](models/astrometry2/fit_direct_pinn.py)) and HGP ([fit_hierarchical_gp_concordance.py](models/astrometry2/fit_hierarchical_gp_concordance.py)) treat every anchor as an independent observation with an inverse-variance / SNR-weighted contribution. Neither has a duplicate-aware weighting term. When the same physical source is fed in 2–3× from adjacent tiles -- with **identical** RA/Dec because the patch-boundary WCS is shared, so the duplicates are not even sampling slightly different points -- the fits incur three problems:
+
+- **Spatial sampling bias**: overlap zones get 2–3× weight relative to interior zones, pulling the fitted field toward the seam pattern of the tile grid.
+- **False posterior tightness**: inverse-variance weighting reports very high information content where duplicates concentrate, even though they're not statistically independent.
+- **No genuine noise reduction**: with identical RA/Dec there is no spatial averaging benefit; you just get the same input twice with two slightly different offset readings, which the fitter cannot disentangle from genuine close-source structure.
+
+For these reasons the pipeline runs `dedup_anchors.py` immediately after `eval_latent_position.py --save-anchors`, and downstream consumers (PINN, HGP, density / number-count work) point at `anchors_centernet_dedup.npz`. The non-deduped cache is kept as a forensic archive only.
 
 ##### The four smooth-field solvers
 
@@ -1399,6 +1412,7 @@ JAISP/
 |   |   +-- pinn_field_solver.py      PINN field solver (physics-informed)
 |   |   +-- fit_direct_pinn.py        Direct PINN from raw centroids
 |   |   +-- fit_hierarchical_gp_concordance.py Global HGP-style concordance + uncertainty
+|   |   +-- dedup_anchors.py          Cross-tile anchor deduplication (greedy 50 mas cluster, keep highest-SNR rep)
 |   |   +-- train_astro_v7.py          V7 training script (deprecated, version-pinned)
 |   |   +-- train_local_matcher.py     Local matcher training script
 |   |   +-- train_latent_position.py   Latent position head training script
