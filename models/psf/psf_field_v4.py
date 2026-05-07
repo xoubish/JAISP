@@ -53,7 +53,7 @@ class PSFFieldV4(nn.Module):
 
     def __init__(
         self,
-        psf_size: int = 47,
+        psf_size: int = 99,
         oversampling: int = 5,
         band_names: List[str] = ALL_BANDS,
         hidden_ch: int = 128,
@@ -80,9 +80,11 @@ class PSFFieldV4(nn.Module):
         in_dim = 2 * self.n_freqs * 2 + 32  # sin + cos × 2 axes × n_freqs + band_embed
 
         # Map (Fourier(x,y) ⊕ band_embed) → a low-resolution PSF latent, then
-        # upsample to the oversampled stamp via a small ConvTranspose stack.
-        # 12×12 → 24×24 → 47×47 (cropped from a 48 upsample).
-        base_h = 12
+        # upsample to the oversampled stamp via two ×2 bilinear upsamples and
+        # crop to ``psf_size``. ``base_h`` is the smallest size such that
+        # ``base_h * 4 >= psf_size`` so the upsampled grid is just large enough.
+        # Examples: psf_size=99 → base_h=25 (25→50→100→crop99).
+        base_h = (self.psf_size + 3) // 4
         self.base_h = base_h
         self.head_to_grid = nn.Sequential(
             nn.Linear(in_dim, hidden_ch),
@@ -125,18 +127,25 @@ class PSFFieldV4(nn.Module):
             if convs:
                 convs[-1].weight.data *= 0.01
 
-        # Per-band learnable Gaussian prior, in pre-softplus log-space. The
-        # decoder's output is added to this before softplus + flux normalisation,
-        # so each band starts with a centred 2-D Gaussian PSF and the network
-        # only has to learn deviations.
+        # Per-band learnable scalar log-σ (in oversampled pixels) for the
+        # Gaussian prior. At forward time we construct
+        #     bias(y, x) = -((y - cy)² + (x - cx)²) / (2 σ²)
+        # in pre-softplus log-space. The decoder's output is added to this
+        # before softplus + flux normalisation, so each band starts with a
+        # centred 2-D Gaussian and has a single direct parameter that controls
+        # PSF width — gradients on σ widen/narrow the whole prior coherently
+        # in one step rather than nudging 47×47 pixels independently.
+        self.log_sigma_bias = nn.Parameter(
+            torch.full((n_bands,), math.log(self.gauss_init_sigma_ovs))
+        )
+        # Centred radial-squared grid for the bias construction (registered as
+        # a buffer so it follows the model to GPU but isn't a parameter).
         P = self.psf_size
         c = (P - 1) / 2.0
         coords = torch.arange(P, dtype=torch.float32) - c
         yy, xx = torch.meshgrid(coords, coords, indexing="ij")
-        log_gauss = -(xx * xx + yy * yy) / (2.0 * self.gauss_init_sigma_ovs ** 2)
-        self.psf_bias = nn.Parameter(
-            log_gauss.view(1, 1, P, P).repeat(n_bands, 1, 1, 1)
-        )  # [n_bands, 1, P, P]
+        r2 = xx * xx + yy * yy
+        self.register_buffer("coord_r2", r2.view(1, 1, P, P), persistent=False)
 
         n_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
         print(f"PSFFieldV4: {n_params/1e6:.2f}M trainable params  "
@@ -182,9 +191,13 @@ class PSFFieldV4(nn.Module):
             psf = F.pad(psf, (pw, self.psf_size - Wp - pw,
                               ph, self.psf_size - Hp - ph))
 
-        # Add the per-band Gaussian prior (in pre-softplus space) before
-        # rectifying. This anchors the model at a centred Gaussian shape.
-        psf = psf + self.psf_bias[band_idx]
+        # Construct the per-band Gaussian prior on-the-fly from the learnable
+        # log-σ scalar, then add it to the decoder output in pre-softplus
+        # space. This anchors the model at a centred Gaussian whose width is
+        # directly controlled by one parameter per band.
+        sigma = torch.exp(self.log_sigma_bias[band_idx]).view(B, 1, 1, 1)
+        bias = -self.coord_r2 / (2.0 * sigma * sigma)
+        psf = psf + bias
         # Force non-negative (softplus is smooth, won't kill gradients) and
         # normalise to unit total flux per stamp.
         psf = F.softplus(psf)

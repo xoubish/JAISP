@@ -485,7 +485,10 @@ def build_argparser() -> argparse.ArgumentParser:
     p.add_argument("--workers", type=int, default=4)
     p.add_argument("--holdout-frac", type=float, default=0.10)
     p.add_argument("--seed", type=int, default=0)
-    p.add_argument("--psf-size", type=int, default=47)
+    p.add_argument("--psf-size", type=int, default=99,
+                   help="Side of the oversampled ePSF stamp (default 99). With "
+                        "ovs=5 this covers ±9.8 native pixels — enough to fit "
+                        "Rubin/Euclid IR PSF wings (5σ ≈ 8.5 native px).")
     p.add_argument("--oversampling", type=int, default=5)
     p.add_argument("--hidden-ch", type=int, default=128)
     p.add_argument("--n-freqs", type=int, default=8)

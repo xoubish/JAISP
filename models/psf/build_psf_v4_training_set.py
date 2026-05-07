@@ -171,7 +171,27 @@ def _refine_centroid_in_stamp(stamp_img: np.ndarray, ap_radius: float = 3.0,
     bg = float(np.median(img[bg_mask])) if bg_mask.any() else 0.0
     img_bs = np.clip(img - bg, 0.0, None)
 
-    cx, cy = cx0, cy0
+    # Initial guess from the brightest pixel in a lightly-smoothed stamp.
+    # Earlier this started at the geometric centre, but if the input
+    # detection's pixel position is off by more than ``ap_radius`` (e.g. small
+    # VIS↔Rubin WCS offsets at the half-pixel scale, which compound near tile
+    # corners) the small aperture sees only noise and the centroid stays at
+    # the geometric centre — the stamp never gets re-cut and the source ends
+    # up wherever the wrong detection pixel placed it.
+    from scipy.ndimage import gaussian_filter
+    img_smooth = gaussian_filter(img_bs, sigma=1.0, mode="constant")
+    if img_smooth.max() <= 0:
+        return None
+    iy_peak, ix_peak = np.unravel_index(int(img_smooth.argmax()),
+                                        img_smooth.shape)
+    # Reject if the peak is too close to a stamp edge — the aperture would
+    # clip there and the centroid would be biased inward.
+    edge = max(2, int(ap_radius))
+    if (iy_peak < edge or iy_peak >= H - edge or
+            ix_peak < edge or ix_peak >= W - edge):
+        return None
+
+    cx, cy = float(ix_peak), float(iy_peak)
     for _ in range(n_iter):
         r2 = (xx - cx) ** 2 + (yy - cy) ** 2
         w = img_bs * (r2 < ap_radius ** 2)
@@ -183,10 +203,37 @@ def _refine_centroid_in_stamp(stamp_img: np.ndarray, ap_radius: float = 3.0,
     return cy, cx
 
 
+def _sigma_clipped_median(values: np.ndarray, n_sigma: float = 3.0,
+                          n_iter: int = 3) -> float:
+    """MAD-based sigma-clipped median. Robust to a few outlier pixels in the
+    background annulus (PSF wings of bright stars, faint neighbours)."""
+    v = np.asarray(values, dtype=np.float64)
+    for _ in range(n_iter):
+        med = float(np.median(v))
+        mad = float(np.median(np.abs(v - med)))
+        sigma = 1.4826 * mad
+        if sigma <= 0 or v.size < 5:
+            break
+        keep = np.abs(v - med) < n_sigma * sigma
+        if keep.sum() < 5:
+            break
+        v = v[keep]
+    return float(np.median(v))
+
+
 def _estimate_snr_flux(stamp_img: np.ndarray, stamp_rms: np.ndarray,
-                       frac_x: float, frac_y: float, ap_radius: float = 3.0
+                       frac_x: float, frac_y: float,
+                       ap_radius: float = 3.0,
+                       bg_inner: float = 8.0,
+                       bg_outer: float = 14.0,
                        ) -> Tuple[float, float]:
-    """Aperture SNR + flux estimate inside ``ap_radius`` pixels of the centroid."""
+    """Aperture SNR + flux estimate inside ``ap_radius`` pixels of the centroid.
+
+    Background is estimated from a sigma-clipped median over the (bg_inner,
+    bg_outer) annulus. Defaults assume a 32-px stamp: r∈(8, 14) keeps the
+    annulus outside the PSF wings for both Rubin (FWHM ≈ 4 px native) and
+    Euclid VIS/Y/J/H, with room before the stamp edge.
+    """
     H, W = stamp_img.shape[-2:]
     yy, xx = np.indices(stamp_img.shape[-2:], dtype=np.float32)
     # Source sits at stamp pixel (half + frac, half + frac), matching the
@@ -203,9 +250,10 @@ def _estimate_snr_flux(stamp_img: np.ndarray, stamp_rms: np.ndarray,
     if img.ndim == 3:
         img = img[0]; rms = rms[0]
 
-    # Local background from an annulus
-    bg_mask = (r2 > (ap_radius + 1.0) ** 2) & (r2 < (ap_radius + 4.0) ** 2)
-    bg = float(np.median(img[bg_mask])) if bg_mask.any() else 0.0
+    bg_mask = (r2 > bg_inner ** 2) & (r2 < bg_outer ** 2)
+    if bg_mask.sum() < 10:
+        return 0.0, 0.0
+    bg = _sigma_clipped_median(img[bg_mask])
     flux = float((img[in_ap] - bg).sum())
     var = float((rms[in_ap] ** 2).sum())
     snr = flux / max(np.sqrt(var), 1e-9)
@@ -319,6 +367,17 @@ def build_training_set(args: argparse.Namespace) -> None:
                 # sits within ±0.5 px of the central pixel.
                 stamp_img, stamp_rms, fx, fy, ok = _cut_stamp(img, rms, xs, ys, stamp)
                 if not ok:
+                    continue
+                # Verify the rebuild actually centred the source. If refinement
+                # locked onto a neighbour or noise spike the post-rebuild peak
+                # sits far from the centre — drop the stamp.
+                from scipy.ndimage import gaussian_filter
+                _sm = gaussian_filter(stamp_img.astype(np.float32), 1.0,
+                                      mode="constant")
+                if _sm.max() <= 0:
+                    continue
+                _iy, _ix = np.unravel_index(int(_sm.argmax()), _sm.shape)
+                if abs(_iy - half) > 3 or abs(_ix - half) > 3:
                     continue
                 snr, flux = _estimate_snr_flux(stamp_img, stamp_rms, fx, fy)
                 if snr < snr_thr:

@@ -26,6 +26,11 @@ from .psf_field import (
     N_BANDS,
     N_RUBIN,
 )
+from .foundation_epsf_head import (
+    FoundationEPSFHead,
+    load_foundation_epsf_head,
+    load_base_epsf_bank,
+)
 
 __all__ = [
     'PSFField',
@@ -42,4 +47,7 @@ __all__ = [
     'BAND_PX_SCALE',
     'N_BANDS',
     'N_RUBIN',
+    'FoundationEPSFHead',
+    'load_foundation_epsf_head',
+    'load_base_epsf_bank',
 ]
