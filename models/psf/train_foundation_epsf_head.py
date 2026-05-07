@@ -324,15 +324,35 @@ def _make_visual_batch(
     device: torch.device,
     max_examples: int,
 ) -> Dict[str, torch.Tensor]:
-    """Deterministic highest-SNR visual batch."""
+    """Deterministic visual batch with guaranteed per-band coverage.
+
+    Picks the highest-SNR record from every band present in ``records`` first
+    (so faint NISP stars are not crowded out by bright Rubin/VIS detections),
+    then pads up to ``max_examples`` with the next-highest-SNR records overall.
+    """
     finite_records = [r for r in records if np.isfinite(float(r["snr"]))]
-    ordered = sorted(finite_records, key=lambda r: float(r["snr"]), reverse=True)
-    if max_examples > 0:
-        ordered = ordered[:max_examples]
-    if not ordered:
-        ordered = list(records[:max_examples])
+    pool = finite_records if finite_records else list(records)
+    if not pool:
+        rng = np.random.RandomState(0)
+        return make_record_batch(list(records), device, rng, max_stars=0)
+
+    best_per_band: Dict[int, Record] = {}
+    for r in pool:
+        bi = int(r["band_idx"])
+        if bi not in best_per_band or float(r["snr"]) > float(best_per_band[bi]["snr"]):
+            best_per_band[bi] = r
+    band_reps = sorted(best_per_band.values(), key=lambda r: float(r["snr"]), reverse=True)
+    rep_ids = {id(r) for r in band_reps}
+    extras = sorted(
+        (r for r in pool if id(r) not in rep_ids),
+        key=lambda r: float(r["snr"]),
+        reverse=True,
+    )
+    selected = list(band_reps)
+    if max_examples > 0 and len(selected) < max_examples:
+        selected.extend(extras[: max_examples - len(selected)])
     rng = np.random.RandomState(0)
-    return make_record_batch(ordered, device, rng, max_stars=0)
+    return make_record_batch(selected, device, rng, max_stars=0)
 
 
 @torch.no_grad()
