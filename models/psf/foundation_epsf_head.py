@@ -38,6 +38,34 @@ RUBIN_BANDS = ["rubin_u", "rubin_g", "rubin_r", "rubin_i", "rubin_z", "rubin_y"]
 EUCLID_BANDS = ["euclid_VIS", "euclid_Y", "euclid_J", "euclid_H"]
 ALL_BANDS = RUBIN_BANDS + EUCLID_BANDS
 
+BAND_PIXEL_SCALE_ARCSEC = {
+    "rubin_u": 0.2,
+    "rubin_g": 0.2,
+    "rubin_r": 0.2,
+    "rubin_i": 0.2,
+    "rubin_z": 0.2,
+    "rubin_y": 0.2,
+    "euclid_VIS": 0.1,
+    "euclid_Y": 0.1,
+    "euclid_J": 0.1,
+    "euclid_H": 0.1,
+}
+
+# Gaussian-equivalent core sigmas in mas. These are intentionally simple,
+# per-band physical priors rather than empirical ePSF templates.
+DEFAULT_CORE_SIGMA_MAS = {
+    "rubin_u": 430.0,
+    "rubin_g": 400.0,
+    "rubin_r": 390.0,
+    "rubin_i": 380.0,
+    "rubin_z": 385.0,
+    "rubin_y": 395.0,
+    "euclid_VIS": 120.0,
+    "euclid_Y": 190.0,
+    "euclid_J": 195.0,
+    "euclid_H": 200.0,
+}
+
 
 def _softplus_inverse(x: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
     x = x.clamp_min(eps)
@@ -67,12 +95,10 @@ def _crop_or_pad_centered_2d(x: torch.Tensor, size: int) -> torch.Tensor:
 
 
 def default_sigma_native(band: str) -> float:
-    """Reasonable Gaussian fallback width in native pixels."""
-    if band.startswith("rubin"):
-        return 1.5
-    if band == "euclid_VIS":
-        return 0.8
-    return 1.15
+    """Default Gaussian-equivalent core width in native pixels."""
+    sigma_mas = float(DEFAULT_CORE_SIGMA_MAS.get(band, 400.0))
+    px_scale = float(BAND_PIXEL_SCALE_ARCSEC.get(band, 0.2 if band.startswith("rubin") else 0.1))
+    return sigma_mas / (px_scale * 1000.0)
 
 
 def gaussian_epsf(
@@ -91,19 +117,85 @@ def gaussian_epsf(
     return _normalise_unit_flux(psf)
 
 
+def moffat_epsf(
+    psf_size: int,
+    oversampling: int,
+    sigma_native: float,
+    beta: float = 3.5,
+    device: Optional[torch.device] = None,
+    dtype: torch.dtype = torch.float32,
+) -> torch.Tensor:
+    """Create a centred, unit-flux oversampled Moffat ePSF.
+
+    ``sigma_native`` is interpreted as a Gaussian-equivalent core sigma. We
+    convert it to a FWHM and choose the Moffat alpha that gives that FWHM.
+    """
+    beta = max(float(beta), 1.01)
+    c = (int(psf_size) - 1) / 2.0
+    coords = torch.arange(psf_size, device=device, dtype=dtype) - c
+    yy, xx = torch.meshgrid(coords, coords, indexing="ij")
+    fwhm_ovs = 2.354820045 * float(sigma_native) * float(oversampling)
+    alpha = fwhm_ovs / max(2.0 * math.sqrt(2.0 ** (1.0 / beta) - 1.0), 1e-12)
+    rr2 = xx * xx + yy * yy
+    psf = torch.pow(1.0 + rr2 / max(alpha * alpha, 1e-12), -beta)
+    return _normalise_unit_flux(psf)
+
+
 def gaussian_epsf_bank(
     band_names: Sequence[str] = ALL_BANDS,
     psf_size: int = 99,
     oversampling: int = 5,
     sigmas_native: Optional[Mapping[str, float]] = None,
+    sigmas_mas: Optional[Mapping[str, float]] = None,
+    sigma_scale: float = 1.0,
 ) -> torch.Tensor:
     """Build ``[B, P, P]`` Gaussian fallback base ePSFs."""
     stamps = []
     for band in band_names:
         sigma = default_sigma_native(band)
+        if sigmas_mas is not None and band in sigmas_mas:
+            px_scale = float(BAND_PIXEL_SCALE_ARCSEC.get(band, 0.2 if band.startswith("rubin") else 0.1))
+            sigma = float(sigmas_mas[band]) / (px_scale * 1000.0)
         if sigmas_native is not None and band in sigmas_native:
             sigma = float(sigmas_native[band])
-        stamps.append(gaussian_epsf(psf_size, oversampling, sigma))
+        stamps.append(gaussian_epsf(psf_size, oversampling, sigma * float(sigma_scale)))
+    return torch.stack(stamps, dim=0)
+
+
+def analytic_epsf_bank(
+    band_names: Sequence[str] = ALL_BANDS,
+    psf_size: int = 99,
+    oversampling: int = 5,
+    *,
+    kind: str = "gaussian",
+    sigmas_mas: Optional[Mapping[str, float]] = None,
+    sigma_scale: float = 1.0,
+    moffat_beta: float = 3.5,
+) -> torch.Tensor:
+    """Build an analytic per-band base ePSF bank.
+
+    ``kind='gaussian'`` is the clean default. ``kind='moffat'`` gives heavier
+    wings while preserving the same Gaussian-equivalent core widths.
+    """
+    kind = str(kind).lower()
+    if kind == "gaussian":
+        return gaussian_epsf_bank(
+            band_names=band_names,
+            psf_size=psf_size,
+            oversampling=oversampling,
+            sigmas_mas=sigmas_mas,
+            sigma_scale=sigma_scale,
+        )
+    if kind != "moffat":
+        raise ValueError(f"unknown analytic ePSF kind {kind!r}")
+
+    stamps = []
+    for band in band_names:
+        sigma = default_sigma_native(band)
+        if sigmas_mas is not None and band in sigmas_mas:
+            px_scale = float(BAND_PIXEL_SCALE_ARCSEC.get(band, 0.2 if band.startswith("rubin") else 0.1))
+            sigma = float(sigmas_mas[band]) / (px_scale * 1000.0)
+        stamps.append(moffat_epsf(psf_size, oversampling, sigma * float(sigma_scale), beta=moffat_beta))
     return torch.stack(stamps, dim=0)
 
 

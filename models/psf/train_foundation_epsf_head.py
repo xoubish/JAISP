@@ -20,6 +20,10 @@ import sys
 from pathlib import Path
 from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np
 import torch
 
@@ -34,8 +38,10 @@ try:
     from astrometry2.train_latent_position import load_tile_data
     from psf.foundation_epsf_head import (
         ALL_BANDS,
+        DEFAULT_CORE_SIGMA_MAS,
         RUBIN_BANDS,
         FoundationEPSFHead,
+        analytic_epsf_bank,
         load_base_epsf_bank,
     )
 except ImportError:
@@ -45,8 +51,10 @@ except ImportError:
     from models.astrometry2.train_latent_position import load_tile_data
     from models.psf.foundation_epsf_head import (
         ALL_BANDS,
+        DEFAULT_CORE_SIGMA_MAS,
         RUBIN_BANDS,
         FoundationEPSFHead,
+        analytic_epsf_bank,
         load_base_epsf_bank,
     )
 
@@ -57,6 +65,24 @@ except ImportError:
 
 
 Record = Mapping[str, object]
+
+
+def parse_band_float_overrides(spec: Optional[str], *, name: str) -> Dict[str, float]:
+    """Parse ``band=value,band=value`` CLI overrides."""
+    if spec is None or not str(spec).strip():
+        return {}
+    out: Dict[str, float] = {}
+    for raw_part in str(spec).split(","):
+        part = raw_part.strip()
+        if not part:
+            continue
+        if "=" not in part:
+            raise ValueError(f"{name} override {part!r} must look like band=value")
+        band, value = [x.strip() for x in part.split("=", 1)]
+        if band not in ALL_BANDS:
+            raise ValueError(f"{name} override has unknown band {band!r}; valid bands: {ALL_BANDS}")
+        out[band] = float(value)
+    return out
 
 
 def load_psf_records_by_tile(
@@ -273,6 +299,259 @@ def aggregate(rows: Sequence[Mapping[str, object]]) -> Dict[str, float]:
     return {k: float(np.mean([float(row[k]) for row in rows if k in row])) for k in keys}
 
 
+def _robust_limits(x: np.ndarray, q: float = 99.0) -> Tuple[float, float]:
+    finite = np.asarray(x)[np.isfinite(x)]
+    if finite.size == 0:
+        return 0.0, 1.0
+    vmax = float(np.percentile(finite, q))
+    if not np.isfinite(vmax) or vmax <= 0:
+        vmax = float(np.nanmax(np.abs(finite)))
+    vmax = max(vmax, 1e-8)
+    return 0.0, vmax
+
+
+def _pearson_torch(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    a = torch.nan_to_num(a.flatten(1), nan=0.0, posinf=0.0, neginf=0.0)
+    b = torch.nan_to_num(b.flatten(1), nan=0.0, posinf=0.0, neginf=0.0)
+    a = a - a.mean(dim=1, keepdim=True)
+    b = b - b.mean(dim=1, keepdim=True)
+    den = (a.pow(2).sum(dim=1).sqrt() * b.pow(2).sum(dim=1).sqrt()).clamp(min=1e-12)
+    return (a * b).sum(dim=1) / den
+
+
+def _make_visual_batch(
+    records: Sequence[Record],
+    device: torch.device,
+    max_examples: int,
+) -> Dict[str, torch.Tensor]:
+    """Deterministic highest-SNR visual batch."""
+    finite_records = [r for r in records if np.isfinite(float(r["snr"]))]
+    ordered = sorted(finite_records, key=lambda r: float(r["snr"]), reverse=True)
+    if max_examples > 0:
+        ordered = ordered[:max_examples]
+    if not ordered:
+        ordered = list(records[:max_examples])
+    rng = np.random.RandomState(0)
+    return make_record_batch(ordered, device, rng, max_stars=0)
+
+
+@torch.no_grad()
+def _run_visual_tile(
+    pair: Tuple[str, str, str],
+    records: Sequence[Record],
+    frozen_encoder: FrozenEncoder,
+    head: FoundationEPSFHead,
+    args: argparse.Namespace,
+    device: torch.device,
+    max_examples: int,
+) -> Optional[Dict[str, torch.Tensor]]:
+    if not records:
+        return None
+    tile_id, rubin_path, euclid_path = pair
+    enc = None
+    if not args.no_foundation_features:
+        enc = encode_tile(
+            frozen_encoder,
+            tile_id,
+            rubin_path,
+            euclid_path,
+            device,
+            features_cache_dir=args.features_cache_dir,
+        )
+    batch = _make_visual_batch(records, device, max_examples=max_examples)
+    feature_kwargs = {}
+    if enc is not None:
+        feature_kwargs = {
+            "bottleneck": enc["bottleneck"],
+            "vis_stem_features": enc["vis_stem"],
+            "source_positions_vis": batch["source_positions_vis"],
+            "fused_hw": enc["fused_hw"],
+            "vis_hw": enc["vis_hw"],
+        }
+    pred = head(
+        batch["pos_norm"],
+        batch["band_idx"],
+        return_dict=True,
+        **feature_kwargs,
+    )
+    native = head.render_at_native(pred["epsf"], batch["frac_xy"], stamp_size=batch["stamp"].shape[-1])
+    flux, bg = solve_flux_background(
+        native,
+        batch["stamp"],
+        batch["rms"],
+        fit_background=args.fit_background,
+        nonnegative_flux=args.nonnegative_flux,
+    )
+    model = flux.view(-1, 1, 1) * native.squeeze(1) + bg.view(-1, 1, 1)
+    resid = batch["stamp"] - model
+    chi = resid / batch["rms"].clamp(min=1e-6)
+    corr = _pearson_torch(model, batch["stamp"])
+    return {
+        "tile_id": tile_id,
+        "batch": batch,
+        "pred": pred,
+        "native": native,
+        "model": model,
+        "resid": resid,
+        "chi": chi,
+        "corr": corr,
+        "flux": flux,
+        "background": bg,
+    }
+
+
+def _plot_fit_examples(vis: Mapping[str, object], epoch: int, max_examples: int):
+    batch = vis["batch"]
+    model = vis["model"].detach().cpu().numpy()
+    resid = vis["resid"].detach().cpu().numpy()
+    epsf = vis["pred"]["epsf"].detach().cpu().numpy()[:, 0]
+    stamps = batch["stamp"].detach().cpu().numpy()
+    rms = batch["rms"].detach().cpu().numpy()
+    band_idx = batch["band_idx"].detach().cpu().numpy()
+    snr = batch["snr"].detach().cpu().numpy()
+    corr = vis["corr"].detach().cpu().numpy()
+    n = min(max_examples, stamps.shape[0])
+    fig, axes = plt.subplots(4, n, figsize=(2.2 * n, 8.2), squeeze=False)
+    for col in range(n):
+        obs = stamps[col]
+        mod = model[col]
+        res = resid[col]
+        eps = epsf[col]
+        _, vmax = _robust_limits(obs)
+        rlim = max(float(np.nanpercentile(np.abs(res[np.isfinite(res)]), 99)) if np.isfinite(res).any() else 1e-8, 1e-8)
+        chi_abs = np.nanmedian(np.abs(res / np.maximum(rms[col], 1e-6)))
+        axes[0, col].imshow(obs, origin="lower", cmap="gray", vmin=0.0, vmax=vmax)
+        axes[1, col].imshow(mod, origin="lower", cmap="gray", vmin=0.0, vmax=vmax)
+        axes[2, col].imshow(res, origin="lower", cmap="RdBu_r", vmin=-rlim, vmax=rlim)
+        axes[3, col].imshow(eps, origin="lower", cmap="inferno")
+        axes[0, col].set_title(
+            f"{ALL_BANDS[int(band_idx[col])]}\nSNR={snr[col]:.0f} r={corr[col]:.2f} |chi|={chi_abs:.1f}",
+            fontsize=7,
+        )
+        for row in range(4):
+            axes[row, col].set_xticks([])
+            axes[row, col].set_yticks([])
+    for row, label in enumerate(["Observed", "Model", "Residual", "ePSF"]):
+        axes[row, 0].set_ylabel(label, fontsize=9)
+    fig.suptitle(f"Held-out Gaia star fits - epoch {epoch} - tile {vis['tile_id']}", fontsize=10)
+    fig.tight_layout()
+    return fig
+
+
+def _plot_epsf_gallery(vis_list: Sequence[Mapping[str, object]], head: FoundationEPSFHead, epoch: int):
+    by_band: Dict[int, Tuple[np.ndarray, np.ndarray, float]] = {}
+    base = head.base_epsf().detach().cpu().numpy()
+    for vis in vis_list:
+        batch = vis["batch"]
+        epsf = vis["pred"]["epsf"].detach().cpu().numpy()[:, 0]
+        coeff = vis["pred"]["coeff"].detach().cpu().numpy()
+        snr = batch["snr"].detach().cpu().numpy()
+        band_idx = batch["band_idx"].detach().cpu().numpy()
+        order = np.argsort(snr)[::-1]
+        for idx in order:
+            bi = int(band_idx[idx])
+            if bi not in by_band:
+                by_band[bi] = (epsf[idx], coeff[idx], float(snr[idx]))
+    if not by_band:
+        return None
+    fig, axes = plt.subplots(2, len(ALL_BANDS), figsize=(1.6 * len(ALL_BANDS), 3.4), squeeze=False)
+    for bi, band in enumerate(ALL_BANDS):
+        axes[0, bi].imshow(base[bi], origin="lower", cmap="inferno")
+        axes[0, bi].set_title(band, fontsize=7)
+        if bi in by_band:
+            eps, coeff, snr = by_band[bi]
+            axes[1, bi].imshow(eps, origin="lower", cmap="inferno")
+            axes[1, bi].set_title(f"SNR={snr:.0f} |c|={np.mean(np.abs(coeff)):.2f}", fontsize=7)
+        else:
+            axes[1, bi].set_facecolor("#222")
+        for row in range(2):
+            axes[row, bi].set_xticks([])
+            axes[row, bi].set_yticks([])
+    axes[0, 0].set_ylabel("Base", fontsize=9)
+    axes[1, 0].set_ylabel("Head", fontsize=9)
+    fig.suptitle(f"Per-band ePSF base vs foundation head - epoch {epoch}", fontsize=10)
+    fig.tight_layout()
+    return fig
+
+
+def _plot_coeff_hist(vis_list: Sequence[Mapping[str, object]], epoch: int):
+    coeffs = []
+    band_ids = []
+    for vis in vis_list:
+        coeffs.append(vis["pred"]["coeff"].detach().cpu().numpy())
+        band_ids.append(vis["batch"]["band_idx"].detach().cpu().numpy())
+    if not coeffs:
+        return None
+    coeff = np.concatenate(coeffs, axis=0)
+    band_idx = np.concatenate(band_ids, axis=0)
+    rank = coeff.shape[1]
+    fig, axes = plt.subplots(1, rank, figsize=(2.0 * rank, 2.4), squeeze=False)
+    for k in range(rank):
+        ax = axes[0, k]
+        ax.hist(coeff[:, k], bins=24, color="steelblue", alpha=0.8)
+        ax.axvline(0.0, color="black", lw=0.8)
+        ax.set_title(f"c{k}", fontsize=8)
+        ax.tick_params(labelsize=7)
+    fig.suptitle(f"Residual-basis coefficient histograms - epoch {epoch} - N={len(band_idx)}", fontsize=10)
+    fig.tight_layout()
+    return fig
+
+
+@torch.no_grad()
+def build_wandb_visuals(
+    head: FoundationEPSFHead,
+    val_pairs: Sequence[Tuple[str, str, str]],
+    records_by_tile: Mapping[str, Sequence[Record]],
+    frozen_encoder: FrozenEncoder,
+    args: argparse.Namespace,
+    device: torch.device,
+    epoch: int,
+) -> Dict[str, object]:
+    if wandb is None or not val_pairs or args.wandb_image_every <= 0:
+        return {}
+    head.eval()
+    vis_list = []
+    for pair in val_pairs[: max(1, args.wandb_max_visual_tiles)]:
+        try:
+            vis = _run_visual_tile(
+                pair,
+                records_by_tile.get(pair[0], []),
+                frozen_encoder,
+                head,
+                args,
+                device,
+                max_examples=args.wandb_n_examples,
+            )
+        except Exception as exc:
+            print(f"  [warn] W&B visual skip {pair[0]}: {type(exc).__name__}: {exc}")
+            continue
+        if vis is not None:
+            vis_list.append(vis)
+    if not vis_list:
+        return {}
+
+    payload: Dict[str, object] = {}
+    fig = _plot_fit_examples(vis_list[0], epoch, max_examples=args.wandb_n_examples)
+    payload["vis/heldout_fits"] = wandb.Image(fig)
+    plt.close(fig)
+
+    fig = _plot_epsf_gallery(vis_list, head, epoch)
+    if fig is not None:
+        payload["vis/epsf_base_vs_head"] = wandb.Image(fig)
+        plt.close(fig)
+
+    fig = _plot_coeff_hist(vis_list, epoch)
+    if fig is not None:
+        payload["vis/coeff_hist"] = wandb.Image(fig)
+        plt.close(fig)
+
+    corrs = torch.cat([v["corr"].detach().cpu() for v in vis_list]).numpy()
+    chi_abs = torch.cat([v["chi"].abs().flatten(1).median(dim=1).values.detach().cpu() for v in vis_list]).numpy()
+    payload["vis/median_pearson"] = float(np.nanmedian(corrs))
+    payload["vis/median_abs_chi"] = float(np.nanmedian(chi_abs))
+    return payload
+
+
 def run_one_tile(
     pair: Tuple[str, str, str],
     records: Sequence[Record],
@@ -392,6 +671,10 @@ def train(args: argparse.Namespace) -> None:
     if not pairs:
         raise RuntimeError("No discovered tile pairs have PSF training records.")
     train_pairs, val_pairs = split_tile_pairs(pairs, val_frac=args.val_frac, seed=args.seed)
+    if args.max_train_tiles > 0:
+        train_pairs = train_pairs[:args.max_train_tiles]
+    if args.max_val_tiles > 0:
+        val_pairs = val_pairs[:args.max_val_tiles]
     print(f"Train tiles={len(train_pairs)} val tiles={len(val_pairs)}")
 
     foundation_ckpt = torch.load(args.foundation_checkpoint, map_location="cpu", weights_only=False)
@@ -403,8 +686,15 @@ def train(args: argparse.Namespace) -> None:
     foundation = load_foundation(args.foundation_checkpoint, device=torch.device("cpu"), freeze=True)
     frozen_encoder = FrozenEncoder(foundation).to(device).eval()
 
+    base_mode = str(args.base_epsf_mode).lower()
+    if base_mode == "auto":
+        base_mode = "checkpoint" if args.base_epsf_checkpoint else "gaussian"
+
+    base_sigmas_mas = parse_band_float_overrides(args.base_sigma_mas, name="base-sigma-mas")
     base_epsf = None
-    if args.base_epsf_checkpoint:
+    if base_mode == "checkpoint":
+        if not args.base_epsf_checkpoint:
+            raise ValueError("--base-epsf-mode checkpoint requires --base-epsf-checkpoint")
         base_epsf = load_base_epsf_bank(
             args.base_epsf_checkpoint,
             band_names=ALL_BANDS,
@@ -412,6 +702,26 @@ def train(args: argparse.Namespace) -> None:
             oversampling=args.oversampling,
         )
         print(f"Loaded base ePSF bank: {args.base_epsf_checkpoint}")
+    elif base_mode in ("gaussian", "moffat"):
+        base_epsf = analytic_epsf_bank(
+            band_names=ALL_BANDS,
+            psf_size=args.psf_size,
+            oversampling=args.oversampling,
+            kind=base_mode,
+            sigmas_mas=base_sigmas_mas or None,
+            sigma_scale=args.base_sigma_scale,
+            moffat_beta=args.base_moffat_beta,
+        )
+        used_sigmas = {
+            band: float(base_sigmas_mas.get(band, DEFAULT_CORE_SIGMA_MAS[band])) * float(args.base_sigma_scale)
+            for band in ALL_BANDS
+        }
+        print(
+            f"Initialized analytic {base_mode} base ePSF "
+            f"(sigma_scale={args.base_sigma_scale:g}, sigmas_mas={used_sigmas})"
+        )
+    else:
+        raise ValueError(f"unknown --base-epsf-mode {args.base_epsf_mode!r}")
 
     head = FoundationEPSFHead(
         psf_size=args.psf_size,
@@ -442,7 +752,14 @@ def train(args: argparse.Namespace) -> None:
 
     config = {
         "foundation_checkpoint": str(args.foundation_checkpoint),
+        "base_epsf_mode": base_mode,
         "base_epsf_checkpoint": str(args.base_epsf_checkpoint) if args.base_epsf_checkpoint else None,
+        "base_sigma_mas": {
+            band: float(base_sigmas_mas.get(band, DEFAULT_CORE_SIGMA_MAS[band]))
+            for band in ALL_BANDS
+        },
+        "base_sigma_scale": args.base_sigma_scale,
+        "base_moffat_beta": args.base_moffat_beta,
         "psf_size": args.psf_size,
         "oversampling": args.oversampling,
         "band_names": ALL_BANDS,
@@ -561,6 +878,21 @@ def train(args: argparse.Namespace) -> None:
             payload.update({f"val/{k}": v for k, v in val_metrics.items()})
             payload["epoch"] = epoch
             payload["lr"] = optimizer.param_groups[0]["lr"]
+            if (
+                args.wandb_image_every > 0
+                and (epoch == 1 or epoch == args.epochs or epoch % args.wandb_image_every == 0)
+            ):
+                payload.update(
+                    build_wandb_visuals(
+                        head,
+                        val_pairs,
+                        records_by_tile,
+                        frozen_encoder,
+                        args,
+                        device,
+                        epoch,
+                    )
+                )
             wandb.log(payload)
 
     summary = {
@@ -581,7 +913,34 @@ def build_argparser() -> argparse.ArgumentParser:
     p.add_argument("--euclid-dir", required=True, type=Path)
     p.add_argument("--foundation-checkpoint", required=True, type=Path)
     p.add_argument("--output-dir", required=True, type=Path)
+    p.add_argument(
+        "--base-epsf-mode",
+        choices=("auto", "gaussian", "moffat", "checkpoint"),
+        default="auto",
+        help="Base ePSF prior. auto uses checkpoint when provided, otherwise analytic Gaussian.",
+    )
     p.add_argument("--base-epsf-checkpoint", type=Path, default=None)
+    p.add_argument(
+        "--base-sigma-mas",
+        type=str,
+        default="",
+        help=(
+            "Optional comma-separated analytic core sigma overrides in mas, "
+            "e.g. rubin_r=390,euclid_VIS=120."
+        ),
+    )
+    p.add_argument(
+        "--base-sigma-scale",
+        type=float,
+        default=1.0,
+        help="Multiplicative scale applied to analytic base widths.",
+    )
+    p.add_argument(
+        "--base-moffat-beta",
+        type=float,
+        default=3.5,
+        help="Moffat beta for --base-epsf-mode moffat.",
+    )
     p.add_argument("--features-cache-dir", type=Path, default=None)
     p.add_argument("--device", type=str, default=None)
     p.add_argument("--epochs", type=int, default=60)
@@ -592,6 +951,18 @@ def build_argparser() -> argparse.ArgumentParser:
     p.add_argument("--val-frac", type=float, default=0.10)
     p.add_argument("--min-snr", type=float, default=10.0)
     p.add_argument("--max-stars-per-tile", type=int, default=256)
+    p.add_argument(
+        "--max-train-tiles",
+        type=int,
+        default=0,
+        help="Optional cap on train tiles after the deterministic split. 0 = all.",
+    )
+    p.add_argument(
+        "--max-val-tiles",
+        type=int,
+        default=0,
+        help="Optional cap on validation tiles after the deterministic split. 0 = all.",
+    )
 
     p.add_argument("--psf-size", type=int, default=99)
     p.add_argument("--oversampling", type=int, default=5)
@@ -626,6 +997,24 @@ def build_argparser() -> argparse.ArgumentParser:
 
     p.add_argument("--wandb-project", type=str, default=None)
     p.add_argument("--wandb-name", type=str, default=None)
+    p.add_argument(
+        "--wandb-image-every",
+        type=int,
+        default=5,
+        help="Log W&B diagnostic images every N epochs, plus first/last. 0 disables images.",
+    )
+    p.add_argument(
+        "--wandb-n-examples",
+        type=int,
+        default=6,
+        help="Number of held-out star examples shown in the W&B fit gallery.",
+    )
+    p.add_argument(
+        "--wandb-max-visual-tiles",
+        type=int,
+        default=2,
+        help="Maximum validation tiles to encode for W&B images.",
+    )
     return p
 
 
