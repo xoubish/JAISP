@@ -32,10 +32,13 @@ import argparse
 import sys
 import warnings
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
+from astropy import units as u
+from astropy.coordinates import SkyCoord
 from astropy.io.fits import Header
+from astropy.time import Time
 from astropy.wcs import WCS
 
 warnings.filterwarnings("ignore", category=UserWarning)
@@ -67,7 +70,7 @@ def query_gaia_field(ra_centre: float, dec_centre: float, radius_deg: float,
     Gaia.ROW_LIMIT = -1
 
     adql = f"""
-    SELECT ra, dec, phot_g_mean_mag,
+    SELECT source_id, ra, dec, ref_epoch, pmra, pmdec, phot_g_mean_mag,
            parallax, parallax_over_error,
            astrometric_excess_noise, ipd_frac_multi_peak,
            duplicated_source
@@ -82,10 +85,63 @@ def query_gaia_field(ra_centre: float, dec_centre: float, radius_deg: float,
     job = Gaia.launch_job_async(adql)
     t = job.get_results()
     return {
+        "source_id": np.array(t["source_id"], dtype=np.int64),
         "ra": np.array(t["ra"], dtype=np.float64),
         "dec": np.array(t["dec"], dtype=np.float64),
+        "ref_epoch": np.array(t["ref_epoch"], dtype=np.float64),
+        "pmra": np.array(t["pmra"], dtype=np.float64),
+        "pmdec": np.array(t["pmdec"], dtype=np.float64),
         "g_mag": np.array(t["phot_g_mean_mag"], dtype=np.float32),
     }
+
+
+def _resolve_target_time(args: argparse.Namespace) -> Optional[Time]:
+    if args.obs_epoch_mjd is not None:
+        return Time(float(args.obs_epoch_mjd), format="mjd", scale="tcb")
+    if args.obs_epoch_year is not None:
+        return Time(float(args.obs_epoch_year), format="jyear", scale="tcb")
+    return None
+
+
+def _apply_gaia_proper_motion(
+    gaia: Dict[str, np.ndarray],
+    target_time: Optional[Time],
+) -> Dict[str, np.ndarray]:
+    if target_time is None:
+        return gaia
+
+    out = dict(gaia)
+    ra = np.asarray(gaia["ra"], dtype=np.float64)
+    dec = np.asarray(gaia["dec"], dtype=np.float64)
+    ref_epoch = np.asarray(gaia.get("ref_epoch", np.full_like(ra, 2016.0)), dtype=np.float64)
+    pmra = np.asarray(gaia.get("pmra", np.zeros_like(ra)), dtype=np.float64)
+    pmdec = np.asarray(gaia.get("pmdec", np.zeros_like(ra)), dtype=np.float64)
+    valid = np.isfinite(ra) & np.isfinite(dec) & np.isfinite(ref_epoch) & np.isfinite(pmra) & np.isfinite(pmdec)
+    if not valid.any():
+        print("No finite Gaia proper motions found; using catalog RA/Dec without propagation.")
+        return out
+
+    coord = SkyCoord(
+        ra=ra[valid] * u.deg,
+        dec=dec[valid] * u.deg,
+        pm_ra_cosdec=pmra[valid] * u.mas / u.yr,
+        pm_dec=pmdec[valid] * u.mas / u.yr,
+        frame="icrs",
+        obstime=Time(ref_epoch[valid], format="jyear", scale="tcb"),
+    )
+    moved = coord.apply_space_motion(new_obstime=target_time)
+    ra_new = ra.copy()
+    dec_new = dec.copy()
+    ra_new[valid] = moved.ra.deg
+    dec_new[valid] = moved.dec.deg
+    out["ra"] = ra_new
+    out["dec"] = dec_new
+    out["propagated_epoch_jyear"] = np.full(ra.shape, float(target_time.jyear), dtype=np.float64)
+    print(
+        f"Propagated {int(valid.sum())}/{len(valid)} Gaia sources to epoch "
+        f"{float(target_time.jyear):.3f}."
+    )
+    return out
 
 
 # ============================================================
@@ -150,8 +206,21 @@ def main():
     p.add_argument("--cache", type=Path,
                    default=Path("/tmp/gaia_psf_cache.npz"),
                    help="Cache GAIA query result so reruns skip the network call.")
+    p.add_argument(
+        "--obs-epoch-year",
+        type=float,
+        default=None,
+        help="Propagate Gaia coordinates to this Julian year before cutting stamps.",
+    )
+    p.add_argument(
+        "--obs-epoch-mjd",
+        type=float,
+        default=None,
+        help="Propagate Gaia coordinates to this MJD before cutting stamps.",
+    )
     args = p.parse_args()
     args.out_dir.mkdir(parents=True, exist_ok=True)
+    target_time = _resolve_target_time(args)
 
     # ---- Tile pairs + field footprint ---------------------------------------
     pairs = _tile_pairs(args.rubin_dir, args.euclid_dir)
@@ -173,8 +242,14 @@ def main():
     print(f"Field centre: ({ra_c:.4f}, {dec_c:.4f})  cone radius: {field_radius:.3f} deg")
 
     # ---- GAIA ---------------------------------------------------------------
+    required_cache_keys = {"source_id", "ra", "dec", "ref_epoch", "pmra", "pmdec", "g_mag"}
     if args.cache.exists():
         gaia = dict(np.load(args.cache))
+        if not required_cache_keys.issubset(gaia):
+            print(f"Cache {args.cache} is missing Gaia PM/source_id columns; refreshing query.")
+            gaia = query_gaia_field(ra_c, dec_c, field_radius,
+                                    mag_min=args.mag_min, mag_max=args.mag_max)
+            np.savez(args.cache, **gaia)
         print(f"Loaded {len(gaia['ra'])} GAIA sources from cache "
               f"({args.cache}).")
     else:
@@ -183,12 +258,15 @@ def main():
                                 mag_min=args.mag_min, mag_max=args.mag_max)
         np.savez(args.cache, **gaia)
         print(f"Got {len(gaia['ra'])} GAIA sources, cached.")
+    if target_time is None:
+        print("No observation epoch provided; using Gaia catalog coordinates without PM propagation.")
+    gaia = _apply_gaia_proper_motion(gaia, target_time)
 
     # ---- Per-tile stamp extraction ------------------------------------------
     out: Dict[str, Dict[str, list]] = {b: {
         "stamps": [], "rms": [], "frac_xy": [],
         "pos_norm": [], "pos_pix": [],
-        "snr": [], "flux": [], "tile_id": [], "g_mag": [],
+        "snr": [], "flux": [], "tile_id": [], "g_mag": [], "source_id": [],
     } for b in ALL_BANDS}
 
     n_used_stars = 0
@@ -216,6 +294,7 @@ def main():
         ras_in = gaia["ra"][in_v][keep]
         decs_in = gaia["dec"][in_v][keep]
         mags_in = gaia["g_mag"][in_v][keep]
+        source_ids_in = gaia["source_id"][in_v][keep]
         n_used_stars += int(len(ras_in))
 
         for band in ALL_BANDS:
@@ -259,6 +338,7 @@ def main():
                 out[band]["flux"].append(flux)
                 out[band]["tile_id"].append(tile_id)
                 out[band]["g_mag"].append(float(mags_in[k]))
+                out[band]["source_id"].append(int(source_ids_in[k]))
 
         if (ti + 1) % 50 == 0:
             kept = sum(len(out[b]["stamps"]) for b in ALL_BANDS)
@@ -286,6 +366,7 @@ def main():
             flux=np.array(rec["flux"], dtype=np.float32),
             tile_id=np.array(rec["tile_id"], dtype=np.str_),
             g_mag=np.array(rec["g_mag"], dtype=np.float32),
+            source_id=np.array(rec["source_id"], dtype=np.int64),
         )
         print(f"  {band:14s}  {n:6d} stamps  →  {path}")
 

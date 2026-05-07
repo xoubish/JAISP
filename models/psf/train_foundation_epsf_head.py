@@ -438,6 +438,80 @@ def _plot_fit_examples(vis: Mapping[str, object], epoch: int, max_examples: int)
     return fig
 
 
+def _collect_best_band_examples(
+    vis_list: Sequence[Mapping[str, object]],
+) -> Dict[int, Dict[str, object]]:
+    best: Dict[int, Dict[str, object]] = {}
+    for vis in vis_list:
+        batch = vis["batch"]
+        stamps = batch["stamp"].detach().cpu().numpy()
+        rms = batch["rms"].detach().cpu().numpy()
+        band_idx = batch["band_idx"].detach().cpu().numpy()
+        snr = batch["snr"].detach().cpu().numpy()
+        model = vis["model"].detach().cpu().numpy()
+        resid = vis["resid"].detach().cpu().numpy()
+        chi = vis["chi"].detach().cpu().numpy()
+        epsf = vis["pred"]["epsf"].detach().cpu().numpy()[:, 0]
+        corr = vis["corr"].detach().cpu().numpy()
+        for idx in np.argsort(snr)[::-1]:
+            bi = int(band_idx[idx])
+            prev = best.get(bi)
+            if prev is not None and float(prev["snr"]) >= float(snr[idx]):
+                continue
+            best[bi] = {
+                "obs": stamps[idx],
+                "model": model[idx],
+                "resid": resid[idx],
+                "chi": chi[idx],
+                "rms": rms[idx],
+                "epsf": epsf[idx],
+                "snr": float(snr[idx]),
+                "corr": float(corr[idx]),
+                "tile_id": vis["tile_id"],
+            }
+    return best
+
+
+def _plot_band_fit_grid(vis_list: Sequence[Mapping[str, object]], epoch: int):
+    best = _collect_best_band_examples(vis_list)
+    if not best:
+        return None
+    fig, axes = plt.subplots(4, len(ALL_BANDS), figsize=(1.7 * len(ALL_BANDS), 6.8), squeeze=False)
+    for bi, band in enumerate(ALL_BANDS):
+        item = best.get(bi)
+        if item is None:
+            for row in range(4):
+                axes[row, bi].set_facecolor("#222")
+                axes[row, bi].set_xticks([])
+                axes[row, bi].set_yticks([])
+            axes[0, bi].set_title(f"{band}\nno val example", fontsize=7)
+            continue
+        obs = item["obs"]
+        mod = item["model"]
+        res = item["resid"]
+        eps = item["epsf"]
+        rms = item["rms"]
+        _, vmax = _robust_limits(obs)
+        rlim = max(float(np.nanpercentile(np.abs(res[np.isfinite(res)]), 99)) if np.isfinite(res).any() else 1e-8, 1e-8)
+        chi_abs = np.nanmedian(np.abs(res / np.maximum(rms, 1e-6)))
+        axes[0, bi].imshow(obs, origin="lower", cmap="gray", vmin=0.0, vmax=vmax)
+        axes[1, bi].imshow(mod, origin="lower", cmap="gray", vmin=0.0, vmax=vmax)
+        axes[2, bi].imshow(res, origin="lower", cmap="RdBu_r", vmin=-rlim, vmax=rlim)
+        axes[3, bi].imshow(eps, origin="lower", cmap="inferno")
+        axes[0, bi].set_title(
+            f"{band}\nSNR={item['snr']:.0f} r={item['corr']:.2f} |chi|={chi_abs:.1f}",
+            fontsize=7,
+        )
+        for row in range(4):
+            axes[row, bi].set_xticks([])
+            axes[row, bi].set_yticks([])
+    for row, label in enumerate(["Observed", "Model", "Residual", "ePSF"]):
+        axes[row, 0].set_ylabel(label, fontsize=9)
+    fig.suptitle(f"Per-band held-out Gaia star fits - epoch {epoch}", fontsize=10)
+    fig.tight_layout()
+    return fig
+
+
 def _plot_epsf_gallery(vis_list: Sequence[Mapping[str, object]], head: FoundationEPSFHead, epoch: int):
     by_band: Dict[int, Tuple[np.ndarray, np.ndarray, float]] = {}
     base = head.base_epsf().detach().cpu().numpy()
@@ -511,7 +585,10 @@ def build_wandb_visuals(
         return {}
     head.eval()
     vis_list = []
-    for pair in val_pairs[: max(1, args.wandb_max_visual_tiles)]:
+    want_tiles = max(1, args.wandb_max_visual_tiles)
+    search_tiles = max(want_tiles, int(getattr(args, "wandb_band_search_tiles", want_tiles)))
+    found_bands = set()
+    for pair in val_pairs[:search_tiles]:
         try:
             vis = _run_visual_tile(
                 pair,
@@ -527,6 +604,10 @@ def build_wandb_visuals(
             continue
         if vis is not None:
             vis_list.append(vis)
+            band_idx = vis["batch"]["band_idx"].detach().cpu().numpy()
+            found_bands.update(int(x) for x in np.unique(band_idx))
+            if len(vis_list) >= want_tiles and len(found_bands) == len(ALL_BANDS):
+                break
     if not vis_list:
         return {}
 
@@ -538,6 +619,11 @@ def build_wandb_visuals(
     fig = _plot_epsf_gallery(vis_list, head, epoch)
     if fig is not None:
         payload["vis/epsf_base_vs_head"] = wandb.Image(fig)
+        plt.close(fig)
+
+    fig = _plot_band_fit_grid(vis_list, epoch)
+    if fig is not None:
+        payload["vis/per_band_fits"] = wandb.Image(fig)
         plt.close(fig)
 
     fig = _plot_coeff_hist(vis_list, epoch)
@@ -1014,6 +1100,12 @@ def build_argparser() -> argparse.ArgumentParser:
         type=int,
         default=2,
         help="Maximum validation tiles to encode for W&B images.",
+    )
+    p.add_argument(
+        "--wandb-band-search-tiles",
+        type=int,
+        default=24,
+        help="Maximum validation tiles to search for representative per-band W&B examples.",
     )
     return p
 
