@@ -20,13 +20,13 @@ When using this file operationally, prefer the checkpoints and commands marked a
 
 | Layer | Current default | Notes |
 |-------|-----------------|-------|
-| Foundation | `models/checkpoints/jaisp_v8_fine/checkpoint_best.pt` | Fine-scale 0.4"/px fused MAE, trained with 256x256 Rubin random crops from the 512x512 tile product. **v9 is in training** (`models/checkpoints/jaisp_v9/`) — adds symmetric concat fusion for Rubin and adversarial cross-instrument masking, motivated by notebook 13's bottleneck-content diagnosis. **v10 code is staged** (`models/train_jaisp_foundation_v10.py`) — adds Charbonnier base loss + core-L2 weighting to fix the per-source PSF-profile residuals seen in v9 reconstructions; not yet trained. |
+| Foundation | `models/checkpoints/jaisp_v10_warmstart/checkpoint_best.pt` for new PSF work; `models/checkpoints/jaisp_v8_fine/checkpoint_best.pt` for older downstream heads | V10 is the current backbone for the Gaia foundation-ePSF run: v9 concat fusion plus Charbonnier reconstruction loss and core-L2 weighting. Existing CenterNet, latent astrometry, and photometry checkpoints were trained on v8 and remain valid until retrained. |
 | Detection | `checkpoints/centernet_v8_fine/centernet_round2.pt` | Fused-bottleneck CenterNet on v8 features; all-790-tile labels cached at `data/detection_labels/centernet_v8_r2_790.pt`. |
 | Astrometry | `models/checkpoints/latent_position_v8_no_psf/best.pt` | Current no-PSF latent position head. Gaussian-fit photon centroids are the present target convention. |
 | Smooth field QA | `models/astrometry2/fit_direct_pinn.py` | Fits raw or head-residual anchors from `anchors.npz` or `anchors_centernet.npz`; CenterNet post-head PINN fields are about 1 mas and do not improve anchor residuals. |
 | Concordance uncertainty / model check | `models/astrometry2/fit_hierarchical_gp_concordance.py` | Experimental hierarchical GP-style field with posterior std maps. Current CenterNet post-head HGP does not agree with PINN or beat the zero-field baseline, so it is QA/model-selection only, not a production correction. Default priors overfit per-tile noise on raw; for a fair PINN cross-check use `--length-scales 300,900 --prior-common-mas 4 --prior-group-mas 2 --prior-band-mas 1` (super-tight) -- at this setting HGP and PINN converge on raw within ~2 mas RMS and 0.03 mas anchor-level improvement. |
-| PSF | `models/checkpoints/psf_field_v3.pt` | Continuous SIREN PSFField for all 10 bands, used for PSF diagnostics and photometry. |
-| Photometry | `models/checkpoints/photometry_foundation_200_fast/checkpoint_best.pt`; experiment: `models/checkpoints/rendered_stamp_v2_bigstamp/checkpoint_best.pt` | Current main learned v8 photometry head, plus PSFField matched-filter, scarlet-like residual-scene, and rendered-stamp experimental paths. |
+| PSF | `models/checkpoints/foundation_epsf_head_gaia_gaussian_v10/` | Current run: Gaia-selected stars, frozen V10 foundation features, analytic Gaussian base ePSF, low-rank residual head, W&B image diagnostics. Older PSFField/PCA/V4 attempts are archived under `models/older_architectures/psf/`. |
+| Photometry | `models/checkpoints/photometry_foundation_200_fast/checkpoint_best.pt`; experiment: `models/checkpoints/rendered_stamp_v2_bigstamp/checkpoint_best.pt` | Current main learned v8 photometry head plus scarlet-like residual-scene and rendered-stamp experimental paths. PSFField-backed photometry is historical until the new ePSF head is wired into photometry. |
 
 Figure policy for this file: keep only figures that change the reader's understanding. Repetitive good/worst galleries, per-epoch W&B panels, and minor variants should stay in notebooks or checkpoint folders unless they support a new conclusion.
 
@@ -100,10 +100,11 @@ The long-term plan is to (a) extend evaluation to at least one non-ECDFS field a
 
 ## Data
 
-The current checkout contains the products used by the v8 pipeline:
+The current checkout contains the products used by the v8 downstream pipeline and the newer v10/Gaia PSF-head work:
 
 - **Current flat training set**: `data/rubin_tiles_all/` and `data/euclid_tiles_all/`. The Rubin side contains 790 tiles; the Euclid side contains 791 readable files, of which 790 are matched Rubin+Euclid pairs and one is Euclid-only. Rubin-driven loaders ignore the unmatched Euclid tile.
 - **200-tile downstream subset**: `data/rubin_tiles_200/` and `data/euclid_tiles_200/`, both symlink subsets of the flat training set. Current detection training and cached v8 features use this subset.
+- **Current PSF star stamps**: `data/psf_training_gaia/`. These are Gaia-selected point-source stamps for all 10 bands, with per-star `stamps`, `rms`, `frac_xy`, `pos_norm`, `pos_pix`, `snr`, `flux`, `tile_id`, and Gaia magnitude metadata. This replaces the older CenterNet/V4 PSF stamp set for current PSF-head training.
 - **Patch-organized tract5063 product**: `data/rubin_tiles_tract5063/patch_{14,15,24}/` and `data/euclid_tiles_tract5063/patch_{14,15,24}/`, with 280 files per instrument. These are useful for patch-level inspection and ingestion provenance; the flat loaders above are the current training interface.
 - **Historical ECDFS 144-tile subset**: referenced in older checkpoints and experiment notes, but the `data/rubin_tiles_ecdfs/` and `data/euclid_tiles_ecdfs/` directories are not present in this checkout.
 
@@ -310,9 +311,9 @@ See the next section for the full v7 architecture.
 | v5 | Native-res JEPA | Strict position matching | Failed: JEPA can't enforce pixel precision |
 | v6 | Dense MAE | Pixel-space reconstruction | Works but VIS downsampled to Rubin grid |
 | v7 | Mixed-res MAE | 2-stream (Rubin mean / Euclid concat), native resolution | Prior production: preserves per-band PSF structure, RMS-aware loss. Superseded by v8 for all downstream work. |
-| v8 | Fine-scale MAE | v7 architecture + configurable fused scale + random crop | **Current production**: 2× finer bottleneck (0.4"/px), same token count via 256×256 crops. All current downstream heads (CenterNet, latent position, PSFField, photometry) use v8 features. |
-| v9 | Symmetric concat fusion + adversarial masking | v8 architecture + Rubin StreamFuser switched from mean to concat (`rubin_concat=True`) + adversarial drop of wavelength-adjacent same-instrument bands | **Currently training**. Motivated by notebook 13 — fixes the gradient asymmetry where Rubin per-band gradients were attenuated 1/6× by mean fusion. Source-centered probe Euclid R² jumped from −0.32 (v8) to +0.13 at the bottleneck level; all 10 bands now have std ratio ~1.0. ~25K extra params (0.27% of total). |
-| v10 | v9 + Charbonnier loss + core-L2 weighting | v9 architecture + per-pixel L1 replaced by Charbonnier (L2-like near zero, L1-like at large residuals) + extra L2 penalty on high-info "core" pixels | **Code ready, not yet trained**. Motivated by donut/dipole PSF residuals visible in v9 reconstruction diagnostics — these come from L1's median-broadening tendency at sharp source cores. Adds no parameters; small additional compute per step. |
+| v8 | Fine-scale MAE | v7 architecture + configurable fused scale + random crop | Prior production for downstream heads: 2× finer bottleneck (0.4"/px), same token count via 256×256 crops. Current CenterNet, latent astrometry, and photometry checkpoints still use v8 features. |
+| v9 | Symmetric concat fusion + adversarial masking | v8 architecture + Rubin StreamFuser switched from mean to concat (`rubin_concat=True`) + adversarial drop of wavelength-adjacent same-instrument bands | Superseded by v10 warm-start. Motivated by notebook 13 — fixes the gradient asymmetry where Rubin per-band gradients were attenuated 1/6× by mean fusion. Source-centered probe Euclid R² jumped from −0.32 (v8) to +0.13 at the bottleneck level; all 10 bands reached std ratio ~1.0. ~25K extra params (0.27% of total). |
+| v10 | v9 + Charbonnier loss + core-L2 weighting | v9 architecture + per-pixel L1 replaced by Charbonnier (L2-like near zero, L1-like at large residuals) + extra L2 penalty on high-info "core" pixels | Current foundation for new PSF work. Warm-start checkpoint: `models/checkpoints/jaisp_v10_warmstart/checkpoint_best.pt`; used by the active Gaia Gaussian ePSF-head run. |
 
 ### v7 Mixed-Resolution MAE (Prior Production)
 
@@ -383,13 +384,13 @@ This is the RMS-aware loss run ([wandb](https://wandb.ai/AI-Astro/JAISP-Foundati
 
 Reconstruction quality across bands: Rubin g/r/i/z achieve near-perfect fidelity (Pearson r >= 0.989). Rubin u and Euclid NISP bands are solid (r = 0.87-0.97). Euclid VIS is the weakest band (r = 0.87, std_ratio = 0.92), likely because reconstructing the highest-resolution channel from coarser inputs is the hardest prediction task. Mean Pearson r across all 10 bands is 0.955.
 
-### v8 Fine-Scale MAE (Current)
+### v8 Fine-Scale MAE (Prior Production / Still Used by Older Heads)
 
 **Files**: `models/jaisp_foundation_v8.py`, `models/jaisp_dataset_v8.py`, `models/train_jaisp_foundation_v8.py`
 
-**Current checkpoint**: `models/checkpoints/jaisp_v8_fine/checkpoint_best.pt`. This is the foundation all current downstream heads (CenterNet v8, latent position head v8, PSFField v3, foundation photometry head) are trained on.
+**Checkpoint**: `models/checkpoints/jaisp_v8_fine/checkpoint_best.pt`. This remains the foundation for the existing CenterNet v8, latent position head v8, and foundation photometry checkpoints. New PSF-head work has moved to v10.
 
-V8 started as an experimental fork of V7 testing whether a finer bottleneck resolution would improve per-object alignment for galaxies with colour gradients. It is now the production foundation: the v8 latent position head reduces cross-instrument alignment residuals by ~74-79% (vs. ~51% for the v7 head), and the downstream stack (CenterNet, PSFField, photometry) all operate on v8 features. The architecture is identical to V7 except:
+V8 started as an experimental fork of V7 testing whether a finer bottleneck resolution would improve per-object alignment for galaxies with colour gradients. It became the first strong production foundation: the v8 latent position head reduces cross-instrument alignment residuals by ~74-79% (vs. ~51% for the v7 head), and the existing CenterNet/astrometry/photometry stack still operates on v8 features. The architecture is identical to V7 except:
 
 1. **Configurable fused scale**: `fused_pixel_scale_arcsec` defaults to **0.4"/px** instead of 0.8"/px, giving 2× finer spatial resolution in the bottleneck.
 2. **Auto-computed stream depths**: Stream encoder depths are derived automatically from the fused scale (Rubin depth=1, Euclid depth=2 at 0.4"/px) instead of hardcoded.
@@ -491,13 +492,13 @@ The minimum guard `remaining < 2 → skip drop` ensures the encoder always recei
 - The notebook 13 diagnostic was rerun against the v9 best.pt mid-training. Source-centered ridge probe **Euclid R² jumped from −0.32 to +0.13** (a 0.45 improvement over v8). MLP-probe Euclid/Rubin ratio went from **0.65 to 0.79**. The bottleneck genuinely encodes Euclid information now, not just VIS spatial scaffolding.
 - The VIS-monopoly at the gradient level **persists** in v9 (cross/within ratio 6241 vs 2009 in v8 — even more concentrated on VIS). The architectural fix did not change *what input the encoder pulls from*, only *what the bottleneck stores*. The interpretation: VIS is intrinsically the right source band given its resolution + depth + sharpness, and the encoder learned this in both v8 and v9. The v9 contribution is that the bottleneck no longer compresses Rubin info away — it stores Rubin SED variance linearly while still using VIS as the spatial scaffold.
 
-**Decision**: adopt v9 as the next production foundation when training completes. The bottleneck-content improvement is robust on the diagnostic, and there's no measurable regression on any downstream-relevant metric. **Don't go back to v8.**
+**Decision**: v9 was the right architectural move and became the warm-start source for v10. The bottleneck-content improvement is robust on the diagnostic, and there is no reason to return to v8 for new foundation/PSF work.
 
-### v10 — PSF-aware Loss (Planned)
+### v10 — PSF-aware Loss (Current for New PSF Work)
 
 **Files**: `models/train_jaisp_foundation_v10.py` (new); `models/jaisp_foundation_v8.py` (extended with `loss_type`, `core_l2_weight`, `charbonnier_eps`, `core_info_threshold` parameters; defaults preserve v8/v9 behaviour).
 
-**Status**: code staged, not yet trained.
+**Status**: trained via warm-start from v9. Current checkpoint: `models/checkpoints/jaisp_v10_warmstart/checkpoint_best.pt`. This is the frozen foundation used by the active Gaia Gaussian ePSF-head run (`models/checkpoints/foundation_epsf_head_gaia_gaussian_v10/`).
 
 V10 addresses an issue that is independent of v9's cross-instrument question: **per-source PSF profile residuals**. v9's reconstruction diagnostics (and v8's, equally) show systematic donut/dipole patterns at source positions — the model's predicted PSF is slightly broader than the truth at sharp cores, and slightly narrower at the wings. Two diagnostic patterns:
 
@@ -528,20 +529,13 @@ V10 makes two loss-side changes (both gated on new parameters with v8/v9-preserv
 
 Both changes are pure loss modifications: zero new parameters, ~5% additional FLOPs per training step from the extra `(pred-target)^2` reduction. The v9 architecture (concat fusion + adversarial masking) carries forward unchanged. The trainer also wires per-band normalised loss telemetry (`train/band_X_norm`) so dashboards show real per-band performance comparisons rather than RMS-weight-amplified loss values.
 
-**Order of operations**:
-
-1. Wait for v9 training to finish.
-2. Diagnose v9's PSF residuals on the same reconstruction notebook. If donut/dipole patterns are visibly smaller than v8, v9's adversarial masking already helped — only run the Charbonnier-only variant of v10 (`--core_l2_weight 0`) first.
-3. If v9 still shows significant residuals, run v10 with both Charbonnier + core-L2.
-4. If v10 still leaves visible PSF residuals, plan v11 with an explicit second-moment penalty per detected source (the previously-deferred Step 3).
-
-V10 can be warm-started from v9's best.pt (`--resume models/checkpoints/jaisp_v9/checkpoint_best.pt --resume_weights_only`) with a lower LR (~1e-4) and ~50 epochs, reusing the v9 representation rather than retraining from scratch.
+**Operational note**: v10 was warm-started from v9 (`--resume models/checkpoints/jaisp_v9/checkpoint_best.pt --resume_weights_only`) with lower LR, preserving v9's concat-fusion representation while polishing the reconstruction loss around source cores. The current PSF-head run uses this checkpoint rather than v8.
 
 ---
 
 ## Downstream Heads
 
-All current downstream heads reuse the frozen **V8** foundation encoder (`models/checkpoints/jaisp_v8_fine/checkpoint_best.pt`). Only lightweight task-specific layers are trained on top. This means each head gets the benefit of the full 10-band multi-instrument representation without the cost of encoding from scratch, and training each head is fast (hours, not days). The V7-based checkpoints (CenterNet v7, latent position v7) remain available as comparison baselines but are superseded by their v8 counterparts.
+Downstream heads reuse frozen foundation features and train only lightweight task-specific layers. Existing CenterNet, latent astrometry, and photometry checkpoints are still v8-based (`models/checkpoints/jaisp_v8_fine/checkpoint_best.pt`). The new PSF head is v10-based (`models/checkpoints/jaisp_v10_warmstart/checkpoint_best.pt`) because v10 was built specifically to reduce PSF-profile reconstruction residuals. The V7-based checkpoints remain available as comparison baselines but are superseded by v8/v10 counterparts.
 
 The downstream modules should be read as scientific tests of the representation. Detection tests whether the foundation latent contains multi-band source evidence beyond VIS peak-finding. Astrometry tests whether the latent preserves enough local spatial information to improve cross-instrument centering. PSF and photometry test whether the representation can support physically interpretable flux extraction and blend modeling. A downstream head is therefore not only a utility script; it is an experiment asking what information the foundation has actually learned.
 
@@ -554,7 +548,7 @@ Detection is the first downstream test of whether the foundation representation 
 The detection stack supports three complementary source-finding choices. The fused-bottleneck CenterNet is now trained against the v8 foundation (`checkpoints/centernet_v8_fine/centernet_round2.pt`) with cached v8 bottleneck features in `data/cached_features_v8_fine/`.
 
 1. **Classical VIS baseline**: native-resolution Euclid VIS peak-finding with bright-star masking. This is fast, robust, and remains the bootstrap source list for pseudo-label generation.
-2. **Foundation + CenterNet (current: v8)**: a dense detector on top of the frozen foundation **fused bottleneck**. This is the strongest current option for broad 10-band semantic fusion, especially when the signal is spread across multiple bands rather than carried by one sharp VIS peak. The v8 round-2 checkpoint is used to produce the 790-tile detection label set (`data/detection_labels/centernet_v8_r2_790.pt`, ~188 detections/tile) that PSFField v3 and the foundation photometry head consume.
+2. **Foundation + CenterNet (current: v8)**: a dense detector on top of the frozen foundation **fused bottleneck**. This is the strongest current option for broad 10-band semantic fusion, especially when the signal is spread across multiple bands rather than carried by one sharp VIS peak. The v8 round-2 checkpoint is used to produce the 790-tile detection label set (`data/detection_labels/centernet_v8_r2_790.pt`, ~188 detections/tile) consumed by astrometry and older photometry experiments. The current PSF-head training set comes from Gaia rather than CenterNet detections.
 3. **Foundation + StemCenterNet**: a dense detector on top of the frozen foundation **BandStems** at native resolution. This preserves more local spatial detail than the bottleneck path. The reference checkpoint is `checkpoints/stem_centernet_v7_rms_aware_200/` (on v7 stems); a v8 retrain (`checkpoints/stem_centernet_v8_fine/`) is now also possible via the same `self_train_stem.py` script after `load_foundation()` was made V7/V8-agnostic. The v7 stem checkpoint is the live comparison baseline in `io/05_detection_comparison.ipynb`.
 
 The point of keeping all three is scientific comparison, not redundancy. Classical VIS is the baseline and pseudo-label source. The fused-bottleneck detector tests whether the self-supervised latent has learned genuinely multi-band source evidence. The stem detector tests whether native-resolution foundation features improve local source finding beyond what the coarser bottleneck can express.
@@ -762,7 +756,7 @@ The bottleneck path captures chromatic morphology from all 10 bands (star vs gal
 
 **Training** uses jitter-based self-supervision: VIS Gaussian-fit centroids are the targets, controlled Gaussian jitter (~30 mas) creates approximate input positions, and the head learns to recover the photon centroid that the local features encode. Training augments with random 90°/180°/270° rotations and horizontal/vertical flips (16 orientations per source) -- the pixel-to-sky Jacobian is correctly transformed for each augmentation so the sky-space loss stays valid. The Rayleigh NLL loss includes a per-source label-noise term `σ_eff = sqrt(σ_pred² + σ_label²)` with `σ_label = 5 mas` by default, capturing the SITCOMTN-159 WCS-solution systematic floor and preventing overfitting to noisy bright-source labels.
 
-**Why we do not use PSFField centroids as labels.** The head extracts features at the jittered position; the features encode "where the photon centroid is in the window." PSFField-refined centroids differ from photon centroids by ~16 mas because they incorporate a learned PSF model the head cannot see. Training the head to match a target it cannot construct from features creates an irreducible ~29–30 mas plateau in both v7 and v8 runs (table below). **Use Gaussian-fit photon centroids for head training/evaluation; use PSFField only as a separate PSF/photometry product.**
+**Why we do not use learned-PSF centroids as labels.** The head extracts features at the jittered position; the features encode "where the photon centroid is in the window." The archived PSFField-refined centroids differed from photon centroids by ~16 mas because they incorporated a learned PSF model the astrometry head could not see. Training the head to match a target it cannot construct from features creates an irreducible ~29–30 mas plateau in both v7 and v8 runs (table below). **Use Gaussian-fit photon centroids for head training/evaluation; train PSF models as separate instrument/photometry products.**
 
 | Run | Foundation | Centroid labels | Detection / anchor source | Outcome |
 |---|---|---|---|---|
@@ -1235,96 +1229,98 @@ The chromatic and morphology diagnostics are kept in `docs/figures/` but not emb
 
 **Directory**: `models/psf/`
 
-PSF modelling and photometry form the bridge between representation learning and physically interpretable survey products. Detection and astrometry can be evaluated mostly through positions and residuals; photometry must additionally explain the observed pixel intensities under blending, noise, morphology, and PSF convolution. The current implementation therefore keeps several paths alive: a compact-source PSFField matched-filter baseline, a learned v8 photometry head, a scarlet-like residual-scene optimizer, and an experimental rendered-stamp head. These are not redundant implementations; they encode different assumptions about how much physics should remain explicit.
+PSF modelling and photometry form the bridge between representation learning and physically interpretable survey products. Detection and astrometry can be evaluated mostly through positions and residuals; photometry must additionally explain the observed pixel intensities under blending, noise, morphology, and PSF convolution. The active PSF path is now a **foundation-conditioned effective PSF head** trained on Gaia-selected point-source stamps. Older PSFField, PCA, and V4 NN-ePSF attempts are preserved under `models/older_architectures/psf/` as historical reference, not as the recommended route.
 
 The PSF is a fundamental survey property consumed by three downstream tasks (astrometry centroiding, forced photometry, eventually shape measurement). It lives in its own module rather than under `photometry/` because it is not a sub-concept of any one task.
 
 #### Why PSFs matter for this project
 
-Astrometry2 initially plateaued at 40-50 mas MAE, and notebook 06 traces that raw-anchor residual to **centering / centroid-definition scatter** rather than a missing smooth concordance field. PSF modelling is still important, but the v8 astrometry migration showed that PSFField-refined centroids are not automatically better latent-head labels: used directly as targets they create a ~29-30 mas plateau. The current role of PSFField is PSF diagnostics and future forced photometry, with astrometric label use deferred until the centroid convention is made explicit in a joint PSF+head training loop.
+Astrometry2 initially plateaued at 40-50 mas MAE, and notebook 06 traces that raw-anchor residual to **centering / centroid-definition scatter** rather than a missing smooth concordance field. PSF modelling is still important, but the astrometry migration showed that learned-PSF-refined centroids are not automatically better latent-head labels: used directly as targets they create a ~29-30 mas plateau. The current astrometry target convention remains Gaussian-fit photon centroids; the PSF head is trained as a separate instrument model for diagnostics and future photometry.
 
-#### PSFField architecture
+#### Current architecture: foundation ePSF head
 
-Continuous, chromatic, spatially-varying PSF field for all 10 bands in one model:
+The active implementation is `models/psf/foundation_epsf_head.py`, trained by `models/psf/train_foundation_epsf_head.py`.
 
 ```
-f(xy_sub, x_tile, y_tile, band, sed) → intensity
+f(pos_tile, band, frozen V10 local features) -> oversampled unit-flux ePSF
 ```
 
-- **Continuous** (SIREN-based, Sitzmann et al. 2020). The PSF is represented as an implicit function in arcsec coordinates, not a discretised stamp. Querying at sub-pixel offsets is exact rather than interpolated. This is what makes the next two items clean.
-- **Pixel integration**: when comparing to data, each data pixel is integrated by evaluating the PSF on a K×K sub-grid (K=4) inside the pixel footprint. Rubin pixels integrate 0.2"×0.2" boxes, Euclid 0.1"×0.1". Same PSFField handles both with physically correct sampling.
-- **Chromatic**: a per-source SED embedding (from the 10-band flux vector) conditions the SIREN. The PSF shape inside each band depends on the source's SED -- a hot blue star has a slightly sharper r-band PSF than a cool red star in the *same* r filter, because the filter isn't monochromatic.
-- **DCR term**: a small learnable 6×2 parameter block applies a colour-dependent centroid shift in Rubin bands only (space-based Euclid is immune). Captures residual differential chromatic refraction in stacked mosaics as a linear function of g−i colour.
+The head predicts a positive, unit-sum oversampled ePSF for each star and band, then renders it back to native pixels at the recorded sub-pixel phase. The model is deliberately constrained:
 
-`render_stamps(...)` produces pixel-integrated PSF stamps in batch for N stars in one band.
+- **Analytic base ePSF**: the default base is a per-band Gaussian with expected core widths (`rubin_u/g/r/i/z/y` about 430/400/390/380/385/395 mas; `euclid_VIS/Y/J/H` about 120/190/195/200 mas). A Moffat base is also available. Empirical PCA bases are now opt-in only because the old PCA training set baked in bad centroids and produced visibly wrong field-centre reconstructions.
+- **Low-rank residual**: the learned component is a small per-band residual basis. A coefficient MLP predicts how to mix the basis at each tile position and band, keeping the head from inventing arbitrary high-frequency PSF structure.
+- **Foundation conditioning**: coefficients are conditioned on frozen V10 bottleneck features plus Euclid VIS stem features extracted around the source location, tile position Fourier features, and a band embedding.
+- **Flux/background solve outside the head**: during training, rendered PSF stamps are scaled by an analytic optimal flux and optional local constant background. The head learns PSF shape, not source brightness.
+- **Regularization**: coefficient L2, residual/basis L2, basis total variation, and optional ePSF total variation keep the residual small and smooth.
 
-#### Training: jointly learn PSF *and* sub-pixel centroids
+The head can be loaded with `load_foundation_epsf_head(...)`; `render_at_native(...)` converts the oversampled ePSF to native stamp pixels at each star's `frac_xy`.
 
-The centroid-smearing bug in naive PSF fitting is: stars are extracted at integer-pixel detection peaks, so each stamp has a random ~0.5-pixel sub-pixel offset. Averaging chi² over many stars trains the model to reproduce a PSF *convolved with the centroid-error distribution* -- broader than the real PSF.
+#### Training data: Gaia stars
 
-The fix is structural, not procedural: each star carries a **learnable sub-pixel centroid** as an `nn.Parameter`, optimised jointly with the SIREN via SGD. The converged centroids are by construction the sub-pixel refinement PSF-fitting gives you -- astrometric labels fall out of PSF training for free.
+The current star stamps live in `data/psf_training_gaia/` and are produced by `models/psf/build_psf_gaia_training_set.py`. Gaia replaces the earlier CenterNet/V4 star list because the older list had enough coordinate/centroid failures to make the learned PSF visibly wrong. The first cell of `io/08_psf_visualization.ipynb` is now the sanity check: it displays random Gaia stars and reports centroid residual summaries, with the sub-pixel Gaia target marked explicitly.
 
-Star selection (`models/psf/star_selection.py`):
+The Gaia stamp files contain one NPZ per band with native-resolution stamps, RMS maps, sub-pixel phase (`frac_xy`), tile position (`pos_norm`, `pos_pix`), SNR, flux estimate, tile id, and Gaia magnitude metadata. A future schema improvement should store Gaia `source_id` as well as magnitude so matches remain unambiguous.
 
-1. **VIS-based detection** (sharpest PSF, no seeing variation, cleanest stellar locus). Candidates come from either CenterNet v8 pseudo-labels or classical `_pseudo_labels_vis` -- both include bright-core detection and diffraction-spike masking.
-2. **2D moment fit** on each candidate for FWHM and sub-pixel centroid.
-3. **Stellar locus cut**: keep `|FWHM − median| < 8% × median` -- the locus is a pencil-thin stripe in VIS because the VIS PSF is so sharp.
-4. **Isolation cut**: no neighbour within 3".
-5. **Per-band saturation cut**: reject stars whose peak pixel in any band falls in the top 5% for the tile.
-6. **Cross-match VIS → Rubin via WCS** and extract 10-band stamps at sub-pixel positions (`F.grid_sample`).
+#### Current run
 
-Robust training (`models/psf/train_psf_field.py`):
+The active run is the V10 + analytic-Gaussian version:
 
-- **Heteroscedastic χ² with variance floor**: `σ² ≥ (0.02 × peak)²` caps per-pixel SNR at 50. Without this, bright bands have so little Poisson noise that any 2% PSF imperfection explodes χ².
-- **Huber loss**: per-pixel contributions switch from quadratic to linear at 3σ. Outlier pixels (cosmic rays, saturated spikes, binary companions) still contribute but stop dominating the gradient.
-- **Percentile outlier rejection**: after epoch 12, reject the worst 10% of stars (ranked by median across-band χ²). Drops the irreducible bad detections (blends, binaries that survived isolation).
-- **SED refresh every 5 epochs**: re-estimate each star's 10-band SED from analytic optimal fluxes. Chromatic PSF conditioning improves as the PSF improves.
-- **Gradient sanitisation**: `nan_to_num_` per-parameter before gradient clipping. Without this, any single Inf in a gradient turns the global `clip_grad_norm_` into a divide-by-Inf that zeros every other param -- poisoning the step with NaN.
+```bash
+python -u models/psf/train_foundation_epsf_head.py \
+    --train-dir data/psf_training_gaia \
+    --rubin-dir data/rubin_tiles_all \
+    --euclid-dir data/euclid_tiles_all \
+    --foundation-checkpoint models/checkpoints/jaisp_v10_warmstart/checkpoint_best.pt \
+    --features-cache-dir data/cached_features_v10_warmstart \
+    --output-dir models/checkpoints/foundation_epsf_head_gaia_gaussian_v10 \
+    --epochs 60 \
+    --max-stars-per-tile 256 \
+    --min-snr 10 \
+    --val-frac 0.10 \
+    --base-epsf-mode gaussian \
+    --base-sigma-scale 1.0 \
+    --device cuda:0 \
+    --wandb-project JAISP-Foundation-EPSF \
+    --wandb-name foundation_epsf_gaia_gaussian_v10 \
+    --wandb-image-every 5 \
+    --wandb-n-examples 6 \
+    --wandb-max-visual-tiles 2
+```
 
-#### Results (v3 checkpoint)
+W&B logs scalar train/validation losses plus diagnostic images:
 
-The current checkpoint is `models/checkpoints/psf_field_v3.pt` (epoch 59, SIREN 192-wide × 6-deep, stamp 25 px). The v3 diagnostics in `models/checkpoints/psf_field_v3_diag/` evaluate 451 validation stars across 60 tiles:
+- `vis/heldout_fits`: observed / model / residual / ePSF panels for held-out Gaia stars.
+- `vis/epsf_base_vs_head`: per-band analytic base vs foundation-conditioned head ePSF.
+- `vis/coeff_hist`: residual-basis coefficient histograms.
+- `vis/median_pearson`, `vis/median_abs_chi`: compact visual-quality scalars.
 
-| Metric | v2 | v3 current |
-|---|---:|---:|
-| χ²/ndof median, rubin_r | 2.23 | 2.89 |
-| χ²/ndof median, rubin_i | 1.87 | 2.20 |
-| χ²/ndof median, euclid_VIS | 3.27 | 3.69 |
-| χ²/ndof median, euclid_Y / J / H | 2.20 / 3.59 / 0.56 | **0.28 / 0.45 / 0.61** |
-| Centroid drift median | 16.0 mas | **14.6 mas** |
-| VIS model FWHM | 0.338" | **0.319"** |
+#### Archived PSF attempts
 
-V3 tightens the centroid drift and NISP residuals but leaves VIS and some Rubin bands above χ²/ndof ≈ 1, so PSFField remains a strong photometry/diagnostic product rather than the current astrometry target convention.
+The older PSFField, PCA, V4 NN-ePSF, CenterNet-star-selection, and validation scripts moved to `models/older_architectures/psf/`. Small reference checkpoints moved with them under `models/older_architectures/psf/checkpoints/`.
 
-#### Diagnostics
+Those attempts remain scientifically useful because they explain what failed:
 
-`models/psf/validate_psf_field.py` produces:
+- **PSFField v3**: continuous SIREN PSFField with SED conditioning and DCR. It improved some NISP residuals and reached 14.6 mas median centroid drift, but VIS/Rubin residuals and the centroid-label mismatch made it a poor target for current astrometry.
+- **PCA empirical ePSF bank**: useful as a quick visualization baseline, but centroid problems in the training stamps produced wrong field-centre ePSFs. It should not be used as the default base for the new head.
+- **V4 NN-ePSF attempt**: superseded by the foundation-conditioned head and Gaia star list.
 
-- χ²/ndof histograms per band
-- Centroid-drift distribution
-- Radial profile model-vs-data per band
-- Random stamp gallery with data / model / residual panels
-- DCR coefficients table
-
-#### Notebook
-
-`io/08_psf_visualization.ipynb` renders the per-band median PSF and its spatial variation across the tile (3×3 grid of tile positions).
+The archived code will need import-path repair before reuse because it was intentionally moved out of the active `models/psf/` package during cleanup.
 
 #### Photometry heads
 
-Photometry now has two complementary paths:
+Photometry now has several complementary paths, but they have not yet been fully migrated from PSFField to the new ePSF head:
 
-- **PSFField matched-filter photometry**: `models.photometry.PSFFieldPhotometryPipeline` renders PSFField templates and applies the vectorized matched-filter estimator in `models/photometry/forced_photometry.py`. This is the compact-source baseline and the fastest way to validate positions, noise maps, PSF sampling, and per-band flux extraction.
 - **V8 foundation photometry head**: `models/photometry/foundation_head.py` is the learned downstream head. It consumes CenterNet detections after latent-head astrometry correction, extracts frozen V8 bottleneck + VIS-stem features, predicts morphology refinements, solves per-band fluxes through the renderer, and trains by local scene residual chi-square.
 - **Scarlet-like residual optimizer**: `models/photometry/scarlet_like.py` fits local blend scenes with non-negative VIS morphology templates, PSF-convolved per-band rendered templates, non-negative per-band fluxes, and an explicit noise-weighted residual loss. This is a baseline/refinement reference for galaxies and blends where a pure PSF template should leave structured residuals.
 - **RenderedStampHead experiment**: `models/photometry/rendered_stamp_head.py` predicts per-source, per-band positive unit-sum rendered stamps directly from frozen V8 features, with no explicit PSF, morphology template, or convolution step. The latest local checkpoint is `models/checkpoints/rendered_stamp_v2_bigstamp/checkpoint_best.pt` (stamp size 71, 200-tile run). Treat this as an experimental end-to-end photometry path, not the default production baseline.
+- **Historical PSFField matched-filter photometry**: `models.photometry.PSFFieldPhotometryPipeline` used PSFField templates and remains conceptually useful as a compact-source baseline, but its old PSF dependency is archived and should be ported to `FoundationEPSFHead` before being treated as current.
 
 The current learned head is Euclid-native VIS/Y/J/H first, where VIS morphology
 and NISP images share the same 0.1"/px grid. Rubin support should either
 resample the VIS morphology to Rubin's 0.2"/px native grid or reproject Rubin to
 the VIS grid before sharing templates.
 
-`io/09_psf_field_photometry_validation.ipynb` validates the compact-source PSF baseline using a CenterNet VIS master catalog. `io/10_scarlet_like_photometry.ipynb` visualizes the per-scene optimizer. `io/11_foundation_photometry_head.ipynb` loads a trained V8 photometry-head checkpoint and compares learned-head residuals against PSF-only residuals on the same CenterNet + astrometry-corrected catalog.
+`io/09_psf_field_photometry_validation.ipynb` is now historical until the compact-source baseline is ported from PSFField to the new ePSF head. `io/10_scarlet_like_photometry.ipynb` visualizes the per-scene optimizer. `io/11_foundation_photometry_head.ipynb` loads a trained V8 photometry-head checkpoint and compares learned-head residuals against PSF-only residuals on the same CenterNet + astrometry-corrected catalog.
 
 ---
 
@@ -1397,15 +1393,16 @@ JAISP/
 |   |   +-- sky_cube.py                Aligned 10-band sky cube extraction
 |   |   +-- viz.py                     Diagnostic visualizations
 |   |
-|   +-- psf/                           PSF modelling (consumed by astrometry/photometry)
-|   |   +-- psf_field.py               PSFField: SIREN + SED encoder + DCR + pixel integration
-|   |   +-- star_selection.py          VIS stellar-locus selection, 10-band stamp extraction
-|   |   +-- train_psf_field.py         Joint SIREN + per-star centroid optimisation
-|   |   +-- validate_psf_field.py      χ², centroid drift, radial profile, stamp gallery
-|   |   +-- run_centernet_detections.py CenterNet inference → VIS-normalised per-tile dets
+|   +-- psf/                           Active Gaia/foundation ePSF modelling
+|   |   +-- foundation_epsf_head.py     V10-conditioned analytic-base + low-rank residual ePSF head
+|   |   +-- train_foundation_epsf_head.py Gaia-star training loop + W&B diagnostics
+|   |   +-- build_psf_gaia_training_set.py Gaia-selected 10-band star stamp builder
+|   |   +-- build_psf_v4_training_set.py Helper functions retained for stamp cutting/SNR utilities
 |   |
-|   +-- photometry/                    Forced photometry (uses models/psf)
-|   |   +-- psf_field_pipeline.py      PSFField-backed forced photometry
+|   +-- older_architectures/psf/        Archived PSFField/PCA/V4 attempts and small checkpoints
+|   |
+|   +-- photometry/                    Forced photometry and residual-scene experiments
+|   |   +-- psf_field_pipeline.py      Legacy PSFField-backed forced photometry; needs ePSF-head port
 |   |   +-- scarlet_like.py            Positive morphology residual scene optimizer
 |   |   +-- foundation_head.py         V8-feature morphology head trained by residual chi-square
 |   |   +-- train_foundation_photometry_head.py CenterNet + astrometry-corrected training loop
@@ -1416,9 +1413,10 @@ JAISP/
 |   |   +-- pipeline.py               End-to-end photometry pipeline
 |   |
 |   +-- checkpoints/                   Saved model weights
-|   |   +-- jaisp_v8_fine/             Current v8 foundation
+|   |   +-- jaisp_v10_warmstart/       Current foundation for new PSF-head work
+|   |   +-- jaisp_v8_fine/             Current foundation for older CenterNet/astrometry/photometry heads
 |   |   +-- latent_position_v8_no_psf/ Current v8 latent astrometry head + anchors
-|   |   +-- psf_field_v3.pt            Current PSFField checkpoint
+|   |   +-- foundation_epsf_head_gaia_gaussian_v10/ Current Gaia/V10 ePSF-head run
 |   |   +-- photometry_foundation_200_fast/ Current learned photometry-head run
 |   |   +-- photometry_foundation_200_emppsf/ Empirical-PSF photometry ablation
 |   |   +-- rendered_stamp_v2_bigstamp/ Experimental end-to-end rendered-stamp head
@@ -1443,8 +1441,8 @@ The notebooks are numbered to reflect a rough pipeline order: data ingestion -> 
 | 05 | `05_detection_comparison.ipynb` | Three detection views overlaid on one VIS tile: classical, V8 + CenterNet (current), V7 + StemCenterNet (legacy comparison). |
 | 06 | `06_astrometry_diagnostics.ipynb` | Centering / centroid-noise / SNR / morphology diagnostic study on ~20 sample tiles. Source of the ~50 mas centering finding. |
 | 07 | `07_astrometry_before_after.ipynb` | Headline before/after across 790 tiles, 9 non-VIS bands. Bar chart, histograms, 9x4 spatial field grid, classical-vs-CenterNet anchor comparison, SNR-stratified PINN refits, GP cross-check, sparse-field recovery analysis. |
-| 08 | `08_psf_visualization.ipynb` | PSFField v3 viz: per-band median PSFs, radial profiles, spatial variation, chromatic blue/red SED comparison. |
-| 09 | `09_psf_field_photometry_validation.ipynb` | PSFField forced photometry validation against CenterNet VIS master catalog. |
+| 08 | `08_psf_visualization.ipynb` | Gaia PSF-star sanity checks plus ePSF visualization/validation. Marks sub-pixel Gaia targets and reports centroid residuals. |
+| 09 | `09_psf_field_photometry_validation.ipynb` | Historical PSFField forced-photometry validation; needs porting to `FoundationEPSFHead` before it is current again. |
 | 10 | `10_scarlet_like_photometry.ipynb` | Per-scene scarlet-like residual photometry optimizer for galaxies and blends. |
 | 11 | `11_foundation_photometry_head.ipynb` | V8 foundation photometry head visualization on Euclid-native scenes; compares learned vs PSF-only residuals. |
 | 12 | `12_astrometry_hgp_vs_pinn.ipynb` | Hierarchical GP vs PINN comparison on CenterNet anchors. Headline post-head smooth-field non-detection; HGP prior-sensitivity ladder; lattice-smoothing experiment. |
@@ -1672,21 +1670,31 @@ PYTHONPATH=. python astrometry2/fit_hierarchical_gp_concordance.py \
 # models/checkpoints/latent_position_v8_no_psf/best.pt
 ```
 
-### 6. PSFField Training
+### 6. Foundation ePSF Head Training
 
 ```bash
-python models/psf/train_psf_field.py \
-    --rubin_dir  data/rubin_tiles_all \
-    --euclid_dir data/euclid_tiles_all \
-    --out models/checkpoints/psf_field_v3.pt \
-    --centernet_labels data/detection_labels/centernet_v8_r2_790.pt \
+PYTHONUNBUFFERED=1 python -u models/psf/train_foundation_epsf_head.py \
+    --train-dir data/psf_training_gaia \
+    --rubin-dir data/rubin_tiles_all \
+    --euclid-dir data/euclid_tiles_all \
+    --foundation-checkpoint models/checkpoints/jaisp_v10_warmstart/checkpoint_best.pt \
+    --features-cache-dir data/cached_features_v10_warmstart \
+    --output-dir models/checkpoints/foundation_epsf_head_gaia_gaussian_v10 \
     --epochs 60 \
-    --siren_hidden 192 --siren_depth 6 --w0_first 15 \
-    --stamp_size 25 \
-    --wandb_project JAISP-PSF
+    --max-stars-per-tile 256 \
+    --min-snr 10 \
+    --val-frac 0.10 \
+    --base-epsf-mode gaussian \
+    --base-sigma-scale 1.0 \
+    --device cuda:0 \
+    --wandb-project JAISP-Foundation-EPSF \
+    --wandb-name foundation_epsf_gaia_gaussian_v10 \
+    --wandb-image-every 5 \
+    --wandb-n-examples 6 \
+    --wandb-max-visual-tiles 2
 ```
 
-### 7. V8 Foundation Photometry Head
+### 7. Legacy V8 Foundation Photometry Head
 
 ```bash
 python models/photometry/train_foundation_photometry_head.py \
@@ -1695,7 +1703,7 @@ python models/photometry/train_foundation_photometry_head.py \
     --foundation-checkpoint models/checkpoints/jaisp_v8_fine/checkpoint_best.pt \
     --detector-checkpoint checkpoints/centernet_v8_fine/centernet_best.pt \
     --astrometry-checkpoint models/checkpoints/latent_position_v8_no_psf/best.pt \
-    --psf-checkpoint models/checkpoints/psf_field_v3.pt \
+    --psf-checkpoint models/older_architectures/psf/checkpoints/psf_field_v3.pt \
     --features-cache-dir data/cached_features_v8_fine \
     --output-dir models/checkpoints/photometry_foundation_200_fast \
     --epochs 30 --max-tiles 200 \
@@ -1705,6 +1713,8 @@ python models/photometry/train_foundation_photometry_head.py \
     --wandb-name photometry_foundation_200_fast \
     --wandb-log-images
 ```
+
+This photometry command is kept for reproducibility of the existing v8 photometry head. It still depends on the archived PSFField checkpoint and should be ported to `FoundationEPSFHead` before being treated as the current photometry baseline.
 
 ### 8. RenderedStampHead Experiment
 
@@ -1733,14 +1743,15 @@ python models/photometry/train_rendered_stamp_head.py \
 
 | Checkpoint | Location | Description |
 |------------|----------|-------------|
-| **V8 foundation (fine-scale)** | `models/checkpoints/jaisp_v8_fine/checkpoint_best.pt` | **Current production foundation.** Fine-scale 0.4"/px fused, 256×256 random-crop training. All current downstream heads are trained on this checkpoint. |
+| **V10 foundation warm-start** | `models/checkpoints/jaisp_v10_warmstart/checkpoint_best.pt` | Current foundation for new PSF-head work. v9 concat fusion plus Charbonnier reconstruction loss and core-L2 weighting. |
+| **V8 foundation (fine-scale)** | `models/checkpoints/jaisp_v8_fine/checkpoint_best.pt` | Current foundation for existing CenterNet, latent astrometry, and photometry checkpoints. Fine-scale 0.4"/px fused, 256×256 random-crop training. |
 | **V7 foundation (RMS-aware)** | `models/checkpoints/jaisp_v7_concat/checkpoint_best.pt` | Prior production (epoch 92). Trained on 790 tile pairs with correct NISP pixel scales and RMS-aware loss. Retained as a comparison baseline. |
-| **CenterNet v8 (current)** | `checkpoints/centernet_v8_fine/centernet_round2.pt` | Fused-bottleneck CenterNet, 2-round self-training on top of `jaisp_v8_fine`. Inference across all 790 tiles is cached at `data/detection_labels/centernet_v8_r2_790.pt` (~188 dets/tile) and feeds PSFField v3 and the foundation photometry head. |
+| **CenterNet v8 (current)** | `checkpoints/centernet_v8_fine/centernet_round2.pt` | Fused-bottleneck CenterNet, 2-round self-training on top of `jaisp_v8_fine`. Inference across all 790 tiles is cached at `data/detection_labels/centernet_v8_r2_790.pt` (~188 dets/tile) and feeds astrometry and older photometry experiments. |
 | **CenterNet v7 (baseline)** | `checkpoints/centernet_v7_rms_aware/centernet_best.pt` | Fused-bottleneck CenterNet on top of `jaisp_v7_concat`. Kept as a v7-vs-v8 comparison. |
 | **StemCenterNet detector** | `checkpoints/stem_centernet_v7_rms_aware_200/stem_centernet_best.pt` | Native-resolution stem detector on top of `jaisp_v7_concat`. No v8 retrain yet. |
-| **PSFField v3** | `models/checkpoints/psf_field_v3.pt` | Continuous SIREN-based PSF for all 10 bands. Trained on CenterNet v8 stellar selections; centroid drift median 14.6 mas, best loss 779. |
+| **Foundation ePSF head (Gaia/V10)** | `models/checkpoints/foundation_epsf_head_gaia_gaussian_v10/` | Current PSF-head run. Gaia-selected stars, analytic Gaussian base, frozen V10 features, low-rank residual ePSF head, W&B fit/ePSF/coefficient plots. |
 | **Latent position head (current)** | `models/checkpoints/latent_position_v8_no_psf/best.pt` | Current per-object astrometry correction. Uses v8 foundation, Gaussian centroid targets, no PSFField labels. |
-| **Foundation photometry head** | `models/checkpoints/photometry_foundation_200_fast/checkpoint_best.pt` | Current main learned photometry-head run on frozen v8 features; Euclid-native VIS/Y/J/H first, with PSFField-rendered templates and residual chi-square training. |
+| **Foundation photometry head** | `models/checkpoints/photometry_foundation_200_fast/checkpoint_best.pt` | Existing learned photometry-head run on frozen v8 features; Euclid-native VIS/Y/J/H first. Still tied to the older PSFField/template path until ported to the new ePSF head. |
 | **RenderedStampHead experiment** | `models/checkpoints/rendered_stamp_v2_bigstamp/checkpoint_best.pt` | End-to-end photometry experiment that predicts rendered per-band stamps directly from v8 features; useful for ablation against explicit PSF/template paths. |
 | **Astrometry V7 matcher** | `models/checkpoints/astro_v7_psffit/checkpoint_best.pt` | Historical V7 multiband matcher with PSF-fit centroids, trained on 200 tiles. Use for matcher experiments, not the current headline correction. |
 | **Latent position head (v7 baseline)** | `models/checkpoints/latent_position_head/best.pt` | Earlier v7 per-object alignment head. |
@@ -1760,6 +1771,7 @@ These checkpoint names are historical references from earlier runs; most are not
 | `stem_centernet_v7_patch25_*` | `checkpoints/stem_centernet_v7_patch25_*/` | Trained on pre-RMS-aware foundation |
 | `astrometry_v6_phaseB2` | `models/checkpoints/astrometry_v6_phaseB2/` | V6 astrometry, outdated |
 | `detector_v1.pt`, `detector_v7.pt`, `centernet_v7.pt` | `models/checkpoints/` | Old standalone detector checkpoints |
+| `psf_field_v1/v2/v3`, `psf_field_pca`, `psf_field_v4` | `models/older_architectures/psf/checkpoints/` | Archived PSFField/PCA/V4 attempts; kept for reference, not current. |
 
 ---
 
@@ -1768,7 +1780,8 @@ These checkpoint names are historical references from earlier runs; most are not
 This section is intentionally redundant with earlier parts of the report. It is the quick operational summary: which checkpoints to use, which results are current, which components are diagnostic only, and which experiments are still open. When the project changes, this section should be updated first, and the longer method sections should then be revised to preserve the reasoning behind the change.
 
 **Foundation models**
-- **V8 (current production)**: `models/checkpoints/jaisp_v8_fine/checkpoint_best.pt` -- fine-scale 0.4"/px fused, 256×256 random-crop training. All current downstream heads (CenterNet, latent position, PSFField, photometry) are trained against this checkpoint.
+- **V10 warm-start (current for PSF)**: `models/checkpoints/jaisp_v10_warmstart/checkpoint_best.pt` -- v9 concat fusion with Charbonnier/core-L2 reconstruction loss. Used by the active Gaia Gaussian ePSF-head run.
+- **V8 (current for existing CenterNet/astrometry/photometry heads)**: `models/checkpoints/jaisp_v8_fine/checkpoint_best.pt` -- fine-scale 0.4"/px fused, 256×256 random-crop training.
 - **V7 (prior production)**: `models/checkpoints/jaisp_v7_concat/checkpoint_best.pt` (epoch 92), RMS-aware loss, 790 tiles, correct NISP MER pixel scales. Retained as a comparison baseline; the v7 CenterNet and v7 latent-position checkpoints are still valid for ablations but are no longer the recommended starting point.
 
 **Detection**
@@ -1777,13 +1790,12 @@ This section is intentionally redundant with earlier parts of the report. It is 
 - Classical VIS detection remains a fast baseline.
 
 **PSF modelling**
-- **PSFField v3**: `models/checkpoints/psf_field_v3.pt` -- continuous SIREN-based PSF for all 10 bands.
-  - Architecture: SIREN 192×6, w0=15, per-band radial envelope (Rubin 1.7"/Euclid 0.85"), SED-conditioned chromatic PSF, DCR term for Rubin bands.
-  - Training: 3312 stars across 429 tiles (of 790), joint PSF + sub-pixel centroid optimisation, robust chi² (Huber + variance floor), percentile outlier rejection, SED refresh.
-  - Results: best loss=779, centroid drift median=14.6 mas, Euclid NIR chi²/ndof 0.28–0.61 (excellent), chromatic FWHM difference 6% in VIS (blue vs red, physically correct).
-  - Known issue: u-band is noise-limited (chi²=0.54 which is within noise; radial profile shows cosmetic artefact at edge, not practical concern).
-  - Diagnostics: `models/psf/validate_psf_field.py`, W&B panels (gallery, radial profiles, example stamps, centroid drift).
-  - Notebook: `io/08_psf_visualization.ipynb`.
+- **Foundation ePSF head (current run)**: `models/checkpoints/foundation_epsf_head_gaia_gaussian_v10/`.
+  - Architecture: analytic Gaussian per-band base ePSF + constrained low-rank residual, coefficients predicted from frozen V10 bottleneck/VIS-stem features, tile position, and band id.
+  - Training: Gaia-selected stars in `data/psf_training_gaia/`, 10 native bands, analytic flux/background solve, robust residual loss plus residual smoothness/size regularization.
+  - Foundation: `models/checkpoints/jaisp_v10_warmstart/checkpoint_best.pt`.
+  - Diagnostics: W&B `vis/heldout_fits`, `vis/epsf_base_vs_head`, `vis/coeff_hist`, `vis/median_pearson`, `vis/median_abs_chi`; notebook `io/08_psf_visualization.ipynb`.
+  - Archived attempts: PSFField/PCA/V4 code and small checkpoints live in `models/older_architectures/psf/`.
 
 **Astrometry -- current v8 result (2026-04-17)**
 - Latent position head migrated to v8 foundation via `load_foundation()` auto-detection. Dual-GPU prefetch wired (`--dual-gpu`: encoder on GPU 0, head on GPU 1).
@@ -1795,14 +1807,13 @@ This section is intentionally redundant with earlier parts of the report. It is 
 - Residual PINN/concordance after the head is a QA/fallback product. Its field amplitude is ~1 mas and changes the head residual medians by only ~0.0-0.2 mas. `Head`, `Head+PINN` and `|Fhead|` should be read separately: per-object residual, residual after subtracting the fitted smooth field, and fitted smooth-field amplitude.
 - Notebook 12 (`io/12_astrometry_hgp_vs_pinn.ipynb`) compares CenterNet post-head HGP against CenterNet post-head PINN. HGP edge structure tracks high posterior std and large nearest-anchor distance; after support masking it remains larger than PINN and does not improve actual anchor residuals relative to zero. The current conclusion is **no robust post-head smooth field detection**.
 - `models/astrometry2/fit_hierarchical_gp_concordance.py` is currently an experimental QA/model-selection solver. It fits CenterNet + head-residual anchors with a hierarchical common/group/band decomposition and writes `{BAND}.DRA`, `{BAND}.DDE`, `{BAND}.DRA_STD`, `{BAND}.DDE_STD`, optional `COVERAGE`, optional `COMP_*` diagnostics and a JSON holdout-calibration summary. Do not use it as a correction product until it beats the zero-field baseline on held-out anchors and agrees with PINN/GP on supported regions.
-- **Key lesson**: PSFField-refined centroids introduce a ~16 mas target mismatch when used as training labels; v7/v8 PSFField-label runs plateau at **29-30 mas**. Use Gaussian-fit photon centroids for the current head target convention.
+- **Key lesson**: archived PSFField-refined centroids introduced a ~16 mas target mismatch when used as training labels; v7/v8 PSFField-label runs plateaued at **29-30 mas**. Use Gaussian-fit photon centroids for the current astrometry-head target convention.
 - Field solvers (PINN / NN / control-grid / HGP) are foundation-agnostic. `eval_latent_position.py` exports per-source anchors via `--save-anchors` directly consumable by `fit_direct_pinn.py --cache` and `fit_hierarchical_gp_concordance.py --anchors`; use `--use-head-resid` or `--offset-kind head_resid` to fit the post-head residual field.
 
 **Photometry**
-- `models/photometry/PSFFieldPhotometryPipeline` renders PSFField templates and runs the existing matched-filter flux estimator. It accepts either shared source positions or per-band astrometry-head-corrected positions. This remains the compact-source baseline.
-- `models/photometry/foundation_head.py` is the learned V8 photometry head; the current main checkpoint is `models/checkpoints/photometry_foundation_200_fast/checkpoint_best.pt`. CenterNet detections are corrected by the latent astrometry head, frozen V8 features predict morphology refinements, PSFField supplies per-band PSFs, and the training objective is local scene residual chi-square. `models/checkpoints/photometry_foundation_200_emppsf/` is a newer empirical-PSF ablation, not the default path.
+- `models/photometry/foundation_head.py` is the learned V8 photometry head; the current main checkpoint is `models/checkpoints/photometry_foundation_200_fast/checkpoint_best.pt`. CenterNet detections are corrected by the latent astrometry head, frozen V8 features predict morphology refinements, and the training objective is local scene residual chi-square. The PSF/template dependency should be migrated from archived PSFField to `FoundationEPSFHead`.
 - `models/photometry/rendered_stamp_head.py` is the newest end-to-end photometry experiment: it predicts per-source rendered stamps directly from frozen V8 features, avoiding explicit PSF/template decomposition. Current checkpoint: `models/checkpoints/rendered_stamp_v2_bigstamp/checkpoint_best.pt`.
-- `models/photometry/scarlet_like.py` adds a scarlet-like residual scene optimizer for galaxies and blends: VIS-derived positive morphologies are convolved with PSFField per band, then non-negative fluxes are fitted by reducing pixel residuals over the whole local scene. This is now the optimizer baseline/refinement reference rather than the checkpointed neural head. PSFField is still not part of the current best astrometric target convention.
+- `models/photometry/scarlet_like.py` adds a scarlet-like residual scene optimizer for galaxies and blends: VIS-derived positive morphologies are convolved with per-band PSFs, then non-negative fluxes are fitted by reducing pixel residuals over the whole local scene. This is the optimizer baseline/refinement reference rather than the checkpointed neural head. Its PSF source should be updated to the new ePSF head.
 
 **Open milestones**
 - **Out-of-distribution evaluation** (see Motivation § "Why a Foundation Model"). All current metrics are on ECDFS tract5063. We have not yet evaluated on a non-ECDFS field. Until we do, we cannot measure the foundation's actual value proposition -- transfer without retraining. Highest-leverage next experiment after astrometry settles: download ~50 tiles from EDF-North, run the latent-head eval + residual-field QA without any retraining, compare the MAE to the ECDFS numbers.
