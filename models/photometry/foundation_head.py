@@ -27,13 +27,13 @@ try:
         extract_local_windows,
         vis_px_to_bottleneck_px,
     )
-    from jaisp_foundation_v6 import ConvNeXtBlock
+    from jaisp_foundation_v10 import ConvNeXtBlock
 except ImportError:
     from ..astrometry2.latent_position_head import (
         extract_local_windows,
         vis_px_to_bottleneck_px,
     )
-    from ..jaisp_foundation_v6 import ConvNeXtBlock
+    from ..jaisp_foundation_v10 import ConvNeXtBlock
 
 try:
     from .scarlet_like import (

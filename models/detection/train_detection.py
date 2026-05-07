@@ -1,5 +1,5 @@
 """
-Train JaispDetector on top of a frozen JAISPFoundationV7 encoder.
+Train JaispDetector on top of a frozen JAISPFoundationV10 encoder.
 
 Phase 1 (default): freeze encoder, train decoder + heads only.
 Phase 2 (--finetune_encoder): unfreeze encoder for end-to-end fine-tuning.
@@ -36,7 +36,7 @@ for _p in (_HERE, _MODELS):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
-from jaisp_foundation_v7 import ALL_BANDS, RUBIN_BANDS
+from jaisp_foundation_v10 import ALL_BANDS, RUBIN_BANDS
 from detection.detector import JaispDetector, JAISPEncoderWrapper, _StubEncoder
 from detection.matcher  import DetectionLoss
 from detection.dataset  import TileDetectionDataset, collate_fn
@@ -262,7 +262,7 @@ if __name__ == '__main__':
     p.add_argument('--rubin_dir',        required=True)
     p.add_argument('--euclid_dir',       default=None)
     p.add_argument('--encoder_ckpt',     default=None,
-                   help='JAISPFoundationV7 checkpoint; omit to use stub encoder')
+                   help='JAISPFoundationV10 checkpoint; omit to use stub encoder')
     p.add_argument('--out',              default='../checkpoints/detector_v1.pt')
     p.add_argument('--epochs',           type=int,   default=50)
     p.add_argument('--batch_size',       type=int,   default=4)

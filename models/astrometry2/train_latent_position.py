@@ -71,40 +71,10 @@ except ImportError:
 # Tile-level data processing
 # ============================================================
 
-def load_tile_data(
-    rubin_path: str,
-    euclid_path: str,
-    device: torch.device,
-) -> Tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor], Tuple[int, int], WCS]:
-    """Load a tile and build encoder-ready tensors.
-
-    Returns
-    -------
-    context_images : {band: [1, 1, H, W]} on device
-    context_rms    : {band: [1, 1, H, W]} on device
-    vis_hw         : (H_vis, W_vis)
-    vis_wcs        : astropy WCS for VIS
-    """
-    rdata = np.load(rubin_path, allow_pickle=True)
-    edata = np.load(euclid_path, allow_pickle=True)
-    rubin_var = rdata['var'] if 'var' in rdata else None
-
-    context_images, context_rms, vis_hw = build_full_context_detector_inputs(
-        edata, rdata['img'], rubin_var=rubin_var,
-    )
-
-    vhdr = safe_header_from_card_string(edata['wcs_VIS'].item())
-    vis_wcs = WCS(vhdr)
-
-    img_t = {
-        k: torch.from_numpy(v[None, None].copy()).float().to(device)
-        for k, v in context_images.items()
-    }
-    rms_t = {
-        k: torch.from_numpy(v[None, None].copy()).float().to(device)
-        for k, v in context_rms.items()
-    }
-    return img_t, rms_t, vis_hw, vis_wcs
+# Re-exported from models/foundation_utils.py — see that module for the
+# canonical definition. Existing imports of ``load_tile_data`` from this
+# module continue to work via this alias.
+from foundation_utils import load_tile_data  # noqa: F401, E402
 
 
 def detect_and_refine_vis(

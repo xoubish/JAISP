@@ -29,8 +29,8 @@ for _p in (_HERE, _MODELS):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
-from jaisp_foundation_v7 import RUBIN_BANDS, EUCLID_BANDS, ALL_BANDS
-from jaisp_dataset_v6 import JAISPDatasetV6
+from jaisp_foundation_v10 import RUBIN_BANDS, EUCLID_BANDS, ALL_BANDS
+from jaisp_dataset_v10 import JAISPDatasetV10
 from astrometry2.source_matching import detect_sources, build_detection_image
 
 
@@ -225,7 +225,7 @@ class TileDetectionDataset(Dataset):
         self.use_all_bands = use_all_bands and (euclid_dir is not None)
         self.bands        = ALL_BANDS if self.use_all_bands else RUBIN_BANDS
 
-        self._base = JAISPDatasetV6(
+        self._base = JAISPDatasetV10(
             rubin_dir=rubin_dir,
             euclid_dir=euclid_dir or rubin_dir,
             augment=augment,

@@ -28,10 +28,10 @@ for _p in (_HERE, _MODELS):
 
 from detection.centernet_loss import CenterNetLoss
 from detection.dataset import TileDetectionDataset, collate_fn
-from jaisp_foundation_v7 import RUBIN_BANDS, EUCLID_BANDS
+from jaisp_foundation_v10 import RUBIN_BANDS, EUCLID_BANDS
 from detection.stem_centernet_detector import (
     StemCenterNetDetector,
-    load_v7_foundation_from_checkpoint,
+    load_foundation_from_checkpoint,
 )
 from detection.train_centernet import _log_tile
 
@@ -195,7 +195,7 @@ def train(args):
     if rank == 0:
         print(f"Train: {n_tr} samples   Val: {n_val} samples")
 
-    foundation = load_v7_foundation_from_checkpoint(args.encoder_ckpt, device=device)
+    foundation = load_foundation_from_checkpoint(args.encoder_ckpt, device=device)
     model = StemCenterNetDetector(
         foundation=foundation,
         stream_ch=args.stream_ch,

@@ -43,10 +43,10 @@ if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
 
 # Monkey-patch: make v7 trainer import V8 model when we construct it.
-import jaisp_foundation_v8 as _v8
-import jaisp_foundation_v7 as _v7
-from jaisp_dataset_v8 import random_crop_sample
-from train_jaisp_foundation_v7 import (
+import models.older_architectures.jaisp_foundation_v8 as _v8
+import models.older_architectures.jaisp_foundation_v7 as _v7
+from models.older_architectures.jaisp_dataset_v8 import random_crop_sample
+from models.older_architectures.train_jaisp_foundation_v7 import (
     JAISPTrainerV7,
     build_argparser as build_v7_argparser,
     suppress_stdout,
@@ -105,7 +105,7 @@ class JAISPTrainerV8(JAISPTrainerV7):
             self.model = v8_model
 
         # Re-create optimizer and scheduler for the new model params.
-        from jaisp_foundation_v6 import create_optimizer, create_scheduler
+        from models.older_architectures.jaisp_foundation_v6 import create_optimizer, create_scheduler
         lr = kwargs.get('lr', 3e-4)
         wd = kwargs.get('weight_decay', 0.05)
         warmup = kwargs.get('warmup_epochs', 5)

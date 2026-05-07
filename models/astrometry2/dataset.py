@@ -337,23 +337,10 @@ def normalize_nisp_band(name: str) -> str:
     return f'nisp_{short}'
 
 
-def discover_tile_pairs(rubin_dir: str, euclid_dir: str) -> List[Tuple[str, str, str]]:
-    pairs = []
-    for rubin_path in sorted(glob.glob(os.path.join(rubin_dir, 'tile_x*_y*.npz'))):
-        basename = os.path.basename(rubin_path)
-        if basename.endswith('_euclid.npz'):
-            continue  # skip euclid files if rubin_dir happens to contain them
-        tile_id = os.path.splitext(basename)[0]
-        euclid_path = os.path.join(euclid_dir, f'{tile_id}_euclid.npz')
-        if os.path.exists(euclid_path):
-            pairs.append((tile_id, rubin_path, euclid_path))
-    if not pairs:
-        raise FileNotFoundError(
-            f'No tile pairs found. Checked rubin_dir={rubin_dir} '
-            f'(pattern tile_x*_y*.npz) and euclid_dir={euclid_dir} '
-            f'(pattern {{tile_id}}_euclid.npz).'
-        )
-    return pairs
+# Re-exported from models/foundation_utils.py — see that module for the
+# canonical definition. This thin alias keeps existing
+# ``from astrometry2.dataset import discover_tile_pairs`` imports working.
+from foundation_utils import discover_tile_pairs  # noqa: F401, E402
 
 
 def split_tile_pairs(

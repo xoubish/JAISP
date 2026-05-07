@@ -1,9 +1,9 @@
 """
-JaispDetector: DETR-style source detection on top of the JAISP V7 MAE encoder.
+JaispDetector: DETR-style source detection on top of the JAISP foundation encoder.
 
 Architecture
 ------------
-  JAISPEncoderWrapper (frozen JAISPFoundationV7)
+  JAISPEncoderWrapper (frozen JAISPFoundationV10)
       input : {band_name: [B, 1, H, W]} images + rms dicts
       output: bottleneck [B, encoder_dim, h, w]
                encoder_dim = hidden_ch (default 256), h/w from fused physical scale
@@ -21,9 +21,8 @@ Training uses Hungarian matching (like DETR) between predicted and GT positions.
 
 Usage
 -----
-    from jaisp_foundation_v7 import JAISPFoundationV7
-    model = JAISPFoundationV7(...)
-    model.load_state_dict(ckpt['model'])
+    from load_foundation import load_foundation
+    model = load_foundation('checkpoints/jaisp_v10_warmstart/checkpoint_best.pt')
     encoder = JAISPEncoderWrapper(model, freeze=True)
     detector = JaispDetector(encoder, num_queries=300, encoder_dim=256)
 
@@ -96,7 +95,7 @@ def _sinusoidal_2d(h: int, w: int, d_model: int, device: torch.device) -> torch.
 class _StubEncoder(nn.Module):
     """
     3-layer CNN stub that produces a bottleneck tensor [B, 512, H/8, W/8].
-    Used for smoke tests when no V7 checkpoint is available.
+    Used for smoke tests when no foundation checkpoint is available.
     """
     def __init__(self, in_channels: int = 6):
         super().__init__()
@@ -122,11 +121,11 @@ class _StubEncoder(nn.Module):
 
 class JAISPEncoderWrapper(nn.Module):
     """
-    Thin wrapper that calls JAISPFoundationV7.encode() and returns the bottleneck tensor.
+    Thin wrapper that calls JAISPFoundationV10.encode() and returns the bottleneck tensor.
 
     Parameters
     ----------
-    encoder : JAISPFoundationV7 instance
+    encoder : JAISPFoundationV10 instance
     freeze  : disable gradients through the encoder
     """
 
@@ -164,7 +163,7 @@ N_CLASSES = len(SOURCE_CLASSES)
 
 class JaispDetector(nn.Module):
     """
-    DETR-style source detector built on JAISPFoundationV7 features.
+    DETR-style source detector built on JAISPFoundationV10 features.
 
     Parameters
     ----------

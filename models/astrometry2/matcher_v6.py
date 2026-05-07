@@ -44,7 +44,7 @@ _MODELS_DIR = Path(__file__).resolve().parent.parent
 if str(_MODELS_DIR) not in sys.path:
     sys.path.insert(0, str(_MODELS_DIR))
 
-from jaisp_foundation_v6 import ConvNeXtBlock, JAISPFoundationV6, ALL_BANDS
+from models.older_architectures.jaisp_foundation_v6 import ConvNeXtBlock, JAISPFoundationV6, ALL_BANDS
 
 # Rubin band ordering as used in astrometry2 dataset
 RUBIN_BAND_ORDER = ['u', 'g', 'r', 'i', 'z', 'y']

@@ -22,14 +22,14 @@ _HERE = Path(__file__).resolve().parent
 if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
 
-from jaisp_dataset_v6 import (
+from models.older_architectures.jaisp_dataset_v6 import (
     ALL_BANDS,
     EUCLID_BANDS,
     JAISPDatasetV6,
     RUBIN_BANDS,
     collate_v6,
 )
-from jaisp_dataset_v7 import (
+from models.older_architectures.jaisp_dataset_v7 import (
     band_group,
     sample_context_target_phaseB_mixed,
 )

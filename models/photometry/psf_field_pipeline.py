@@ -25,9 +25,13 @@ except ImportError:  # Script import from models/photometry
     from stamp_extractor import estimate_local_background, extract_stamps
 
 try:
-    from models.psf import BAND_ORDER, BAND_PX_SCALE, BAND_TO_IDX, N_BANDS, PSFField
+    from models.older_architectures.psf.psf_field import (
+        BAND_ORDER, BAND_PX_SCALE, BAND_TO_IDX, N_BANDS, PSFField,
+    )
 except ImportError:
-    from psf import BAND_ORDER, BAND_PX_SCALE, BAND_TO_IDX, N_BANDS, PSFField
+    from older_architectures.psf.psf_field import (
+        BAND_ORDER, BAND_PX_SCALE, BAND_TO_IDX, N_BANDS, PSFField,
+    )
 
 
 _RUBIN_SHORT = {"u", "g", "r", "i", "z", "y"}

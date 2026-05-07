@@ -51,7 +51,7 @@ for _p in (_HERE, _MODELS):
 from detection.centernet_detector import CenterNetDetector                 # noqa: E402
 from detection.detector import JAISPEncoderWrapper                         # noqa: E402
 from load_foundation import load_foundation                                # noqa: E402
-from jaisp_foundation_v7 import RUBIN_BANDS, EUCLID_BANDS                  # noqa: E402
+from models.older_architectures.jaisp_foundation_v7 import RUBIN_BANDS, EUCLID_BANDS                  # noqa: E402
 
 
 # ---------------------------------------------------------------------------

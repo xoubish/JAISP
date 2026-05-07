@@ -41,8 +41,8 @@ import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 from tqdm import tqdm
 
-from jaisp_foundation_v6 import JAISPFoundationV6, ALL_BANDS, RUBIN_BANDS
-from jaisp_dataset_v6 import JAISPDatasetV6
+from models.older_architectures.jaisp_foundation_v6 import JAISPFoundationV6, ALL_BANDS, RUBIN_BANDS
+from models.older_architectures.jaisp_dataset_v6 import JAISPDatasetV6
 
 
 # ============================================================

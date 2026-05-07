@@ -27,11 +27,11 @@ for _p in (_HERE, _MODELS):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
-from jaisp_foundation_v7 import (
+from jaisp_foundation_v10 import (
     ALL_BANDS,
     EUCLID_BANDS,
     RUBIN_BANDS,
-    JAISPFoundationV7,
+    JAISPFoundationV10,
 )
 
 NISP_BANDS = [band for band in EUCLID_BANDS if band != "euclid_VIS"]
@@ -102,12 +102,12 @@ class _UpFuseBlock(nn.Module):
         return self.refine(x)
 
 
-class V7StemFeatureEncoder(nn.Module):
+class StemFeatureEncoder(nn.Module):
     """Fuse frozen V7 BandStem features directly in the VIS frame."""
 
     def __init__(
         self,
-        foundation: JAISPFoundationV7,
+        foundation: JAISPFoundationV10,
         stream_ch: int = 16,
         fusion_ch: int = 32,
         freeze_stems: bool = True,
@@ -118,7 +118,7 @@ class V7StemFeatureEncoder(nn.Module):
         self.freeze_stems = bool(freeze_stems)
 
         if not hasattr(foundation, "encoder") or not hasattr(foundation.encoder, "stems"):
-            raise AttributeError("Expected JAISPFoundationV7 with encoder.stems")
+            raise AttributeError("Expected JAISPFoundationV10 with encoder.stems")
 
         self.stem_ch = int(foundation.encoder.stem_ch)
         self.band_stems = foundation.encoder.stems
@@ -240,7 +240,7 @@ class StemCenterNetDetector(nn.Module):
 
     def __init__(
         self,
-        foundation: JAISPFoundationV7,
+        foundation: JAISPFoundationV10,
         stream_ch: int = 16,
         base_ch: int = 32,
         freeze_stems: bool = True,
@@ -252,7 +252,7 @@ class StemCenterNetDetector(nn.Module):
         self.freeze_stems = bool(freeze_stems)
         self.predict_profile = bool(predict_profile)
 
-        self.encoder = V7StemFeatureEncoder(
+        self.encoder = StemFeatureEncoder(
             foundation=foundation,
             stream_ch=self.stream_ch,
             fusion_ch=self.base_ch,
@@ -368,7 +368,7 @@ class StemCenterNetDetector(nn.Module):
     def load(
         cls,
         path: str,
-        foundation: JAISPFoundationV7,
+        foundation: JAISPFoundationV10,
         device: Optional[torch.device] = None,
     ) -> "StemCenterNetDetector":
         ckpt = torch.load(path, map_location="cpu", weights_only=True)
@@ -389,10 +389,10 @@ class StemCenterNetDetector(nn.Module):
         return model
 
 
-def load_v7_foundation_from_checkpoint(
+def load_foundation_from_checkpoint(
     checkpoint: str,
     device: Optional[torch.device] = None,
-) -> JAISPFoundationV7:
+) -> JAISPFoundationV10:
     from load_foundation import load_foundation
     model = load_foundation(checkpoint, device=device or torch.device('cpu'), freeze=True)
     return model
@@ -400,6 +400,6 @@ def load_v7_foundation_from_checkpoint(
 
 __all__ = [
     "StemCenterNetDetector",
-    "V7StemFeatureEncoder",
-    "load_v7_foundation_from_checkpoint",
+    "StemFeatureEncoder",
+    "load_foundation_from_checkpoint",
 ]

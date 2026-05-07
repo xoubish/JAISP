@@ -1,4 +1,4 @@
-"""Train CenterNet source detector on frozen JAISPFoundationV7 encoder.
+"""Train CenterNet source detector on frozen JAISPFoundationV10 encoder.
 
 Usage
 -----
@@ -25,7 +25,7 @@ for _p in (_HERE, _MODELS):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
-from jaisp_foundation_v7 import ALL_BANDS, RUBIN_BANDS
+from jaisp_foundation_v10 import ALL_BANDS, RUBIN_BANDS
 from detection.centernet_detector import CenterNetDetector, JAISPEncoderWrapper, _StubEncoder
 from detection.centernet_loss import CenterNetLoss
 from detection.dataset import TileDetectionDataset, collate_fn

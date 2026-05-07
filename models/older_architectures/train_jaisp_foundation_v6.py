@@ -38,8 +38,8 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 
-from jaisp_foundation_v6 import JAISPFoundationV6, create_optimizer, create_scheduler, ALL_BANDS
-from jaisp_dataset_v6 import make_loader_v6, sample_context_target, sample_context_target_phaseB
+from models.older_architectures.jaisp_foundation_v6 import JAISPFoundationV6, create_optimizer, create_scheduler, ALL_BANDS
+from models.older_architectures.jaisp_dataset_v6 import make_loader_v6, sample_context_target, sample_context_target_phaseB
 
 
 class JAISPTrainerV6:

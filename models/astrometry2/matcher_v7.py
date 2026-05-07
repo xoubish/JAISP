@@ -29,8 +29,8 @@ for _p in (_HERE, _MODELS):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
-from jaisp_foundation_v7 import JAISPFoundationV7, ALL_BANDS, RUBIN_BANDS
-from jaisp_foundation_v6 import ConvNeXtBlock
+from models.older_architectures.jaisp_foundation_v7 import JAISPFoundationV7, ALL_BANDS, RUBIN_BANDS
+from models.older_architectures.jaisp_foundation_v6 import ConvNeXtBlock
 
 RUBIN_BAND_ORDER = ['u', 'g', 'r', 'i', 'z', 'y']
 

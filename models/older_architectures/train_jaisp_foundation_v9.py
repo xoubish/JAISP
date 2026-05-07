@@ -57,13 +57,13 @@ _HERE = Path(__file__).resolve().parent
 if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
 
-import jaisp_foundation_v8 as _v8
-from jaisp_dataset_v8 import random_crop_sample
-from jaisp_dataset_v9 import adversarial_drop
-from jaisp_dataset_v7 import sample_context_target_phaseB_mixed
-from jaisp_dataset_v6 import sample_context_target
-from train_jaisp_foundation_v8 import JAISPTrainerV8
-from train_jaisp_foundation_v7 import build_argparser as build_v7_argparser, suppress_stdout
+import models.older_architectures.jaisp_foundation_v8 as _v8
+from models.older_architectures.jaisp_dataset_v8 import random_crop_sample
+from models.older_architectures.jaisp_dataset_v9hitectures.jaisp_dataset_v9 import adversarial_drop
+from models.older_architectures.jaisp_dataset_v7 import sample_context_target_phaseB_mixed
+from models.older_architectures.jaisp_dataset_v6 import sample_context_target
+from models.older_architectures.train_jaisp_foundation_v8 import JAISPTrainerV8
+from models.older_architectures.train_jaisp_foundation_v7 import build_argparser as build_v7_argparser, suppress_stdout
 
 try:
     import wandb
@@ -115,7 +115,7 @@ class JAISPTrainerV9(JAISPTrainerV8):
 
         # Re-create optimizer + scheduler for the new params (extra Rubin
         # StreamFuser projection adds ~25K trainable parameters).
-        from jaisp_foundation_v6 import create_optimizer, create_scheduler
+        from models.older_architectures.jaisp_foundation_v6 import create_optimizer, create_scheduler
         lr = kwargs.get('lr', 3e-4)
         wd = kwargs.get('weight_decay', 0.05)
         warmup = kwargs.get('warmup_epochs', 5)

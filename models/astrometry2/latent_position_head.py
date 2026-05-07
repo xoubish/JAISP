@@ -59,8 +59,7 @@ for _p in (_HERE, _MODELS):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
-from jaisp_foundation_v7 import JAISPFoundationV7, ALL_BANDS
-from jaisp_foundation_v6 import ConvNeXtBlock
+from jaisp_foundation_v10 import ConvNeXtBlock
 from load_foundation import load_foundation
 
 
@@ -300,59 +299,10 @@ class LatentPositionHead(nn.Module):
 # Frozen encoder wrapper (runs once per tile)
 # ============================================================
 
-class FrozenEncoder(nn.Module):
-    """Wrapper that runs a frozen JAISP encoder (v7 or v8) and extracts VIS stem.
-
-    Call ``encode_tile()`` once per tile to get:
-      - bottleneck  [1, 256, H_bn, W_bn]
-      - vis_stem    [1, 64, H_vis, W_vis]
-      - fused_hw    (H_bn, W_bn)
-
-    Works with both V7 (0.8"/px bottleneck) and V8 (0.4"/px bottleneck).
-    All parameters are frozen; no gradients flow through this module.
-    """
-
-    def __init__(self, foundation_model):
-        super().__init__()
-        self.encoder = foundation_model.encoder
-        self.vis_stem = foundation_model.encoder.stems['euclid_VIS']
-        self.eval()
-        for p in self.parameters():
-            p.requires_grad = False
-
-    @torch.no_grad()
-    def encode_tile(
-        self,
-        context_images: Dict[str, torch.Tensor],
-        context_rms: Dict[str, torch.Tensor],
-    ) -> Dict[str, torch.Tensor]:
-        """Run full encoder + extract raw VIS stem features.
-
-        Parameters
-        ----------
-        context_images : {band_name: [1, 1, H, W]} for all available bands
-        context_rms    : {band_name: [1, 1, H, W]} matching RMS maps
-
-        Returns
-        -------
-        dict with bottleneck, vis_stem, fused_hw, vis_hw
-        """
-        enc_out = self.encoder(context_images, context_rms)
-
-        vis_img = context_images['euclid_VIS']
-        vis_rms = context_rms['euclid_VIS']
-        vis_stem = self.vis_stem(vis_img, vis_rms)  # [1, stem_ch, H_vis, W_vis]
-
-        return {
-            'bottleneck': enc_out['bottleneck'],
-            'vis_stem': vis_stem,
-            'fused_hw': enc_out['fused_hw'],
-            'vis_hw': (vis_img.shape[-2], vis_img.shape[-1]),
-        }
-
-
-# Backward-compatible alias
-FrozenV7Encoder = FrozenEncoder
+# Re-exported from models/foundation_utils.py — the wrapper is foundation
+# plumbing, not astrometry-specific, but we keep this import path so existing
+# ``from astrometry2.latent_position_head import FrozenEncoder`` calls work.
+from foundation_utils import FrozenEncoder, FrozenV7Encoder  # noqa: F401, E402
 
 
 # ============================================================

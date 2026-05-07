@@ -25,13 +25,13 @@ try:  # PYTHONPATH=models
         extract_local_windows,
         vis_px_to_bottleneck_px,
     )
-    from jaisp_foundation_v6 import ConvNeXtBlock
+    from jaisp_foundation_v10 import ConvNeXtBlock
 except ImportError:  # Package import from repo root
     from models.astrometry2.latent_position_head import (
         extract_local_windows,
         vis_px_to_bottleneck_px,
     )
-    from models.jaisp_foundation_v6 import ConvNeXtBlock
+    from models.jaisp_foundation_v10 import ConvNeXtBlock
 
 
 RUBIN_BANDS = ["rubin_u", "rubin_g", "rubin_r", "rubin_i", "rubin_z", "rubin_y"]

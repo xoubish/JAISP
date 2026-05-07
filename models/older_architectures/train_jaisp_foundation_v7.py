@@ -25,9 +25,9 @@ _HERE = Path(__file__).resolve().parent
 if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
 
-from jaisp_foundation_v7 import ALL_BANDS, JAISPFoundationV7, create_optimizer, create_scheduler
-from jaisp_dataset_v6 import JAISPDatasetV6, collate_v6
-from jaisp_dataset_v7 import sample_context_target, sample_context_target_phaseB_mixed
+from models.older_architectures.jaisp_foundation_v7 import ALL_BANDS, JAISPFoundationV7, create_optimizer, create_scheduler
+from models.older_architectures.jaisp_dataset_v6 import JAISPDatasetV6, collate_v6
+from models.older_architectures.jaisp_dataset_v7 import sample_context_target, sample_context_target_phaseB_mixed
 
 try:
     import wandb

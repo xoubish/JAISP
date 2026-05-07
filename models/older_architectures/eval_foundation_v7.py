@@ -50,8 +50,8 @@ _HERE = Path(__file__).resolve().parent
 if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
 
-from jaisp_dataset_v6 import JAISPDatasetV6
-from jaisp_foundation_v7 import ALL_BANDS, EUCLID_BANDS, RUBIN_BANDS, JAISPFoundationV7
+from models.older_architectures.jaisp_dataset_v6 import JAISPDatasetV6
+from models.older_architectures.jaisp_foundation_v7 import ALL_BANDS, EUCLID_BANDS, RUBIN_BANDS, JAISPFoundationV7
 
 
 # ============================================================

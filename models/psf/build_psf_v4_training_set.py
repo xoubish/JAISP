@@ -49,12 +49,10 @@ _HERE = Path(__file__).resolve().parent.parent
 if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
 
-from jaisp_dataset_v6 import JAISPDatasetV6  # noqa: E402
-from jaisp_foundation_v7 import (  # noqa: E402
+from jaisp_dataset_v10 import JAISPDatasetV10  # noqa: E402
+from jaisp_foundation_v10 import (  # noqa: E402
     ALL_BANDS,
-    EUCLID_BANDS,
     RUBIN_BANDS,
-    band_group,
     STREAM_PIXEL_SCALES,
 )
 
@@ -269,7 +267,7 @@ def build_training_set(args: argparse.Namespace) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"Loading dataset from {args.rubin_dir} + {args.euclid_dir} …")
-    ds = JAISPDatasetV6(
+    ds = JAISPDatasetV10(
         rubin_dir=str(args.rubin_dir),
         euclid_dir=str(args.euclid_dir),
         load_euclid=True,

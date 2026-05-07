@@ -27,8 +27,8 @@ for _p in (_HERE, _MODELS):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
-from jaisp_foundation_v7 import ALL_BANDS, RUBIN_BANDS
-from jaisp_dataset_v6 import JAISPDatasetV6
+from jaisp_foundation_v10 import ALL_BANDS, RUBIN_BANDS
+from jaisp_dataset_v10 import JAISPDatasetV10
 from detection.detector import JAISPEncoderWrapper
 from load_foundation import load_foundation
 
@@ -66,7 +66,7 @@ def main():
     ][:args.n_augments]
 
     # Load dataset with augment=False — we'll apply augmentations manually
-    ds = JAISPDatasetV6(
+    ds = JAISPDatasetV10(
         rubin_dir=args.rubin_dir,
         euclid_dir=args.euclid_dir or args.rubin_dir,
         augment=False,
@@ -98,7 +98,7 @@ def main():
                     rms_d[band] = torch.from_numpy(rms[None, None]).to(device)
 
             if args.euclid_dir:
-                from jaisp_foundation_v7 import ALL_BANDS
+                from jaisp_foundation_v10 import ALL_BANDS
                 euclid_bands = [b for b in ALL_BANDS if b.startswith('euclid')]
                 for band in euclid_bands:
                     if band in item.get('euclid', {}):

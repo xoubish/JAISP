@@ -33,9 +33,8 @@ if str(_HERE) not in sys.path:
 
 try:
     from load_foundation import load_foundation
-    from astrometry2.dataset import discover_tile_pairs, split_tile_pairs
-    from astrometry2.latent_position_head import FrozenEncoder
-    from astrometry2.train_latent_position import load_tile_data
+    from foundation_utils import FrozenEncoder, discover_tile_pairs, load_tile_data
+    from astrometry2.dataset import split_tile_pairs
     from psf.foundation_epsf_head import (
         ALL_BANDS,
         DEFAULT_CORE_SIGMA_MAS,
@@ -46,9 +45,8 @@ try:
     )
 except ImportError:
     from models.load_foundation import load_foundation
-    from models.astrometry2.dataset import discover_tile_pairs, split_tile_pairs
-    from models.astrometry2.latent_position_head import FrozenEncoder
-    from models.astrometry2.train_latent_position import load_tile_data
+    from models.foundation_utils import FrozenEncoder, discover_tile_pairs, load_tile_data
+    from models.astrometry2.dataset import split_tile_pairs
     from models.psf.foundation_epsf_head import (
         ALL_BANDS,
         DEFAULT_CORE_SIGMA_MAS,
