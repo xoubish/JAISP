@@ -751,18 +751,25 @@ def save_checkpoint(
     val_metrics: Mapping[str, float],
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(
-        {
-            "head_state": head.state_dict(),
-            "optimizer": optimizer.state_dict(),
-            "epoch": int(epoch),
-            "config": dict(config),
-            "train_metrics": dict(train_metrics),
-            "val_metrics": dict(val_metrics),
-            "base_epsf": head.base_epsf().detach().cpu(),
-        },
-        path,
-    )
+    payload = {
+        "head_state": head.state_dict(),
+        "optimizer": optimizer.state_dict(),
+        "epoch": int(epoch),
+        "config": dict(config),
+        "train_metrics": dict(train_metrics),
+        "val_metrics": dict(val_metrics),
+        "base_epsf": head.base_epsf().detach().cpu(),
+    }
+    try:
+        torch.save(payload, path)
+    except (OSError, RuntimeError) as exc:
+        print(f"  WARN: local save to {path} failed ({exc}); training continues")
+        return
+    if wandb is not None and wandb.run is not None:
+        try:
+            wandb.save(str(path), base_path=str(path.parent), policy="now")
+        except Exception as exc:
+            print(f"  WARN: wandb.save({path.name}) failed: {exc}")
 
 
 def train(args: argparse.Namespace) -> None:

@@ -1561,7 +1561,7 @@ cd models && torchrun --nproc_per_node=2 train_jaisp_foundation_v10.py \
 # 200-tile subset is sufficient for detection; full 790 tiles add training
 # time without significant accuracy gain.
 # Step 1: Precompute encoder features (one-time)
-python models/detection/precompute_features.py \
+python models/precompute_features.py \
     --rubin_dir    data/rubin_tiles_200 \
     --euclid_dir   data/euclid_tiles_200 \
     --encoder_ckpt models/checkpoints/jaisp_v8_fine/checkpoint_best.pt \

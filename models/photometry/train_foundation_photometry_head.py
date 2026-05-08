@@ -148,7 +148,7 @@ def load_cached_bottleneck(
     """Return the precomputed V8 bottleneck [1, C, H, W] or None if missing.
 
     Consumes the no-augment variant produced by
-    ``detection/precompute_features.py`` (``{tile_id}_aug0.pt``).
+    ``models/precompute_features.py`` (``{tile_id}_aug0.pt``).
     """
     if not cache_dir:
         return None

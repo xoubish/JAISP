@@ -88,7 +88,7 @@ bottleneck tensors to disk. This is the slow step (~20 min on GPU) but only
 needs to run once. Multiple augmentation variants are cached per tile.
 
 ```bash
-python models/detection/precompute_features.py \
+python models/precompute_features.py \
     --rubin_dir    data/rubin_tiles_200 \
     --euclid_dir   data/euclid_tiles_200 \
     --encoder_ckpt models/checkpoints/jaisp_v7_concat/checkpoint_best.pt \

@@ -1,16 +1,17 @@
-"""Precompute frozen V7 encoder bottleneck features for all tiles.
+"""Precompute frozen foundation encoder bottleneck features for all tiles.
 
-Runs the full 10-band V7 encoder once per tile per augmentation variant
-and saves the bottleneck tensor [C, H, W] to disk. CenterNet training
-then loads these cached features directly — no encoder forward pass needed.
+Runs the full 10-band foundation encoder once per tile per augmentation
+variant and saves the bottleneck tensor [C, H, W] to disk. Any downstream
+head (PSF, photometry, detection/CenterNet) loads these cached features
+directly — no encoder forward pass needed at training time.
 
 Usage
 -----
-    python detection/precompute_features.py \
-        --rubin_dir    ../data/rubin_tiles_all \
-        --euclid_dir   ../data/euclid_tiles_all \
-        --encoder_ckpt ../checkpoints/jaisp_v7_tiles_all_ddp_online/checkpoint_best.pt \
-        --out_dir      ../data/cached_features_v7_tiles_all \
+    python models/precompute_features.py \
+        --rubin_dir    data/rubin_tiles_all \
+        --euclid_dir   data/euclid_tiles_all \
+        --encoder_ckpt models/checkpoints/jaisp_v10_warmstart/checkpoint_best.pt \
+        --out_dir      data/cached_features_v10_warmstart \
         --n_augments   4
 """
 
@@ -22,10 +23,8 @@ import numpy as np
 import torch
 
 _HERE = Path(__file__).resolve().parent
-_MODELS = _HERE.parent
-for _p in (_HERE, _MODELS):
-    if str(_p) not in sys.path:
-        sys.path.insert(0, str(_p))
+if str(_HERE) not in sys.path:
+    sys.path.insert(0, str(_HERE))
 
 from jaisp_foundation_v10 import ALL_BANDS, RUBIN_BANDS
 from jaisp_dataset_v10 import JAISPDatasetV10

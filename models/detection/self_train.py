@@ -14,7 +14,7 @@ or UV sources in Rubin u/g).
 Usage
 -----
     # Step 1: Precompute features (run once)
-    python detection/precompute_features.py \
+    python models/precompute_features.py \
         --rubin_dir ../data/rubin_tiles_all \
         --euclid_dir ../data/euclid_tiles_all \
         --encoder_ckpt ../checkpoints/jaisp_v7_tiles_all_ddp_online/checkpoint_best.pt \
