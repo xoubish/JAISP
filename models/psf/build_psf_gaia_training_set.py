@@ -50,7 +50,7 @@ if str(_HERE) not in sys.path:
 
 from astrometry2.source_matching import safe_header_from_card_string  # noqa: E402
 from psf.build_psf_v4_training_set import (  # noqa: E402
-    _cut_stamp, _estimate_snr_flux, _isolation_mask,
+    _cut_stamp, _estimate_snr_flux, _isolation_mask, _refine_centroid_in_stamp,
 )
 
 
@@ -315,12 +315,39 @@ def main():
             Hb, Wb = img.shape[-2:]
 
             x_b, y_b = wcs.wcs_world2pix(ras_in, decs_in, 0)
+            half = args.stamp_size // 2
             for k in range(len(ras_in)):
-                xs, ys = float(x_b[k]), float(y_b[k])
+                xs0, ys0 = float(x_b[k]), float(y_b[k])
+                # First cut at the WCS-projected Gaia position so we have a
+                # stamp to centroid on. Even after PM correction, coadd WCS
+                # residuals (~tens of mas) shift the source by sub-pixel
+                # amounts, leaving a clean dipole in residuals at high SNR.
+                stamp_img0, _, _, _, ok = _cut_stamp(
+                    img, rms, xs0, ys0, args.stamp_size,
+                )
+                if not ok:
+                    continue
+                refined = _refine_centroid_in_stamp(stamp_img0)
+                if refined is None:
+                    continue
+                cy_stamp, cx_stamp = refined
+                ix0, iy0 = int(round(xs0)), int(round(ys0))
+                xs = (ix0 - half) + cx_stamp
+                ys = (iy0 - half) + cy_stamp
                 stamp_img, stamp_rms, fx, fy, ok = _cut_stamp(
                     img, rms, xs, ys, args.stamp_size,
                 )
                 if not ok:
+                    continue
+                # Reject stamps where the refined peak landed far from centre
+                # (refinement locked onto a neighbour or noise spike).
+                from scipy.ndimage import gaussian_filter
+                _sm = gaussian_filter(stamp_img.astype(np.float32), 1.0,
+                                      mode="constant")
+                if _sm.max() <= 0:
+                    continue
+                _iy, _ix = np.unravel_index(int(_sm.argmax()), _sm.shape)
+                if abs(_iy - half) > 3 or abs(_ix - half) > 3:
                     continue
                 snr, flux = _estimate_snr_flux(stamp_img, stamp_rms, fx, fy)
                 if snr < args.snr_thr:
