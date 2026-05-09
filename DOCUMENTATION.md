@@ -25,7 +25,7 @@ When using this file operationally, prefer the checkpoints and commands marked a
 | Astrometry | `models/checkpoints/latent_position_v8_no_psf/best.pt` | Current no-PSF latent position head. Gaussian-fit photon centroids are the present target convention. |
 | Smooth field QA | `models/astrometry2/fit_direct_pinn.py` | Fits raw or head-residual anchors from `anchors.npz` or `anchors_centernet.npz`; CenterNet post-head PINN fields are about 1 mas and do not improve anchor residuals. |
 | Concordance uncertainty / model check | `models/astrometry2/fit_hierarchical_gp_concordance.py` | Experimental hierarchical GP-style field with posterior std maps. Current CenterNet post-head HGP does not agree with PINN or beat the zero-field baseline, so it is QA/model-selection only, not a production correction. Default priors overfit per-tile noise on raw; for a fair PINN cross-check use `--length-scales 300,900 --prior-common-mas 4 --prior-group-mas 2 --prior-band-mas 1` (super-tight) -- at this setting HGP and PINN converge on raw within ~2 mas RMS and 0.03 mas anchor-level improvement. |
-| PSF | `models/checkpoints/foundation_epsf_head_gaia_gaussian_v10/` | Current run: Gaia-selected stars, frozen V10 foundation features, analytic Gaussian base ePSF, low-rank residual head, W&B image diagnostics. Older PSFField/PCA/V4 attempts are archived under `models/older_architectures/psf/`. |
+| PSF | `models/checkpoints/foundation_epsf_head_gaia_gaussian_v10_pm/` | Current run: Gaia-selected stars with proper-motion correction (`--obs-epoch-year 2025.0`) and image-based centroid refinement, frozen V10 foundation features, analytic Gaussian base ePSF, low-rank residual head, W&B image diagnostics. The earlier `..._v10/` (no PM) and `..._v10_pm_no_centroid_refine/` (PM but raw WCS centroids — produced clean dipole residuals at high SNR) are kept as comparison baselines. Older PSFField/PCA/V4 attempts are archived under `models/older_architectures/psf/`. |
 | Photometry | `models/checkpoints/photometry_foundation_200_fast/checkpoint_best.pt`; experiment: `models/checkpoints/rendered_stamp_v2_bigstamp/checkpoint_best.pt` | Current main learned v8 photometry head plus scarlet-like residual-scene and rendered-stamp experimental paths. PSFField-backed photometry is historical until the new ePSF head is wired into photometry. |
 
 Figure policy for this file: keep only figures that change the reader's understanding. Repetitive good/worst galleries, per-epoch W&B panels, and minor variants should stay in notebooks or checkpoint folders unless they support a new conclusion.
@@ -104,7 +104,7 @@ The current checkout contains the products used by the v8 downstream pipeline an
 
 - **Current flat training set**: `data/rubin_tiles_all/` and `data/euclid_tiles_all/`. The Rubin side contains 790 tiles; the Euclid side contains 791 readable files, of which 790 are matched Rubin+Euclid pairs and one is Euclid-only. Rubin-driven loaders ignore the unmatched Euclid tile.
 - **200-tile downstream subset**: `data/rubin_tiles_200/` and `data/euclid_tiles_200/`, both symlink subsets of the flat training set. Current detection training and cached v8 features use this subset.
-- **Current PSF star stamps**: `data/psf_training_gaia/`. These are Gaia-selected point-source stamps for all 10 bands, with per-star `stamps`, `rms`, `frac_xy`, `pos_norm`, `pos_pix`, `snr`, `flux`, `tile_id`, and Gaia magnitude metadata. This replaces the older CenterNet/V4 PSF stamp set for current PSF-head training.
+- **Current PSF star stamps**: `data/psf_training_gaia_pm/`. Gaia-selected point-source stamps for all 10 bands, with per-star `stamps`, `rms`, `frac_xy`, `pos_norm`, `pos_pix`, `snr`, `flux`, `tile_id`, Gaia magnitude, and `source_id`. Built with proper-motion propagation to the image epoch and **image-based centroid refinement**: WCS-projected Gaia positions are used to identify stars and cut a first stamp, then `_refine_centroid_in_stamp` re-derives the source position from the stamp pixels and the stamp is re-cut around the refined position. Stamps where refinement locked onto a neighbour or noise spike (peak >3 px from centre) are dropped. This replaces both the older CenterNet/V4 stamp set and the original raw-WCS Gaia set (`data/psf_training_gaia/` no PM, `data/psf_training_gaia_pm/` historical raw-WCS variant before centroid refinement was added).
 - **Patch-organized tract5063 product**: `data/rubin_tiles_tract5063/patch_{14,15,24}/` and `data/euclid_tiles_tract5063/patch_{14,15,24}/`, with 280 files per instrument. These are useful for patch-level inspection and ingestion provenance; the flat loaders above are the current training interface.
 - **Historical ECDFS 144-tile subset**: referenced in older checkpoints and experiment notes, but the `data/rubin_tiles_ecdfs/` and `data/euclid_tiles_ecdfs/` directories are not present in this checkout.
 
@@ -498,7 +498,7 @@ The minimum guard `remaining < 2 → skip drop` ensures the encoder always recei
 
 **Files**: `models/jaisp_foundation_v10.py` (standalone — does not inherit from v8), `models/jaisp_dataset_v10.py`, `models/train_jaisp_foundation_v10.py`. The v10 module defines the full architecture (`JAISPFoundationV10`, `JAISPMixedEncoderV10`, all building blocks and helpers); `JAISPTrainerV10` builds the v10 model directly without inheriting from earlier trainers.
 
-**Status**: trained via warm-start from v9. Current checkpoint: `models/checkpoints/jaisp_v10_warmstart/checkpoint_best.pt`. This is the frozen foundation used by the active Gaia Gaussian ePSF-head run (`models/checkpoints/foundation_epsf_head_gaia_gaussian_v10/`).
+**Status**: trained via warm-start from v9. Current checkpoint: `models/checkpoints/jaisp_v10_warmstart/checkpoint_best.pt`. This is the frozen foundation used by the active Gaia Gaussian ePSF-head run (`models/checkpoints/foundation_epsf_head_gaia_gaussian_v10_pm/`).
 
 V10 addresses an issue that is independent of v9's cross-instrument question: **per-source PSF profile residuals**. v9's reconstruction diagnostics (and v8's, equally) show systematic donut/dipole patterns at source positions — the model's predicted PSF is slightly broader than the truth at sharp cores, and slightly narrower at the wings. Two diagnostic patterns:
 
@@ -1274,22 +1274,38 @@ The head can be loaded with `load_foundation_epsf_head(...)`; `render_at_native(
 
 #### Training data: Gaia stars
 
-The current star stamps live in `data/psf_training_gaia/` and are produced by `models/psf/build_psf_gaia_training_set.py`. Gaia replaces the earlier CenterNet/V4 star list because the older list had enough coordinate/centroid failures to make the learned PSF visibly wrong. The first cell of `io/08_psf_visualization.ipynb` is now the sanity check: it displays random Gaia stars and reports centroid residual summaries, with the sub-pixel Gaia target marked explicitly.
+The current star stamps live in `data/psf_training_gaia_pm/` and are produced by `models/psf/build_psf_gaia_training_set.py`. Gaia replaces the earlier CenterNet/V4 star list because the older list had enough coordinate/centroid failures to make the learned PSF visibly wrong. Two corrections were added on top of the initial Gaia builder:
 
-The Gaia stamp files contain one NPZ per band with native-resolution stamps, RMS maps, sub-pixel phase (`frac_xy`), tile position (`pos_norm`, `pos_pix`), SNR, flux estimate, tile id, and Gaia magnitude metadata. A future schema improvement should store Gaia `source_id` as well as magnitude so matches remain unambiguous.
+1. **Proper-motion propagation** to the image observation epoch (controlled by `--obs-epoch-year` or `--obs-epoch-mjd`). Without it, high-PM nearby stars introduce per-star residual offsets at the few-mas level.
+2. **Image-based centroid refinement**. Even after PM correction, Rubin/Euclid coadd WCS solutions have residuals of tens of mas plus systematic offsets between WCS-projected position and actual coadd centroid (dither/coaddition asymmetries). The first version of `build_psf_gaia_training_set.py` cut stamps directly at WCS-projected Gaia positions, which produced clean **dipole residuals** in high-SNR Rubin bands (\|chi\|≈8 in `r`/`i`). The fix mirrors what `build_psf_v4_training_set.py` already did for CenterNet sources: cut a first stamp at the WCS position, run `_refine_centroid_in_stamp` on the stamp pixels, re-cut around the refined integer pixel, and reject stamps where the refined peak landed >3 px from centre. Gaia is still the *source list*, but the *centroid* used for `frac_xy` is image-derived.
+
+The Gaia stamp files contain one NPZ per band with native-resolution stamps, RMS maps, sub-pixel phase (`frac_xy`), tile position (`pos_norm`, `pos_pix`), SNR, flux estimate, tile id, Gaia magnitude, and `source_id`. The first cell of `io/08_psf_visualization.ipynb` is the sanity check: it displays random Gaia stars and reports centroid residual summaries.
+
+Build command (overwrites the output dir):
+
+```bash
+PYTHONUNBUFFERED=1 PYTHONPATH=models python -u models/psf/build_psf_gaia_training_set.py \
+    --rubin-dir data/rubin_tiles_all \
+    --euclid-dir data/euclid_tiles_all \
+    --out-dir data/psf_training_gaia_pm \
+    --stamp-size 32 \
+    --snr-thr 10 \
+    --obs-epoch-year 2025.0 \
+    --cache /tmp/gaia_psf_cache_pm.npz
+```
 
 #### Current run
 
-The active run is the V10 + analytic-Gaussian version:
+The active run is the V10 + analytic-Gaussian version on the PM-corrected, centroid-refined Gaia stamps:
 
 ```bash
 python -u models/psf/train_foundation_epsf_head.py \
-    --train-dir data/psf_training_gaia \
+    --train-dir data/psf_training_gaia_pm \
     --rubin-dir data/rubin_tiles_all \
     --euclid-dir data/euclid_tiles_all \
     --foundation-checkpoint models/checkpoints/jaisp_v10_warmstart/checkpoint_best.pt \
     --features-cache-dir data/cached_features_v10_warmstart \
-    --output-dir models/checkpoints/foundation_epsf_head_gaia_gaussian_v10 \
+    --output-dir models/checkpoints/foundation_epsf_head_gaia_gaussian_v10_pm \
     --epochs 60 \
     --max-stars-per-tile 256 \
     --min-snr 10 \
@@ -1298,7 +1314,7 @@ python -u models/psf/train_foundation_epsf_head.py \
     --base-sigma-scale 1.0 \
     --device cuda:0 \
     --wandb-project JAISP-Foundation-EPSF \
-    --wandb-name foundation_epsf_gaia_gaussian_v10 \
+    --wandb-name foundation_epsf_gaia_gaussian_v10_pm_refined \
     --wandb-image-every 5 \
     --wandb-n-examples 6 \
     --wandb-max-visual-tiles 2
@@ -1445,7 +1461,7 @@ JAISP/
 |   |   +-- jaisp_v9/                  V9 concat-fusion + adversarial-mask checkpoint (warm-start source for v10)
 |   |   +-- jaisp_v8_fine/             V8 fine-scale checkpoint; still loaded by un-retrained CenterNet/astrometry/photometry heads
 |   |   +-- latent_position_v8_no_psf/ V8 latent astrometry head + anchors (head not yet retrained on v10)
-|   |   +-- foundation_epsf_head_gaia_gaussian_v10/ Current Gaia/V10 ePSF-head run
+|   |   +-- foundation_epsf_head_gaia_gaussian_v10_pm/ Current Gaia/V10 ePSF-head run (PM-corrected, image-centroid-refined)
 |   |   +-- photometry_foundation_200_fast/ Current learned photometry-head run
 |   |   +-- photometry_foundation_200_emppsf/ Empirical-PSF photometry ablation
 |   |   +-- rendered_stamp_v2_bigstamp/ Experimental end-to-end rendered-stamp head
@@ -1706,12 +1722,12 @@ PYTHONPATH=. python astrometry2/fit_hierarchical_gp_concordance.py \
 
 ```bash
 PYTHONUNBUFFERED=1 python -u models/psf/train_foundation_epsf_head.py \
-    --train-dir data/psf_training_gaia \
+    --train-dir data/psf_training_gaia_pm \
     --rubin-dir data/rubin_tiles_all \
     --euclid-dir data/euclid_tiles_all \
     --foundation-checkpoint models/checkpoints/jaisp_v10_warmstart/checkpoint_best.pt \
     --features-cache-dir data/cached_features_v10_warmstart \
-    --output-dir models/checkpoints/foundation_epsf_head_gaia_gaussian_v10 \
+    --output-dir models/checkpoints/foundation_epsf_head_gaia_gaussian_v10_pm \
     --epochs 60 \
     --max-stars-per-tile 256 \
     --min-snr 10 \
@@ -1720,11 +1736,13 @@ PYTHONUNBUFFERED=1 python -u models/psf/train_foundation_epsf_head.py \
     --base-sigma-scale 1.0 \
     --device cuda:0 \
     --wandb-project JAISP-Foundation-EPSF \
-    --wandb-name foundation_epsf_gaia_gaussian_v10 \
+    --wandb-name foundation_epsf_gaia_gaussian_v10_pm_refined \
     --wandb-image-every 5 \
     --wandb-n-examples 6 \
     --wandb-max-visual-tiles 2
 ```
+
+`save_checkpoint` in `train_foundation_epsf_head.py` calls `wandb.save(..., policy="now")` after each successful `torch.save` and wraps the local save in try/except. If a write fails (e.g. disk full), training prints a warning and continues; if it succeeds, the checkpoint is uploaded to the wandb run's Files tab immediately. Added after the original `_pm` run crashed at epoch 23 with `PytorchStreamWriter failed writing file data.pkl: file write failed` and left zero-byte local checkpoints with no cloud copy.
 
 ### 7. Legacy V8 Foundation Photometry Head
 
@@ -1781,7 +1799,7 @@ python models/photometry/train_rendered_stamp_head.py \
 | **CenterNet v8 (current)** | `checkpoints/centernet_v8_fine/centernet_round2.pt` | Fused-bottleneck CenterNet, 2-round self-training on top of `jaisp_v8_fine`. Inference across all 790 tiles is cached at `data/detection_labels/centernet_v8_r2_790.pt` (~188 dets/tile) and feeds astrometry and older photometry experiments. |
 | **CenterNet v7 (baseline)** | `checkpoints/centernet_v7_rms_aware/centernet_best.pt` | Fused-bottleneck CenterNet on top of `jaisp_v7_concat`. Kept as a v7-vs-v8 comparison. |
 | **StemCenterNet detector** | `checkpoints/stem_centernet_v7_rms_aware_200/stem_centernet_best.pt` | Native-resolution stem detector on top of `jaisp_v7_concat`. No v8 retrain yet. |
-| **Foundation ePSF head (Gaia/V10)** | `models/checkpoints/foundation_epsf_head_gaia_gaussian_v10/` | Current PSF-head run. Gaia-selected stars, analytic Gaussian base, frozen V10 features, low-rank residual ePSF head, W&B fit/ePSF/coefficient plots. |
+| **Foundation ePSF head (Gaia/V10/PM/refined)** | `models/checkpoints/foundation_epsf_head_gaia_gaussian_v10_pm/` | Current PSF-head run. Gaia-selected stars with PM correction to the image epoch and image-based centroid refinement, analytic Gaussian base, frozen V10 features, low-rank residual ePSF head, W&B fit/ePSF/coefficient plots. Predecessors `..._v10/` (no PM) and `..._v10_pm_no_centroid_refine/` (PM but raw WCS centroids, dipole residuals at high SNR) are kept as comparison baselines. |
 | **Latent position head (current)** | `models/checkpoints/latent_position_v8_no_psf/best.pt` | Current per-object astrometry correction. Loads v8 foundation (head not yet retrained on v10), Gaussian centroid targets, no PSFField labels. |
 | **Foundation photometry head** | `models/checkpoints/photometry_foundation_200_fast/checkpoint_best.pt` | Existing learned photometry-head run on frozen v8 features; Euclid-native VIS/Y/J/H first. Still tied to the older PSFField/template path until ported to the new ePSF head. |
 | **RenderedStampHead experiment** | `models/checkpoints/rendered_stamp_v2_bigstamp/checkpoint_best.pt` | End-to-end photometry experiment that predicts rendered per-band stamps directly from v8 features; useful for ablation against explicit PSF/template paths. |
@@ -1822,11 +1840,13 @@ This section is intentionally redundant with earlier parts of the report. It is 
 - Classical VIS detection remains a fast baseline.
 
 **PSF modelling**
-- **Foundation ePSF head (current run)**: `models/checkpoints/foundation_epsf_head_gaia_gaussian_v10/`.
+- **Foundation ePSF head (current run)**: `models/checkpoints/foundation_epsf_head_gaia_gaussian_v10_pm/`.
   - Architecture: analytic Gaussian per-band base ePSF + constrained low-rank residual, coefficients predicted from frozen V10 bottleneck/VIS-stem features, tile position, and band id.
-  - Training: Gaia-selected stars in `data/psf_training_gaia/`, 10 native bands, analytic flux/background solve, robust residual loss plus residual smoothness/size regularization.
+  - Training: Gaia-selected stars in `data/psf_training_gaia_pm/` with proper-motion correction to the image epoch and image-based centroid refinement (see "Training data: Gaia stars" for why), 10 native bands, analytic flux/background solve, robust residual loss plus residual smoothness/size regularization.
   - Foundation: `models/checkpoints/jaisp_v10_warmstart/checkpoint_best.pt`.
+  - Robustness: `save_checkpoint` wraps `torch.save` in try/except and uploads each successful checkpoint to wandb immediately (`policy="now"`), so a disk-write failure doesn't kill the run or leave only zero-byte local files.
   - Diagnostics: W&B `vis/heldout_fits`, `vis/epsf_base_vs_head`, `vis/coeff_hist`, `vis/median_pearson`, `vis/median_abs_chi`; notebook `io/08_psf_visualization.ipynb`.
+  - Comparison baselines: `..._v10/` (no PM), `..._v10_pm_no_centroid_refine/` (PM but raw WCS centroids — produced clean dipole residuals at high SNR, kept to quantify the centroid-refinement gain).
   - Archived attempts: PSFField/PCA/V4 code and small checkpoints live in `models/older_architectures/psf/`.
 
 **Astrometry -- current result (head still on v8 foundation, pending retrain on v10; 2026-04-17)**
