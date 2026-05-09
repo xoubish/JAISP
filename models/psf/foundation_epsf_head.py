@@ -51,16 +51,17 @@ BAND_PIXEL_SCALE_ARCSEC = {
     "euclid_H": 0.1,
 }
 
-# Gaussian-equivalent core sigmas in mas. These are intentionally simple,
-# per-band physical priors rather than empirical ePSF templates.
+# Gaussian-equivalent core sigmas in mas. Calibrated against peak-normalised
+# median stacks of high-SNR Gaia stars in this dataset; rubin_u and euclid_VIS
+# were noticeably off the empirical FWHM and have been corrected.
 DEFAULT_CORE_SIGMA_MAS = {
-    "rubin_u": 430.0,
+    "rubin_u": 530.0,
     "rubin_g": 400.0,
     "rubin_r": 390.0,
     "rubin_i": 380.0,
     "rubin_z": 385.0,
     "rubin_y": 395.0,
-    "euclid_VIS": 120.0,
+    "euclid_VIS": 85.0,
     "euclid_Y": 190.0,
     "euclid_J": 195.0,
     "euclid_H": 200.0,
@@ -554,6 +555,7 @@ class FoundationEPSFHead(nn.Module):
         residual_l2_weight: float = 1e-5,
         basis_l2_weight: float = 1e-6,
         basis_tv_weight: float = 1e-5,
+        base_tv_weight: float = 0.0,
         epsf_tv_weight: float = 0.0,
     ) -> Dict[str, torch.Tensor]:
         """Small regularizers that keep the residual head in calibration mode."""
@@ -572,6 +574,13 @@ class FoundationEPSFHead(nn.Module):
             v = dx.pow(2).mean() + dy.pow(2).mean()
             parts["basis_tv"] = v
             loss = loss + float(basis_tv_weight) * v
+
+        if base_tv_weight > 0 and isinstance(self.base_logits, nn.Parameter):
+            dy = self.base_logits[..., 1:, :] - self.base_logits[..., :-1, :]
+            dx = self.base_logits[..., :, 1:] - self.base_logits[..., :, :-1]
+            v = dx.pow(2).mean() + dy.pow(2).mean()
+            parts["base_tv"] = v
+            loss = loss + float(base_tv_weight) * v
 
         if pred is not None and coeff_l2_weight > 0 and "coeff" in pred:
             v = pred["coeff"].pow(2).mean()

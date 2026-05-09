@@ -297,6 +297,53 @@ def aggregate(rows: Sequence[Mapping[str, object]]) -> Dict[str, float]:
     return {k: float(np.mean([float(row[k]) for row in rows if k in row])) for k in keys}
 
 
+def _shape_moments(
+    img: torch.Tensor,
+    frac_xy: Optional[torch.Tensor] = None,
+    aperture_pix: float = 6.0,
+    eps: float = 1e-12,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Aperture-weighted second moments per stamp.
+
+    Returns ``(T, e1, e2)`` of shape ``[N]`` where:
+        T  = Q11 + Q22  (size, in native pixels^2)
+        e1 = (Q11 - Q22) / T
+        e2 = 2 * Q12 / T
+    The aperture is a top-hat of radius ``aperture_pix`` native pixels around
+    ``(H/2 + frac_x, W/2 + frac_y)``. Background should already be subtracted.
+    """
+    if img.ndim == 4:
+        img = img.squeeze(1)
+    if img.ndim != 3:
+        raise ValueError("img must be [N, H, W] or [N, 1, H, W]")
+    N, H, W = img.shape
+    device = img.device
+    dtype = img.dtype
+    yy = torch.arange(H, device=device, dtype=dtype).view(1, H, 1)
+    xx = torch.arange(W, device=device, dtype=dtype).view(1, 1, W)
+    if frac_xy is None:
+        cx = float(W // 2)
+        cy = float(H // 2)
+        dx = xx - cx
+        dy = yy - cy
+    else:
+        cx = (W // 2) + frac_xy[:, 0].view(N, 1, 1)
+        cy = (H // 2) + frac_xy[:, 1].view(N, 1, 1)
+        dx = xx - cx
+        dy = yy - cy
+    r2 = dx * dx + dy * dy
+    mask = (r2 <= float(aperture_pix) ** 2).to(dtype)
+    w = mask * img.clamp_min(0.0)
+    norm = w.flatten(1).sum(dim=1).clamp_min(eps)
+    Qxx = (w * dx * dx).flatten(1).sum(dim=1) / norm
+    Qyy = (w * dy * dy).flatten(1).sum(dim=1) / norm
+    Qxy = (w * dx * dy).flatten(1).sum(dim=1) / norm
+    T = (Qxx + Qyy).clamp_min(eps)
+    e1 = (Qxx - Qyy) / T
+    e2 = 2.0 * Qxy / T
+    return T, e1, e2
+
+
 def _robust_limits(x: np.ndarray, q: float = 99.0) -> Tuple[float, float]:
     finite = np.asarray(x)[np.isfinite(x)]
     if finite.size == 0:
@@ -459,7 +506,14 @@ def _plot_fit_examples(vis: Mapping[str, object], epoch: int, max_examples: int)
 def _collect_best_band_examples(
     vis_list: Sequence[Mapping[str, object]],
 ) -> Dict[int, Dict[str, object]]:
-    best: Dict[int, Dict[str, object]] = {}
+    """Pick a representative validation example per band.
+
+    Picks the star whose per-stamp median |chi| is closest to the band's
+    overall median |chi| -- i.e. a typical-quality fit, not the brightest
+    star (which is often saturated/contaminated and dominates with a huge
+    chi that misrepresents the model's actual quality).
+    """
+    pool: Dict[int, list] = {}
     for vis in vis_list:
         batch = vis["batch"]
         stamps = batch["stamp"].detach().cpu().numpy()
@@ -471,22 +525,38 @@ def _collect_best_band_examples(
         chi = vis["chi"].detach().cpu().numpy()
         epsf = vis["pred"]["epsf"].detach().cpu().numpy()[:, 0]
         corr = vis["corr"].detach().cpu().numpy()
-        for idx in np.argsort(snr)[::-1]:
+        for idx in range(len(band_idx)):
             bi = int(band_idx[idx])
-            prev = best.get(bi)
-            if prev is not None and float(prev["snr"]) >= float(snr[idx]):
-                continue
-            best[bi] = {
+            star_med_abs_chi = float(np.nanmedian(np.abs(chi[idx])))
+            pool.setdefault(bi, []).append({
+                "med_abs_chi": star_med_abs_chi,
+                "snr": float(snr[idx]),
                 "obs": stamps[idx],
                 "model": model[idx],
                 "resid": resid[idx],
                 "chi": chi[idx],
                 "rms": rms[idx],
                 "epsf": epsf[idx],
-                "snr": float(snr[idx]),
                 "corr": float(corr[idx]),
                 "tile_id": vis["tile_id"],
-            }
+            })
+
+    best: Dict[int, Dict[str, object]] = {}
+    for bi, items in pool.items():
+        chis = np.array([it["med_abs_chi"] for it in items])
+        snrs = np.array([it["snr"] for it in items])
+        # Floor the SNR so we don't show a low-SNR star where everything looks
+        # fine just because of noise; pick the typical chi within that subset.
+        snr_thr = max(20.0, float(np.percentile(snrs, 25))) if len(snrs) else 0.0
+        keep_mask = snrs >= snr_thr
+        if not keep_mask.any():
+            keep_mask = np.ones_like(snrs, dtype=bool)
+        keep_idx = np.where(keep_mask)[0]
+        target = float(np.median(chis[keep_idx]))
+        pick = keep_idx[int(np.argmin(np.abs(chis[keep_idx] - target)))]
+        chosen = items[pick]
+        chosen.pop("med_abs_chi", None)
+        best[bi] = chosen
     return best
 
 
@@ -653,6 +723,43 @@ def build_wandb_visuals(
     chi_abs = torch.cat([v["chi"].abs().flatten(1).median(dim=1).values.detach().cpu() for v in vis_list]).numpy()
     payload["vis/median_pearson"] = float(np.nanmedian(corrs))
     payload["vis/median_abs_chi"] = float(np.nanmedian(chi_abs))
+
+    # Weak-lensing-relevant shape diagnostics: per-band median residuals in
+    # T (size), e1, e2. Aperture-weighted unweighted moments after background
+    # subtraction. dT/T should be < 1% (Rubin) or < 0.5% (Euclid) for WL use;
+    # |de1|, |de2| should be < ~1e-3.
+    band_idx_all = []
+    dT_rel_all = []
+    de1_all = []
+    de2_all = []
+    for v in vis_list:
+        batch = v["batch"]
+        bg = v["background"].detach().to(batch["stamp"].dtype)
+        flux = v["flux"].detach().to(batch["stamp"].dtype)
+        data_bs = batch["stamp"] - bg.view(-1, 1, 1)
+        model_bs = flux.view(-1, 1, 1) * v["native"].squeeze(1)
+        T_d, e1_d, e2_d = _shape_moments(data_bs, batch["frac_xy"])
+        T_m, e1_m, e2_m = _shape_moments(model_bs, batch["frac_xy"])
+        dT_rel_all.append(((T_d - T_m) / T_d.clamp_min(1e-12)).detach().cpu())
+        de1_all.append((e1_d - e1_m).detach().cpu())
+        de2_all.append((e2_d - e2_m).detach().cpu())
+        band_idx_all.append(batch["band_idx"].detach().cpu())
+    band_idx_all = torch.cat(band_idx_all).numpy()
+    dT_rel_all = torch.cat(dT_rel_all).numpy()
+    de1_all = torch.cat(de1_all).numpy()
+    de2_all = torch.cat(de2_all).numpy()
+    payload["vis/median_dT_rel"] = float(np.nanmedian(np.abs(dT_rel_all)))
+    payload["vis/median_abs_de1"] = float(np.nanmedian(np.abs(de1_all)))
+    payload["vis/median_abs_de2"] = float(np.nanmedian(np.abs(de2_all)))
+    for bi, band in enumerate(ALL_BANDS):
+        m = band_idx_all == bi
+        if not m.any():
+            continue
+        payload[f"vis/median_dT_rel/{band}"] = float(np.nanmedian(np.abs(dT_rel_all[m])))
+        payload[f"vis/median_abs_de1/{band}"] = float(np.nanmedian(np.abs(de1_all[m])))
+        payload[f"vis/median_abs_de2/{band}"] = float(np.nanmedian(np.abs(de2_all[m])))
+        payload[f"vis/median_abs_chi/{band}"] = float(np.nanmedian(np.abs(chi_abs[m]) if chi_abs.shape[0] == band_idx_all.shape[0] else chi_abs))
+
     return payload
 
 
@@ -716,6 +823,7 @@ def run_one_tile(
             residual_l2_weight=args.residual_l2_weight,
             basis_l2_weight=args.basis_l2_weight,
             basis_tv_weight=args.basis_tv_weight,
+            base_tv_weight=args.base_tv_weight,
             epsf_tv_weight=args.epsf_tv_weight,
         )
         loss = data_loss + reg["loss"]
@@ -1104,6 +1212,9 @@ def build_argparser() -> argparse.ArgumentParser:
     p.add_argument("--residual-l2-weight", type=float, default=1e-5)
     p.add_argument("--basis-l2-weight", type=float, default=1e-6)
     p.add_argument("--basis-tv-weight", type=float, default=1e-5)
+    p.add_argument("--base-tv-weight", type=float, default=0.0,
+                   help="TV smoothness on base_logits when --train-base is set "
+                        "(0 disables; 1e-3 is a reasonable WL-quality starting point).")
     p.add_argument("--epsf-tv-weight", type=float, default=0.0)
 
     p.add_argument("--wandb-project", type=str, default=None)
