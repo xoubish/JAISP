@@ -87,6 +87,7 @@ def load_psf_records_by_tile(
     train_dir: Path,
     band_names: Sequence[str] = ALL_BANDS,
     min_snr: float = 0.0,
+    max_snr: float = 0.0,
 ) -> Dict[str, List[Record]]:
     """Load v4 per-band NPZ stamps and group records by tile id."""
     by_tile: Dict[str, List[Record]] = {}
@@ -106,9 +107,20 @@ def load_psf_records_by_tile(
         frac_xy = np.asarray(data["frac_xy"], dtype=np.float32)
         pos_norm = np.asarray(data["pos_norm"], dtype=np.float32)
         pos_pix = np.asarray(data["pos_pix"], dtype=np.float32)
+        pos_vis_pix = (
+            np.asarray(data["pos_vis_pix"], dtype=np.float32)
+            if "pos_vis_pix" in data.files else None
+        )
+        centroid_resid_px = (
+            np.asarray(data["centroid_resid_px"], dtype=np.float32)
+            if "centroid_resid_px" in data.files else None
+        )
         tile_ids = np.asarray(data["tile_id"])
         snr = np.asarray(data["snr"], dtype=np.float32)
-        keep = np.where(snr >= float(min_snr))[0]
+        keep_mask = snr >= float(min_snr)
+        if float(max_snr) > 0:
+            keep_mask &= snr <= float(max_snr)
+        keep = np.where(keep_mask)[0]
         counts[band] = int(len(keep))
         for k in keep:
             tile_id = str(tile_ids[k])
@@ -121,6 +133,13 @@ def load_psf_records_by_tile(
                     "frac_xy": frac_xy[k],
                     "pos_norm": pos_norm[k],
                     "pos_pix": pos_pix[k],
+                    "source_positions_vis": (
+                        pos_vis_pix[k] if pos_vis_pix is not None else None
+                    ),
+                    "centroid_resid_px": (
+                        float(centroid_resid_px[k])
+                        if centroid_resid_px is not None else float("nan")
+                    ),
                     "snr": float(snr[k]),
                 }
             )
@@ -130,6 +149,10 @@ def load_psf_records_by_tile(
         f"Loaded {sum(counts.values())} PSF stamps from {len(by_tile)} tiles: "
         + "  ".join(f"{b}={n}" for b, n in counts.items())
     )
+    if float(max_snr) > 0:
+        print(f"  SNR hard filter: {float(min_snr):g} <= snr <= {float(max_snr):g}")
+    else:
+        print(f"  SNR hard filter: snr >= {float(min_snr):g}")
     return by_tile
 
 
@@ -156,6 +179,12 @@ def make_record_batch(
     source_positions_vis = pos_pix.copy()
     rubin_mask = band_idx_np < len(RUBIN_BANDS)
     source_positions_vis[rubin_mask] *= 2.0
+    for i, record in enumerate(records):
+        if record.get("source_positions_vis") is not None:
+            source_positions_vis[i] = np.asarray(
+                record["source_positions_vis"],
+                dtype=np.float32,
+            )
 
     return {
         "stamp": stamp,
@@ -163,8 +192,14 @@ def make_record_batch(
         "frac_xy": frac_xy,
         "pos_norm": pos_norm,
         "pos_pix": torch.from_numpy(pos_pix).to(device),
+        "pos_vis_pix": torch.from_numpy(source_positions_vis).to(device),
         "source_positions_vis": torch.from_numpy(source_positions_vis).to(device),
         "band_idx": torch.from_numpy(band_idx_np).long().to(device),
+        "centroid_resid_px": torch.tensor(
+            [float(r.get("centroid_resid_px", float("nan"))) for r in records],
+            dtype=torch.float32,
+            device=device,
+        ),
         "snr": torch.tensor([float(r["snr"]) for r in records], dtype=torch.float32, device=device),
     }
 
@@ -216,10 +251,70 @@ def encode_tile(
     }
 
 
+def effective_loss_rms(
+    data: torch.Tensor,
+    rms: torch.Tensor,
+    loss_snr_cap: float = 0.0,
+) -> torch.Tensor:
+    """Floor RMS in bright pixels so extreme-SNR stars cannot dominate loss.
+
+    The floor is based on a robust background-subtracted signal estimate per
+    stamp. A cap of 1000 means no individual pixel is trusted at >~1000 sigma,
+    while low and moderate SNR pixels keep their measured RMS.
+    """
+    rms_eff = rms.clamp(min=1e-6)
+    cap = float(loss_snr_cap)
+    if cap <= 0:
+        return rms_eff
+    bg = data.flatten(1).median(dim=1).values.view(-1, 1, 1)
+    signal = (data - bg).abs()
+    return torch.maximum(rms_eff, signal / max(cap, 1e-6))
+
+
+def effective_loss_rms_stats(rms: torch.Tensor, rms_eff: torch.Tensor) -> Dict[str, torch.Tensor]:
+    ratio = rms_eff / rms.clamp(min=1e-6)
+    active = ratio > 1.0001
+    return {
+        "loss_rms_cap_frac": active.float().mean(),
+        "loss_rms_eff_ratio_median": ratio.median(),
+        "loss_rms_eff_ratio_p95": torch.quantile(ratio.flatten(), 0.95),
+    }
+
+
+def radial_loss_weight(
+    data: torch.Tensor,
+    frac_xy: torch.Tensor,
+    loss_radius_px: float = 0.0,
+    loss_taper_px: float = 0.0,
+) -> Optional[torch.Tensor]:
+    """Circular loss window centred on each star, with optional cosine taper."""
+    radius = float(loss_radius_px)
+    if radius <= 0:
+        return None
+    taper = max(float(loss_taper_px), 0.0)
+    n, h, w = data.shape
+    yy, xx = torch.meshgrid(
+        torch.arange(h, device=data.device, dtype=data.dtype),
+        torch.arange(w, device=data.device, dtype=data.dtype),
+        indexing="ij",
+    )
+    cx = (w // 2) + frac_xy[:, 0].view(n, 1, 1).to(dtype=data.dtype)
+    cy = (h // 2) + frac_xy[:, 1].view(n, 1, 1).to(dtype=data.dtype)
+    rr = torch.hypot(xx.view(1, h, w) - cx, yy.view(1, h, w) - cy)
+    if taper <= 0:
+        return (rr <= radius).to(dtype=data.dtype)
+    inner = max(radius - taper, 0.0)
+    weight = torch.ones_like(rr)
+    ramp = (radius - rr) / max(taper, 1e-6)
+    weight = torch.where(rr > inner, ramp.clamp(0.0, 1.0), weight)
+    return torch.where(rr <= radius, weight, torch.zeros_like(weight))
+
+
 def solve_flux_background(
     model_unit: torch.Tensor,
     data: torch.Tensor,
     rms: torch.Tensor,
+    pixel_weight: Optional[torch.Tensor] = None,
     fit_background: bool = True,
     nonnegative_flux: bool = True,
     eps: float = 1e-12,
@@ -227,6 +322,8 @@ def solve_flux_background(
     """Weighted least-squares solve for flux and optional constant background."""
     pred = model_unit.squeeze(1)
     weight = 1.0 / rms.clamp(min=1e-6).pow(2)
+    if pixel_weight is not None:
+        weight = weight * pixel_weight.to(dtype=weight.dtype)
 
     if not fit_background:
         num = (weight * pred * data).sum(dim=(-2, -1))
@@ -250,19 +347,21 @@ def solve_flux_background(
     return flux, bg
 
 
-def psf_residual_loss(
+def _psf_fit_per_star(
     model_unit: torch.Tensor,
     data: torch.Tensor,
     rms: torch.Tensor,
     *,
+    pixel_weight: Optional[torch.Tensor] = None,
     charbonnier_eps: float = 1e-3,
     fit_background: bool = True,
     nonnegative_flux: bool = True,
-) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     flux, bg = solve_flux_background(
         model_unit,
         data,
         rms,
+        pixel_weight=pixel_weight,
         fit_background=fit_background,
         nonnegative_flux=nonnegative_flux,
     )
@@ -270,14 +369,181 @@ def psf_residual_loss(
     model = flux.view(-1, 1, 1) * pred + bg.view(-1, 1, 1)
     z = (model - data) / rms.clamp(min=1e-6)
     loss_pix = torch.sqrt(z * z + float(charbonnier_eps) ** 2) - float(charbonnier_eps)
-    loss_per_star = loss_pix.mean(dim=(-2, -1))
-    return loss_per_star.mean(), {
+    if pixel_weight is not None:
+        w = pixel_weight.to(dtype=loss_pix.dtype)
+        loss_per_star = (loss_pix * w).sum(dim=(-2, -1)) / w.sum(dim=(-2, -1)).clamp(min=1e-6)
+    else:
+        loss_per_star = loss_pix.mean(dim=(-2, -1))
+    return loss_per_star, flux, bg, model, z
+
+
+def psf_residual_loss(
+    model_unit: torch.Tensor,
+    data: torch.Tensor,
+    rms: torch.Tensor,
+    *,
+    loss_snr_cap: float = 0.0,
+    pixel_weight: Optional[torch.Tensor] = None,
+    charbonnier_eps: float = 1e-3,
+    fit_background: bool = True,
+    nonnegative_flux: bool = True,
+) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+    rms_loss = effective_loss_rms(data, rms, loss_snr_cap=loss_snr_cap)
+    loss_per_star, flux, bg, model, z = _psf_fit_per_star(
+        model_unit,
+        data,
+        rms_loss,
+        pixel_weight=pixel_weight,
+        charbonnier_eps=charbonnier_eps,
+        fit_background=fit_background,
+        nonnegative_flux=nonnegative_flux,
+    )
+    stats = {
         "flux": flux,
         "background": bg,
         "chi_abs_median": z.abs().median(),
+        "chi_abs_median_raw": ((model - data) / rms.clamp(min=1e-6)).abs().median(),
         "flux_median": flux.median(),
         "background_median": bg.median(),
     }
+    if pixel_weight is not None:
+        stats["loss_pixel_weight_frac"] = (pixel_weight > 0).float().mean()
+    stats.update(effective_loss_rms_stats(rms, rms_loss))
+    return loss_per_star.mean(), stats
+
+
+def centroid_shift_grid(
+    max_px: float,
+    steps: int,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    """Small Cartesian grid of native-pixel centroid offsets, including zero."""
+    max_px = float(max_px)
+    steps = int(steps)
+    if max_px <= 0 or steps <= 1:
+        return torch.zeros(1, 2, device=device, dtype=dtype)
+    if steps % 2 == 0:
+        steps += 1
+    vals = torch.linspace(-max_px, max_px, steps, device=device, dtype=dtype)
+    yy, xx = torch.meshgrid(vals, vals, indexing="ij")
+    return torch.stack([xx.reshape(-1), yy.reshape(-1)], dim=-1)
+
+
+def psf_residual_loss_with_centroid_nuisance(
+    head: FoundationEPSFHead,
+    epsf: torch.Tensor,
+    frac_xy: torch.Tensor,
+    data: torch.Tensor,
+    rms: torch.Tensor,
+    *,
+    stamp_size: int,
+    centroid_fit_max_px: float = 0.0,
+    centroid_fit_steps: int = 1,
+    loss_snr_cap: float = 0.0,
+    loss_radius_px: float = 0.0,
+    loss_taper_px: float = 0.0,
+    charbonnier_eps: float = 1e-3,
+    fit_background: bool = True,
+    nonnegative_flux: bool = True,
+) -> Tuple[torch.Tensor, Dict[str, torch.Tensor], torch.Tensor]:
+    """Fit flux/background after marginalizing over a small centroid-offset grid.
+
+    The grid choice is a hard nuisance assignment: first choose the best shift
+    with gradients disabled, then rerender only that selected shift so normal
+    gradients still flow to the ePSF shape.
+    """
+    shifts = centroid_shift_grid(
+        centroid_fit_max_px,
+        centroid_fit_steps,
+        device=frac_xy.device,
+        dtype=frac_xy.dtype,
+    )
+    rms_loss = effective_loss_rms(data, rms, loss_snr_cap=loss_snr_cap)
+    if shifts.shape[0] == 1:
+        native = head.render_at_native(epsf, frac_xy, stamp_size=stamp_size)
+        pixel_weight = radial_loss_weight(
+            data,
+            frac_xy,
+            loss_radius_px=loss_radius_px,
+            loss_taper_px=loss_taper_px,
+        )
+        loss, stats = psf_residual_loss(
+            native,
+            data,
+            rms,
+            loss_snr_cap=loss_snr_cap,
+            pixel_weight=pixel_weight,
+            charbonnier_eps=charbonnier_eps,
+            fit_background=fit_background,
+            nonnegative_flux=nonnegative_flux,
+        )
+        zero = torch.zeros(frac_xy.shape[0], device=frac_xy.device, dtype=frac_xy.dtype)
+        stats["centroid_shift_dx_median"] = zero.median()
+        stats["centroid_shift_dy_median"] = zero.median()
+        stats["centroid_shift_r_median"] = zero.median()
+        stats["centroid_shift_r_p90"] = zero.median()
+        stats["centroid_shift_edge_frac"] = zero.mean()
+        return loss, stats, native
+
+    n = frac_xy.shape[0]
+    best_loss = torch.full((n,), float("inf"), device=frac_xy.device, dtype=frac_xy.dtype)
+    best_shift = torch.zeros_like(frac_xy)
+    max_r = shifts.norm(dim=1).max().clamp_min(1e-12)
+
+    with torch.no_grad():
+        epsf_detached = epsf.detach()
+        for shift in shifts:
+            frac_trial = frac_xy + shift.view(1, 2)
+            native_trial = head.render_at_native(
+                epsf_detached,
+                frac_trial,
+                stamp_size=stamp_size,
+            )
+            pixel_weight_trial = radial_loss_weight(
+                data,
+                frac_trial,
+                loss_radius_px=loss_radius_px,
+                loss_taper_px=loss_taper_px,
+            )
+            loss_star, _flux, _bg, _model, _z = _psf_fit_per_star(
+                native_trial,
+                data,
+                rms_loss,
+                pixel_weight=pixel_weight_trial,
+                charbonnier_eps=charbonnier_eps,
+                fit_background=fit_background,
+                nonnegative_flux=nonnegative_flux,
+            )
+            take = loss_star < best_loss
+            best_loss = torch.where(take, loss_star, best_loss)
+            best_shift = torch.where(take[:, None], shift.view(1, 2), best_shift)
+
+    native = head.render_at_native(epsf, frac_xy + best_shift, stamp_size=stamp_size)
+    pixel_weight = radial_loss_weight(
+        data,
+        frac_xy + best_shift,
+        loss_radius_px=loss_radius_px,
+        loss_taper_px=loss_taper_px,
+    )
+    loss, stats = psf_residual_loss(
+        native,
+        data,
+        rms,
+        loss_snr_cap=loss_snr_cap,
+        pixel_weight=pixel_weight,
+        charbonnier_eps=charbonnier_eps,
+        fit_background=fit_background,
+        nonnegative_flux=nonnegative_flux,
+    )
+    shift_r = best_shift.norm(dim=1)
+    stats["centroid_shift_dx_median"] = best_shift[:, 0].median()
+    stats["centroid_shift_dy_median"] = best_shift[:, 1].median()
+    stats["centroid_shift_r_median"] = shift_r.median()
+    stats["centroid_shift_r_p90"] = torch.quantile(shift_r, 0.90)
+    stats["centroid_shift_edge_frac"] = (shift_r >= 0.95 * max_r).float().mean()
+    stats["centroid_shift"] = best_shift
+    return loss, stats, native
 
 
 def _float_dict(row: Mapping[str, object]) -> Dict[str, float]:
@@ -439,14 +705,24 @@ def _run_visual_tile(
         return_dict=True,
         **feature_kwargs,
     )
-    native = head.render_at_native(pred["epsf"], batch["frac_xy"], stamp_size=batch["stamp"].shape[-1])
-    flux, bg = solve_flux_background(
-        native,
+    _loss, stats, native = psf_residual_loss_with_centroid_nuisance(
+        head,
+        pred["epsf"],
+        batch["frac_xy"],
         batch["stamp"],
         batch["rms"],
+        stamp_size=batch["stamp"].shape[-1],
+        centroid_fit_max_px=args.centroid_fit_max_px,
+        centroid_fit_steps=args.centroid_fit_steps,
+        loss_snr_cap=args.loss_snr_cap,
+        loss_radius_px=args.loss_radius_px,
+        loss_taper_px=args.loss_taper_px,
+        charbonnier_eps=args.charbonnier_eps,
         fit_background=args.fit_background,
         nonnegative_flux=args.nonnegative_flux,
     )
+    flux = stats["flux"]
+    bg = stats["background"]
     model = flux.view(-1, 1, 1) * native.squeeze(1) + bg.view(-1, 1, 1)
     resid = batch["stamp"] - model
     chi = resid / batch["rms"].clamp(min=1e-6)
@@ -462,6 +738,7 @@ def _run_visual_tile(
         "corr": corr,
         "flux": flux,
         "background": bg,
+        "centroid_shift": stats.get("centroid_shift"),
     }
 
 
@@ -475,6 +752,10 @@ def _plot_fit_examples(vis: Mapping[str, object], epoch: int, max_examples: int)
     band_idx = batch["band_idx"].detach().cpu().numpy()
     snr = batch["snr"].detach().cpu().numpy()
     corr = vis["corr"].detach().cpu().numpy()
+    centroid_shift = vis.get("centroid_shift")
+    shift_r = None
+    if centroid_shift is not None:
+        shift_r = centroid_shift.detach().cpu().norm(dim=1).numpy()
     n = min(max_examples, stamps.shape[0])
     fig, axes = plt.subplots(4, n, figsize=(2.2 * n, 8.2), squeeze=False)
     for col in range(n):
@@ -489,8 +770,9 @@ def _plot_fit_examples(vis: Mapping[str, object], epoch: int, max_examples: int)
         axes[1, col].imshow(mod, origin="lower", cmap="gray", vmin=0.0, vmax=vmax)
         axes[2, col].imshow(res, origin="lower", cmap="RdBu_r", vmin=-rlim, vmax=rlim)
         axes[3, col].imshow(eps, origin="lower", cmap="inferno")
+        shift_txt = "" if shift_r is None else f" dxy={shift_r[col]:.2f}"
         axes[0, col].set_title(
-            f"{ALL_BANDS[int(band_idx[col])]}\nSNR={snr[col]:.0f} r={corr[col]:.2f} |chi|={chi_abs:.1f}",
+            f"{ALL_BANDS[int(band_idx[col])]}\nSNR={snr[col]:.0f} r={corr[col]:.2f} |chi|={chi_abs:.1f}{shift_txt}",
             fontsize=7,
         )
         for row in range(4):
@@ -525,6 +807,10 @@ def _collect_best_band_examples(
         chi = vis["chi"].detach().cpu().numpy()
         epsf = vis["pred"]["epsf"].detach().cpu().numpy()[:, 0]
         corr = vis["corr"].detach().cpu().numpy()
+        centroid_shift = vis.get("centroid_shift")
+        shift_r = None
+        if centroid_shift is not None:
+            shift_r = centroid_shift.detach().cpu().norm(dim=1).numpy()
         for idx in range(len(band_idx)):
             bi = int(band_idx[idx])
             star_med_abs_chi = float(np.nanmedian(np.abs(chi[idx])))
@@ -539,6 +825,7 @@ def _collect_best_band_examples(
                 "epsf": epsf[idx],
                 "corr": float(corr[idx]),
                 "tile_id": vis["tile_id"],
+                "shift_r": float(shift_r[idx]) if shift_r is not None else 0.0,
             })
 
     best: Dict[int, Dict[str, object]] = {}
@@ -579,6 +866,7 @@ def _plot_band_fit_grid(vis_list: Sequence[Mapping[str, object]], epoch: int):
         res = item["resid"]
         eps = item["epsf"]
         rms = item["rms"]
+        shift_r = float(item.get("shift_r", 0.0))
         _, vmax = _robust_limits(obs)
         rlim = max(float(np.nanpercentile(np.abs(res[np.isfinite(res)]), 99)) if np.isfinite(res).any() else 1e-8, 1e-8)
         chi_abs = np.nanmedian(np.abs(res / np.maximum(rms, 1e-6)))
@@ -587,7 +875,7 @@ def _plot_band_fit_grid(vis_list: Sequence[Mapping[str, object]], epoch: int):
         axes[2, bi].imshow(res, origin="lower", cmap="RdBu_r", vmin=-rlim, vmax=rlim)
         axes[3, bi].imshow(eps, origin="lower", cmap="inferno")
         axes[0, bi].set_title(
-            f"{band}\nSNR={item['snr']:.0f} r={item['corr']:.2f} |chi|={chi_abs:.1f}",
+            f"{band}\nSNR={item['snr']:.0f} r={item['corr']:.2f} |chi|={chi_abs:.1f} dxy={shift_r:.2f}",
             fontsize=7,
         )
         for row in range(4):
@@ -808,11 +1096,18 @@ def run_one_tile(
             return_dict=True,
             **feature_kwargs,
         )
-        native = head.render_at_native(pred["epsf"], batch["frac_xy"], stamp_size=stamp_size)
-        data_loss, stats = psf_residual_loss(
-            native,
+        data_loss, stats, native = psf_residual_loss_with_centroid_nuisance(
+            head,
+            pred["epsf"],
+            batch["frac_xy"],
             batch["stamp"],
             batch["rms"],
+            stamp_size=stamp_size,
+            centroid_fit_max_px=args.centroid_fit_max_px,
+            centroid_fit_steps=args.centroid_fit_steps,
+            loss_snr_cap=args.loss_snr_cap,
+            loss_radius_px=args.loss_radius_px,
+            loss_taper_px=args.loss_taper_px,
             charbonnier_eps=args.charbonnier_eps,
             fit_background=args.fit_background,
             nonnegative_flux=args.nonnegative_flux,
@@ -839,10 +1134,32 @@ def run_one_tile(
         "loss_data": data_loss,
         "loss_reg": reg["loss"],
         "chi_abs_median": stats["chi_abs_median"],
+        "chi_abs_median_raw": stats["chi_abs_median_raw"],
         "flux_median": stats["flux_median"],
         "background_median": stats["background_median"],
         "n_star": int(batch["stamp"].shape[0]),
     }
+    for key in (
+        "centroid_shift_dx_median",
+        "centroid_shift_dy_median",
+        "centroid_shift_r_median",
+        "centroid_shift_r_p90",
+        "centroid_shift_edge_frac",
+        "loss_rms_cap_frac",
+        "loss_rms_eff_ratio_median",
+        "loss_rms_eff_ratio_p95",
+        "loss_pixel_weight_frac",
+    ):
+        if key in stats:
+            row[key] = stats[key]
+    if "coeff" in pred:
+        coeff_abs = pred["coeff"].detach().abs().flatten()
+        coeff_sat_threshold = 0.98 * float(getattr(head, "coeff_scale", 1.0))
+        row["coeff_abs_mean"] = coeff_abs.mean()
+        row["coeff_abs_p95"] = torch.quantile(coeff_abs, 0.95)
+        row["coeff_sat_frac"] = (coeff_abs > coeff_sat_threshold).float().mean()
+    if "residual_logits" in pred:
+        row["residual_logits_rms"] = pred["residual_logits"].detach().pow(2).mean().sqrt()
     for key, value in reg.items():
         if key != "loss":
             row[f"reg_{key}"] = value
@@ -884,7 +1201,11 @@ def train(args: argparse.Namespace) -> None:
     device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
     print(f"Device: {device}")
 
-    records_by_tile = load_psf_records_by_tile(args.train_dir, min_snr=args.min_snr)
+    records_by_tile = load_psf_records_by_tile(
+        args.train_dir,
+        min_snr=args.min_snr,
+        max_snr=args.max_snr,
+    )
     pairs = discover_tile_pairs(str(args.rubin_dir), str(args.euclid_dir))
     pairs = [p for p in pairs if p[0] in records_by_tile]
     if not pairs:
@@ -999,6 +1320,11 @@ def train(args: argparse.Namespace) -> None:
         "basis_init": args.basis_init,
         "train_base": args.train_base,
         "use_foundation_features": not args.no_foundation_features,
+        "min_snr": args.min_snr,
+        "max_snr": args.max_snr,
+        "loss_snr_cap": args.loss_snr_cap,
+        "loss_radius_px": args.loss_radius_px,
+        "loss_taper_px": args.loss_taper_px,
     }
 
     out_dir = Path(args.output_dir)
@@ -1067,6 +1393,11 @@ def train(args: argparse.Namespace) -> None:
         print(
             f"Epoch {epoch:03d}/{args.epochs} "
             f"train={train_loss:.5f} val={val_loss:.5f} "
+            f"val_coeff_sat={val_metrics.get('coeff_sat_frac', float('nan')):.3f} "
+            f"val_dxy={val_metrics.get('centroid_shift_r_median', float('nan')):.3f}px "
+            f"val_cap={val_metrics.get('loss_rms_cap_frac', float('nan')):.3f} "
+            f"val_win={val_metrics.get('loss_pixel_weight_frac', 1.0):.3f} "
+            f"val_rawchi={val_metrics.get('chi_abs_median_raw', float('nan')):.3f} "
             f"n_train_tiles={len(train_rows)} n_val_tiles={len(val_rows)}"
         )
 
@@ -1119,6 +1450,10 @@ def train(args: argparse.Namespace) -> None:
         "epochs_run": args.epochs,
         "n_train_tiles": len(train_pairs),
         "n_val_tiles": len(val_pairs),
+        "final_val_coeff_sat_frac": val_metrics.get("coeff_sat_frac", float("nan")),
+        "final_val_coeff_abs_p95": val_metrics.get("coeff_abs_p95", float("nan")),
+        "final_val_centroid_shift_r_median": val_metrics.get("centroid_shift_r_median", float("nan")),
+        "final_val_centroid_shift_r_p90": val_metrics.get("centroid_shift_r_p90", float("nan")),
     }
     with open(out_dir / "training_summary.json", "w") as f:
         json.dump(summary, f, indent=2)
@@ -1169,6 +1504,15 @@ def build_argparser() -> argparse.ArgumentParser:
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--val-frac", type=float, default=0.10)
     p.add_argument("--min-snr", type=float, default=10.0)
+    p.add_argument(
+        "--max-snr",
+        type=float,
+        default=0.0,
+        help=(
+            "Optional hard upper SNR cut for PSF stamps. 0 disables; prefer "
+            "--loss-snr-cap for keeping bright stars without letting them dominate."
+        ),
+    )
     p.add_argument("--max-stars-per-tile", type=int, default=256)
     p.add_argument(
         "--max-train-tiles",
@@ -1197,25 +1541,64 @@ def build_argparser() -> argparse.ArgumentParser:
     p.add_argument("--band-embed-dim", type=int, default=16)
     p.add_argument("--mlp-hidden", type=int, default=256)
     p.add_argument("--pos-freqs", type=int, default=6)
-    p.add_argument("--coeff-scale", type=float, default=1.0)
-    p.add_argument("--delta-scale", type=float, default=0.35)
-    p.add_argument("--basis-init", type=float, default=1e-2)
+    p.add_argument("--coeff-scale", type=float, default=0.5)
+    p.add_argument("--delta-scale", type=float, default=0.20)
+    p.add_argument("--basis-init", type=float, default=1e-3)
     p.add_argument("--train-base", action="store_true")
     p.add_argument("--no-foundation-features", action="store_true")
 
     p.add_argument("--charbonnier-eps", type=float, default=1e-3)
+    p.add_argument(
+        "--loss-snr-cap",
+        type=float,
+        default=1000.0,
+        help=(
+            "Cap per-pixel S/N in the PSF loss by flooring effective RMS at "
+            "|stamp - median(stamp)| / cap. Set <=0 to disable."
+        ),
+    )
+    p.add_argument(
+        "--loss-radius-px",
+        type=float,
+        default=13.0,
+        help=(
+            "Circular native-pixel radius for the PSF loss window. This keeps "
+            "square stamp edges/corners from teaching non-PSF structure. Set <=0 to disable."
+        ),
+    )
+    p.add_argument(
+        "--loss-taper-px",
+        type=float,
+        default=2.0,
+        help="Cosine-like taper width at --loss-radius-px. 0 gives a hard aperture.",
+    )
+    p.add_argument(
+        "--centroid-fit-max-px",
+        type=float,
+        default=0.20,
+        help=(
+            "Marginalize each star over a small native-pixel centroid-offset "
+            "grid with this half-width. Set 0 to disable."
+        ),
+    )
+    p.add_argument(
+        "--centroid-fit-steps",
+        type=int,
+        default=5,
+        help="Number of grid samples per centroid axis; even values are rounded up.",
+    )
     p.add_argument("--no-fit-background", action="store_false", dest="fit_background")
     p.set_defaults(fit_background=True)
     p.add_argument("--allow-negative-flux", action="store_false", dest="nonnegative_flux")
     p.set_defaults(nonnegative_flux=True)
-    p.add_argument("--coeff-l2-weight", type=float, default=1e-4)
-    p.add_argument("--residual-l2-weight", type=float, default=1e-5)
+    p.add_argument("--coeff-l2-weight", type=float, default=1e-3)
+    p.add_argument("--residual-l2-weight", type=float, default=5e-5)
     p.add_argument("--basis-l2-weight", type=float, default=1e-6)
-    p.add_argument("--basis-tv-weight", type=float, default=1e-5)
-    p.add_argument("--base-tv-weight", type=float, default=0.0,
+    p.add_argument("--basis-tv-weight", type=float, default=1e-4)
+    p.add_argument("--base-tv-weight", type=float, default=1e-3,
                    help="TV smoothness on base_logits when --train-base is set "
                         "(0 disables; 1e-3 is a reasonable WL-quality starting point).")
-    p.add_argument("--epsf-tv-weight", type=float, default=0.0)
+    p.add_argument("--epsf-tv-weight", type=float, default=1e-5)
 
     p.add_argument("--wandb-project", type=str, default=None)
     p.add_argument("--wandb-name", type=str, default=None)

@@ -59,6 +59,32 @@ ALL_BANDS = ["rubin_u", "rubin_g", "rubin_r", "rubin_i", "rubin_z", "rubin_y",
 RUBIN_BANDS = ["rubin_u", "rubin_g", "rubin_r", "rubin_i", "rubin_z", "rubin_y"]
 
 
+def _centroid_residual_in_stamp(
+    stamp_img: np.ndarray,
+    frac_x: float,
+    frac_y: float,
+    ap_radius: float = 5.0,
+) -> Tuple[float, float, float]:
+    """Measure aperture centroid residual relative to the recorded sub-pixel centre."""
+    img = stamp_img[0] if stamp_img.ndim == 3 else stamp_img
+    H, W = img.shape[-2:]
+    yy, xx = np.indices((H, W), dtype=np.float64)
+    tx = W // 2 + float(frac_x)
+    ty = H // 2 + float(frac_y)
+    r = np.hypot(xx - tx, yy - ty)
+    bg_mask = r > min(14.0, H * 0.38)
+    bg = float(np.nanmedian(img[bg_mask])) if bg_mask.any() else float(np.nanmedian(img))
+    weight = np.clip(img - bg, 0.0, None) * (r < float(ap_radius))
+    total = float(np.nansum(weight))
+    if total <= 0:
+        return float("nan"), float("nan"), float("nan")
+    cx = float(np.nansum(xx * weight) / total)
+    cy = float(np.nansum(yy * weight) / total)
+    dx = cx - tx
+    dy = cy - ty
+    return dx, dy, float(np.hypot(dx, dy))
+
+
 # ============================================================
 # GAIA query
 # ============================================================
@@ -197,6 +223,17 @@ def main():
     p.add_argument("--stamp-size", type=int, default=32)
     p.add_argument("--isolation-arcsec", type=float, default=1.5)
     p.add_argument("--snr-thr", type=float, default=10.0)
+    p.add_argument(
+        "--max-centroid-resid-px",
+        type=float,
+        default=0.35,
+        help=(
+            "Reject stamps whose post-cut aperture centroid differs from the "
+            "recorded sub-pixel centre by more than this many native pixels. "
+            "Set <=0 to disable."
+        ),
+    )
+    p.add_argument("--centroid-ap-radius", type=float, default=5.0)
     p.add_argument("--mag-min", type=float, default=16.0,
                    help="Min GAIA G mag (brighter than this saturates Rubin/Euclid).")
     p.add_argument("--mag-max", type=float, default=21.0,
@@ -265,7 +302,8 @@ def main():
     # ---- Per-tile stamp extraction ------------------------------------------
     out: Dict[str, Dict[str, list]] = {b: {
         "stamps": [], "rms": [], "frac_xy": [],
-        "pos_norm": [], "pos_pix": [],
+        "pos_norm": [], "pos_pix": [], "pos_vis_pix": [],
+        "centroid_resid_px": [],
         "snr": [], "flux": [], "tile_id": [], "g_mag": [], "source_id": [],
     } for b in ALL_BANDS}
 
@@ -293,6 +331,8 @@ def main():
 
         ras_in = gaia["ra"][in_v][keep]
         decs_in = gaia["dec"][in_v][keep]
+        x_vis_in = x_v[in_v][keep]
+        y_vis_in = y_v[in_v][keep]
         mags_in = gaia["g_mag"][in_v][keep]
         source_ids_in = gaia["source_id"][in_v][keep]
         n_used_stars += int(len(ras_in))
@@ -349,6 +389,16 @@ def main():
                 _iy, _ix = np.unravel_index(int(_sm.argmax()), _sm.shape)
                 if abs(_iy - half) > 3 or abs(_ix - half) > 3:
                     continue
+                _, _, centroid_resid = _centroid_residual_in_stamp(
+                    stamp_img,
+                    fx,
+                    fy,
+                    ap_radius=args.centroid_ap_radius,
+                )
+                if not np.isfinite(centroid_resid):
+                    continue
+                if args.max_centroid_resid_px > 0 and centroid_resid > args.max_centroid_resid_px:
+                    continue
                 snr, flux = _estimate_snr_flux(stamp_img, stamp_rms, fx, fy)
                 if snr < args.snr_thr:
                     continue
@@ -361,6 +411,8 @@ def main():
                 out[band]["frac_xy"].append([fx, fy])
                 out[band]["pos_norm"].append(pos_norm)
                 out[band]["pos_pix"].append([xs, ys])
+                out[band]["pos_vis_pix"].append([float(x_vis_in[k]), float(y_vis_in[k])])
+                out[band]["centroid_resid_px"].append(float(centroid_resid))
                 out[band]["snr"].append(snr)
                 out[band]["flux"].append(flux)
                 out[band]["tile_id"].append(tile_id)
@@ -389,6 +441,8 @@ def main():
             frac_xy=np.array(rec["frac_xy"], dtype=np.float32),
             pos_norm=np.array(rec["pos_norm"], dtype=np.float32),
             pos_pix=np.array(rec["pos_pix"], dtype=np.float32),
+            pos_vis_pix=np.array(rec["pos_vis_pix"], dtype=np.float32),
+            centroid_resid_px=np.array(rec["centroid_resid_px"], dtype=np.float32),
             snr=np.array(rec["snr"], dtype=np.float32),
             flux=np.array(rec["flux"], dtype=np.float32),
             tile_id=np.array(rec["tile_id"], dtype=np.str_),
