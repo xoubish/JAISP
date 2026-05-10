@@ -34,6 +34,22 @@ from jaisp_dataset_v10 import JAISPDatasetV10
 from astrometry2.source_matching import detect_sources, build_detection_image
 
 
+PSEUDO_LABEL_CACHE_VERSION = 2
+
+
+def _axis_angle_distance(a: float, b: float) -> float:
+    """Smallest distance between two unoriented line angles in radians."""
+    return abs(((a - b + np.pi / 2.0) % np.pi) - np.pi / 2.0)
+
+
+def _smooth_circular_hist(hist: np.ndarray) -> np.ndarray:
+    """Light circular smoothing for angular histograms."""
+    if hist.size < 5:
+        return hist
+    kernel = np.array([1, 2, 3, 2, 1], dtype=np.float64)
+    padded = np.concatenate([hist[-2:], hist, hist[:2]])
+    return np.convolve(padded, kernel / kernel.sum(), mode='valid')
+
 
 def _pseudo_labels(
     rubin_img: np.ndarray,   # [6, H, W]
@@ -70,17 +86,21 @@ def _vis_bright_core_and_spike_mask(
     spike_radius: int = 40,
     min_star_area: int = 20,
     max_spike_radius: int = 400,
+    spike_width: float = 3.0,
+    spike_width_slope: float = 0.004,
+    n_angle_bins: int = 180,
+    max_spike_angles: int = 6,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Return bright-source centroids and a dilated mask around their cores.
+    """Return bright-source centroids and a thin mask on VIS spike ridges.
 
-    The mask radius scales with each star's saturated area:
-        r = spike_radius * sqrt(area / min_star_area)
-    so faint saturated stars get the base radius while bright stars with
-    large saturated cores get proportionally larger masks that cover their
-    longer diffraction spikes.
+    Bright saturated cores are found from the upper VIS percentile. Around each
+    core, this estimates dominant radial spike angles from high-flux pixels in
+    an annulus, then masks only narrow line segments with observed spike
+    evidence. That preserves real sources in the gaps between spikes while
+    vetoing the repeated false peaks that sit directly on a diffraction ridge.
 
-    This is used both by the classical VIS pseudo-labeler and by self-training
-    refinement so artifact suppression stays consistent across stages.
+    ``spike_radius`` controls the base radial search length; it still scales
+    with saturated-core area and is capped by ``max_spike_radius``.
     """
     from scipy.ndimage import center_of_mass, distance_transform_edt, find_objects, label as ndlabel
 
@@ -93,8 +113,22 @@ def _vis_bright_core_and_spike_mask(
     if len(nonzero_vals) <= 100:
         return bright_xs, bright_ys, spike_mask
 
+    finite_vals = vis_img[np.isfinite(vis_img)]
+    if finite_vals.size <= 100:
+        finite_vals = nonzero_vals
+
     sat_thresh = np.percentile(nonzero_vals, 99.5)
-    sat_mask = vis_img > sat_thresh
+    halo_vals = finite_vals[finite_vals < sat_thresh]
+    if halo_vals.size <= 100:
+        halo_vals = finite_vals
+
+    med = float(np.median(finite_vals))
+    mad = float(np.median(np.abs(finite_vals - med)))
+    sig = max(1.4826 * mad, 1e-6)
+    angle_thr = max(float(np.percentile(halo_vals, 98.5)), med + 6.0 * sig)
+    line_thr = max(float(np.percentile(halo_vals, 93.0)), med + 2.5 * sig)
+
+    sat_mask = vis_img >= sat_thresh
     labeled, n_blobs = ndlabel(sat_mask)
     if n_blobs <= 0:
         return bright_xs, bright_ys, spike_mask
@@ -112,29 +146,110 @@ def _vis_bright_core_and_spike_mask(
 
     blob_slices = find_objects(labeled)
 
-    # Per-star brightness-scaled dilation: brighter stars (larger saturated
-    # area) get proportionally larger masks.  Work on each blob's local crop
-    # instead of dilating the full image every time; the brightness-scaled
-    # radii can be hundreds of pixels, so full-frame dilation is very slow.
-    for lb in core_labels:
-        r = int(spike_radius * np.sqrt(areas[lb] / min_star_area))
+    angle_sep = np.deg2rad(8.0)
+    min_radial_start = 6.0
+
+    # Work per bright core so large masks stay local even for saturated stars.
+    for lb, cx, cy in zip(core_labels, bright_xs, bright_ys):
+        core_area = max(float(areas[lb]), 1.0)
+        core_r = max(2.0, np.sqrt(core_area / np.pi))
+        r_search = int(spike_radius * np.sqrt(core_area / min_star_area))
+        r_search = min(max(r_search, spike_radius), max_spike_radius)
+
         blob_slice = blob_slices[lb - 1]
         if blob_slice is None:
             continue
 
         y_slice, x_slice = blob_slice
-        if r <= 0:
+        if r_search <= 0 or spike_width <= 0:
             spike_mask[y_slice, x_slice] |= labeled[y_slice, x_slice] == lb
             continue
 
-        r = min(r, max_spike_radius)
-        y0 = max(0, y_slice.start - r)
-        y1 = min(H, y_slice.stop + r)
-        x0 = max(0, x_slice.start - r)
-        x1 = min(W, x_slice.stop + r)
+        pad = int(np.ceil(r_search + core_r + 4))
+        y0 = max(0, y_slice.start - pad)
+        y1 = min(H, y_slice.stop + pad)
+        x0 = max(0, x_slice.start - pad)
+        x1 = min(W, x_slice.stop + pad)
 
+        local_img = vis_img[y0:y1, x0:x1]
         local_blob = labeled[y0:y1, x0:x1] == lb
-        local_mask = distance_transform_edt(~local_blob) <= r
+        yy, xx = np.indices(local_img.shape, dtype=np.float32)
+        dx = (xx + x0) - float(cx)
+        dy = (yy + y0) - float(cy)
+        rr = np.hypot(dx, dy)
+
+        # Always veto the saturated core itself, but only with a compact guard.
+        core_guard = distance_transform_edt(~local_blob) <= max(2.0, min(core_r, 10.0))
+        local_mask = core_guard.copy()
+
+        annulus = (
+            np.isfinite(local_img)
+            & (rr >= max(core_r * 1.6, min_radial_start))
+            & (rr <= float(r_search))
+        )
+        candidates = annulus & (local_img >= angle_thr)
+        if candidates.sum() < 8:
+            spike_mask[y0:y1, x0:x1] |= local_mask
+            continue
+
+        theta = (np.arctan2(dy[candidates], dx[candidates]) + np.pi) % np.pi
+        weights = (
+            np.log1p(np.maximum(local_img[candidates] - angle_thr, 0.0))
+            * np.sqrt(np.maximum(rr[candidates], 1.0))
+        )
+        hist, edges = np.histogram(
+            theta, bins=n_angle_bins, range=(0.0, np.pi), weights=weights
+        )
+        hist = _smooth_circular_hist(hist.astype(np.float64))
+        if hist.max() <= 0:
+            spike_mask[y0:y1, x0:x1] |= local_mask
+            continue
+
+        hist_med = float(np.median(hist))
+        hist_mad = float(np.median(np.abs(hist - hist_med)))
+        peak_floor = max(hist_med + 5.0 * 1.4826 * hist_mad, float(hist.max()) * 0.18)
+        peak_idx = [
+            i for i in range(hist.size)
+            if hist[i] >= peak_floor
+            and hist[i] >= hist[(i - 1) % hist.size]
+            and hist[i] >= hist[(i + 1) % hist.size]
+        ]
+        peak_idx.sort(key=lambda i: hist[i], reverse=True)
+
+        angles = []
+        for i in peak_idx:
+            angle = 0.5 * (edges[i] + edges[i + 1])
+            if all(_axis_angle_distance(angle, old) >= angle_sep for old in angles):
+                angles.append(float(angle))
+            if len(angles) >= max_spike_angles:
+                break
+
+        for angle in angles:
+            ca = np.cos(angle)
+            sa = np.sin(angle)
+            along = dx * ca + dy * sa
+            perp = np.abs(dx * sa - dy * ca)
+            width = spike_width + spike_width_slope * rr
+            line_axis = (
+                annulus
+                & (perp <= width)
+                & (rr >= max(core_r, min_radial_start))
+            )
+
+            # Split the unoriented axis into two rays so a one-sided spike does
+            # not veto the opposite side of the star.
+            for sign in (-1.0, 1.0):
+                ray = line_axis & (along * sign > 0)
+                evidence = ray & (local_img >= line_thr)
+                if evidence.sum() < 5:
+                    continue
+                radial = np.abs(along[evidence])
+                r_min = max(core_r, float(np.percentile(radial, 2.0)) - 5.0)
+                r_max = min(float(r_search), float(np.percentile(radial, 98.0)) + 25.0)
+                if r_max <= r_min:
+                    continue
+                local_mask |= ray & (np.abs(along) >= r_min) & (np.abs(along) <= r_max)
+
         spike_mask[y0:y1, x0:x1] |= local_mask
 
     return bright_xs, bright_ys, spike_mask
@@ -146,18 +261,19 @@ def _pseudo_labels_vis(
     max_sources: int = 1000,
     spike_radius: int = 40,
     min_star_area: int = 20,
+    spike_width: float = 3.0,
 ) -> Tuple[np.ndarray, np.ndarray, int, int]:
     """Detect sources from Euclid VIS at native 0.1"/px resolution.
 
     Returns centroids normalized to VIS frame [0,1], preserving the full
     VIS spatial precision without projecting through a coarser grid.
 
-    Saturated blobs with area >= min_star_area pixels are identified as star
-    or galaxy cores. Their centroids are recorded as detections, then the blobs
-    are dilated by spike_radius to mask diffraction spike regions. Classical
-    peak-finding runs on the full image but its results are filtered to exclude
-    positions inside the spike mask. This means bright sources are always
-    detected (from blob centroids) while fake spike sources are suppressed.
+    Saturated blobs with area >= min_star_area pixels are identified as bright
+    cores. Their centroids are recorded as detections, then thin radial spike
+    ridges are masked. Classical peak-finding runs on the full image but its
+    results are filtered to exclude positions on those ridges. This means bright
+    sources are always detected while fake spike sources are suppressed without
+    masking the gaps between spikes.
     Small saturated blobs (hot pixels, CRs) are ignored.
 
     Returns (centroids_norm [M,2], classes [M], H_vis, W_vis).
@@ -168,6 +284,7 @@ def _pseudo_labels_vis(
         vis_img,
         spike_radius=spike_radius,
         min_star_area=min_star_area,
+        spike_width=spike_width,
     )
 
     # Classical peak-finding on the full image, then filter spike regions

@@ -33,6 +33,7 @@ from jaisp_foundation_v10 import (
     RUBIN_BANDS,
     JAISPFoundationV10,
 )
+from detection.centernet_detector import _prepare_artifact_mask
 
 NISP_BANDS = [band for band in EUCLID_BANDS if band != "euclid_VIS"]
 
@@ -306,6 +307,7 @@ class StemCenterNetDetector(nn.Module):
         conf_threshold: float = 0.3,
         tile_hw: Optional[Tuple[int, int]] = None,
         nms_kernel: int = 7,
+        artifact_mask=None,
     ) -> Dict[str, torch.Tensor]:
         out = self(images, rms)
         hm = out["heatmap"][0, 0]
@@ -314,6 +316,9 @@ class StemCenterNetDetector(nn.Module):
         pad = nms_kernel // 2
         hm_max = F.max_pool2d(hm.unsqueeze(0).unsqueeze(0), nms_kernel, stride=1, padding=pad)[0, 0]
         keep = (hm == hm_max) & (hm > conf_threshold)
+        veto = _prepare_artifact_mask(artifact_mask, (H, W), hm.device)
+        if veto is not None:
+            keep = keep & ~veto
 
         if not keep.any():
             device = hm.device

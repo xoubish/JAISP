@@ -109,10 +109,23 @@ def detect_sources_neural(
         imgs_d[band] = _torch.from_numpy(img[None, None]).float().to(device)
         rms_d[band] = _torch.from_numpy(tile_rms[band][None, None]).float().to(device)
 
+    artifact_mask = None
+    if 'euclid_VIS' in tile_images:
+        try:
+            from detection.dataset import _vis_bright_core_and_spike_mask
+            _, _, spike_mask = _vis_bright_core_and_spike_mask(tile_images['euclid_VIS'])
+            artifact_mask = _torch.from_numpy(spike_mask).to(device)
+        except Exception:
+            artifact_mask = None
+
+    kwargs = {'conf_threshold': conf_threshold, 'tile_hw': tile_hw}
+    if artifact_mask is not None:
+        import inspect
+        if 'artifact_mask' in inspect.signature(detector.predict).parameters:
+            kwargs['artifact_mask'] = artifact_mask
+
     with _torch.no_grad():
-        result = detector.predict(imgs_d, rms_d,
-                                  conf_threshold=conf_threshold,
-                                  tile_hw=tile_hw)
+        result = detector.predict(imgs_d, rms_d, **kwargs)
 
     if result['positions_px'].shape[0] == 0:
         return np.zeros(0), np.zeros(0)

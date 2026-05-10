@@ -113,6 +113,7 @@ def _refine_labels(
     demote_conf: float = 0.3,
     match_radius: float = 0.01,
     promotion_spike_radius: int = 20,
+    promotion_spike_width: float = 3.0,
     device: torch.device = None,
 ) -> tuple[dict, dict]:
     if device is None:
@@ -148,6 +149,7 @@ def _refine_labels(
             _, _, promotion_mask = _vis_bright_core_and_spike_mask(
                 vis_img,
                 spike_radius=promotion_spike_radius,
+                spike_width=promotion_spike_width,
             )
 
         with torch.no_grad():
@@ -178,6 +180,11 @@ def _refine_labels(
             pred_xy = torch.stack([pred_x, pred_y], dim=1).cpu().numpy()
 
             if promotion_mask is not None and len(pred_xy) > 0:
+                if promotion_mask.shape != (fH, fW):
+                    pm = torch.from_numpy(promotion_mask.astype(np.float32))
+                    pm = pm.unsqueeze(0).unsqueeze(0)
+                    pm = F.interpolate(pm, size=(fH, fW), mode="nearest")
+                    promotion_mask = pm[0, 0].cpu().numpy() > 0
                 px = np.clip(np.round(pred_xy[:, 0] * (fW - 1)).astype(int), 0, fW - 1)
                 py = np.clip(np.round(pred_xy[:, 1] * (fH - 1)).astype(int), 0, fH - 1)
                 keep = ~promotion_mask[py, px]
@@ -201,7 +208,8 @@ def _refine_labels(
     if promotion_spike_radius > 0:
         print(
             f"  Artifact-vetoed: {total_artifact_vetoed} high-confidence peaks "
-            f"inside bright-star masks (radius={promotion_spike_radius}px)"
+            f"on thin bright-star spike masks "
+            f"(radius={promotion_spike_radius}px, width={promotion_spike_width:.1f}px)"
         )
     return promoted, demoted
 
@@ -226,7 +234,9 @@ def main():
     p.add_argument("--demote_conf", type=float, default=0.3)
     p.add_argument("--match_radius", type=float, default=0.01)
     p.add_argument("--promotion_spike_radius", type=int, default=20,
-                   help="Lighter VIS bright-star veto radius for promoting novel detections; set 0 to disable")
+                   help="Bright-star spike search radius for promoting novel detections; set 0 to disable")
+    p.add_argument("--promotion_spike_width", type=float, default=3.0,
+                   help="Thin spike veto half-width in VIS pixels for self-training promotion")
     p.add_argument("--unfreeze_stems", action="store_true")
     p.add_argument("--init_checkpoint", default=None,
                    help="Existing stem-detector checkpoint to bootstrap from when start_round > 1")
@@ -262,6 +272,7 @@ def main():
             demote_conf=args.demote_conf,
             match_radius=args.match_radius,
             promotion_spike_radius=args.promotion_spike_radius,
+            promotion_spike_width=args.promotion_spike_width,
             device=device,
         )
         extra_labels_path = str(out_dir / f"refined_labels_round{prior_round}.pt")
@@ -310,6 +321,7 @@ def main():
                 demote_conf=args.demote_conf,
                 match_radius=args.match_radius,
                 promotion_spike_radius=args.promotion_spike_radius,
+                promotion_spike_width=args.promotion_spike_width,
                 device=device,
             )
             extra_labels_path = str(out_dir / f"refined_labels_round{round_num}.pt")

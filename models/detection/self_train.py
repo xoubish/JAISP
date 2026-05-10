@@ -45,7 +45,7 @@ for _p in (_HERE, _MODELS):
         sys.path.insert(0, str(_p))
 
 from detection.centernet_detector import CenterNetDetector
-from detection.dataset import _vis_bright_core_and_spike_mask
+from detection.dataset import PSEUDO_LABEL_CACHE_VERSION, _vis_bright_core_and_spike_mask
 
 
 def _run_training_round(
@@ -108,6 +108,7 @@ def _refine_labels(
     demote_conf: float = 0.3,
     match_radius: float = 0.01,
     promotion_spike_radius: int = 20,
+    promotion_spike_width: float = 3.0,
     device: torch.device = None,
 ) -> tuple:
     """Run trained detector on all tiles. Promote novel high-confidence
@@ -138,9 +139,30 @@ def _refine_labels(
     # Load cached pseudo-labels (written by CachedFeatureDataset._compute_labels)
     label_cache_path = feature_dir / 'pseudo_labels.pt'
     if label_cache_path.exists():
-        label_cache = torch.load(label_cache_path, map_location='cpu',
-                                 weights_only=False)
-        print(f'  Loaded cached pseudo-labels from {label_cache_path}')
+        saved_labels = torch.load(label_cache_path, map_location='cpu',
+                                  weights_only=False)
+        if isinstance(saved_labels, dict) and 'labels' in saved_labels:
+            cached_nsig = saved_labels.get('nsig')
+            cached_version = saved_labels.get('label_version')
+            if (
+                cached_version == PSEUDO_LABEL_CACHE_VERSION
+                and (cached_nsig is None or abs(cached_nsig - nsig) <= 1e-6)
+            ):
+                label_cache = saved_labels['labels']
+                print(f'  Loaded cached pseudo-labels from {label_cache_path}')
+            else:
+                label_cache = None
+                print(
+                    f'  [warn] Ignoring stale pseudo-label cache '
+                    f'(version={cached_version}, nsig={cached_nsig}); '
+                    f'computing labels on the fly for refinement'
+                )
+        else:
+            label_cache = None
+            print(
+                f'  [warn] Ignoring legacy pseudo-label cache without metadata; '
+                f'computing labels on the fly for refinement'
+            )
     else:
         # Fallback: compute on the fly (slow path, handled by _load_labels_fallback)
         label_cache = None
@@ -169,6 +191,7 @@ def _refine_labels(
                     _, _, promotion_mask = _vis_bright_core_and_spike_mask(
                         vis_img,
                         spike_radius=promotion_spike_radius,
+                        spike_width=promotion_spike_width,
                     )
                 except Exception:
                     promotion_mask = None
@@ -247,7 +270,8 @@ def _refine_labels(
     if promotion_spike_radius > 0:
         print(
             f'  Artifact-vetoed: {total_artifact_vetoed} high-confidence peaks '
-            f'inside bright-star masks (radius={promotion_spike_radius}px)'
+            f'on thin bright-star spike masks '
+            f'(radius={promotion_spike_radius}px, width={promotion_spike_width:.1f}px)'
         )
     return promoted, demoted
 
@@ -307,7 +331,9 @@ def main():
     p.add_argument('--match_radius', type=float, default=0.01,
                    help='Normalized distance below which a prediction matches an existing label')
     p.add_argument('--promotion_spike_radius', type=int, default=20,
-                   help='Bright-star veto radius (pixels) for promoting novel detections; set 0 to disable')
+                   help='Bright-star spike search radius for promoting novel detections; set 0 to disable')
+    p.add_argument('--promotion_spike_width', type=float, default=3.0,
+                   help='Thin spike veto half-width in VIS pixels for self-training promotion')
     p.add_argument('--init_checkpoint', default=None,
                    help='Existing detector checkpoint to bootstrap from when start_round > 1')
     p.add_argument('--wandb_project', default=None)
@@ -339,6 +365,7 @@ def main():
             demote_conf=args.demote_conf,
             match_radius=args.match_radius,
             promotion_spike_radius=args.promotion_spike_radius,
+            promotion_spike_width=args.promotion_spike_width,
             device=device,
         )
         extra_labels_path = str(out_dir / f'refined_labels_round{prior_round}.pt')
@@ -385,6 +412,7 @@ def main():
                 demote_conf=args.demote_conf,
                 match_radius=args.match_radius,
                 promotion_spike_radius=args.promotion_spike_radius,
+                promotion_spike_width=args.promotion_spike_width,
                 device=device,
             )
             extra_labels_path = str(out_dir / f'refined_labels_round{round_num}.pt')

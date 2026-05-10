@@ -27,7 +27,12 @@ for _p in (_HERE, _MODELS):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
-from detection.dataset import _pseudo_labels, _pseudo_labels_vis, TileDetectionDataset
+from detection.dataset import (
+    PSEUDO_LABEL_CACHE_VERSION,
+    TileDetectionDataset,
+    _pseudo_labels,
+    _pseudo_labels_vis,
+)
 
 
 def _compute_one_label(args):
@@ -173,12 +178,18 @@ class CachedFeatureDataset(Dataset):
 
         if cache_path.exists():
             saved = torch.load(cache_path, map_location='cpu', weights_only=False)
-            # Handle old format: plain dict without 'labels'/'nsig' keys.
+            # Handle old format: plain dict without metadata keys.
             if isinstance(saved, dict) and 'labels' not in saved:
-                saved = {'labels': saved, 'nsig': None}
+                saved = {'labels': saved, 'nsig': None, 'label_version': None}
             cached_nsig = saved.get('nsig')
+            cached_version = saved.get('label_version')
 
-            if cached_nsig is not None and abs(cached_nsig - self.nsig) > 1e-6:
+            if cached_version != PSEUDO_LABEL_CACHE_VERSION:
+                print(
+                    f'  [warn] Cache label_version={cached_version}, current '
+                    f'label_version={PSEUDO_LABEL_CACHE_VERSION} -- recomputing all labels.'
+                )
+            elif cached_nsig is not None and abs(cached_nsig - self.nsig) > 1e-6:
                 print(f'  [warn] Cache has nsig={cached_nsig}, requested nsig={self.nsig} '
                       f'— recomputing all labels.')
             else:
@@ -235,7 +246,11 @@ class CachedFeatureDataset(Dataset):
                 _record(_compute_one_label(item))
 
         # Save full cache (existing + newly computed) with current nsig.
-        torch.save({'labels': dict(self._label_cache), 'nsig': self.nsig}, cache_path)
+        torch.save({
+            'labels': dict(self._label_cache),
+            'nsig': self.nsig,
+            'label_version': PSEUDO_LABEL_CACHE_VERSION,
+        }, cache_path)
         print(f'done ({n_vis} VIS, {n_rubin} Rubin) → saved {cache_path}')
 
     def __len__(self) -> int:

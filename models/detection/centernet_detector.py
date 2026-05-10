@@ -30,6 +30,31 @@ for _p in (_HERE, _MODELS):
 from detection.detector import JAISPEncoderWrapper, _StubEncoder  # reuse encoder wrapper
 
 
+def _prepare_artifact_mask(
+    artifact_mask,
+    size: Tuple[int, int],
+    device: torch.device,
+) -> Optional[torch.Tensor]:
+    """Convert an optional artifact mask to a boolean tensor at heatmap size."""
+    if artifact_mask is None:
+        return None
+    mask = torch.as_tensor(artifact_mask, device=device)
+    if mask.ndim == 4:
+        mask = mask[0, 0]
+    elif mask.ndim == 3:
+        mask = mask[0]
+    if mask.ndim != 2:
+        raise ValueError('artifact_mask must have shape [H,W], [1,H,W], or [1,1,H,W]')
+    mask = mask.bool()
+    if tuple(mask.shape) != tuple(size):
+        mask = F.interpolate(
+            mask.float().unsqueeze(0).unsqueeze(0),
+            size=size,
+            mode='nearest',
+        )[0, 0] > 0.5
+    return mask
+
+
 def _head(in_ch: int, out_ch: int, hidden_ch: int = 64) -> nn.Sequential:
     """Small 2-layer conv head: 3x3 hidden + 1x1 output."""
     return nn.Sequential(
@@ -151,6 +176,7 @@ class CenterNetDetector(nn.Module):
         conf_threshold: float = 0.3,
         tile_hw: Optional[Tuple[int, int]] = None,
         nms_kernel: int = 7,
+        artifact_mask=None,
     ) -> Dict[str, torch.Tensor]:
         """Run inference and return detected sources.
 
@@ -161,6 +187,10 @@ class CenterNetDetector(nn.Module):
             log_flux     [N]     flux proxy
             positions_px [N, 2]  pixel coords (if tile_hw given)
             profile      [N, 4]  (e1, e2, log_r_half, sersic_n) if predict_profile
+
+        artifact_mask can be a boolean mask in VIS/native pixel coordinates or
+        heatmap coordinates. Peaks falling inside it are vetoed after local-max
+        NMS, which is useful for thin bright-star spike masks.
         """
         out = self(images, rms)
         hm = out['heatmap'][0, 0]  # [H, W]
@@ -172,6 +202,9 @@ class CenterNetDetector(nn.Module):
             hm.unsqueeze(0).unsqueeze(0), nms_kernel, stride=1, padding=pad
         )[0, 0]
         keep = (hm == hm_max) & (hm > conf_threshold)
+        veto = _prepare_artifact_mask(artifact_mask, (H, W), hm.device)
+        if veto is not None:
+            keep = keep & ~veto
 
         if not keep.any():
             device = hm.device
