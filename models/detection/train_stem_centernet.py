@@ -27,7 +27,7 @@ for _p in (_HERE, _MODELS):
         sys.path.insert(0, str(_p))
 
 from detection.centernet_loss import CenterNetLoss
-from detection.dataset import TileDetectionDataset, collate_fn
+from detection.dataset import TileDetectionDataset, _vis_bright_core_and_spike_mask, collate_fn
 from jaisp_foundation_v10 import RUBIN_BANDS, EUCLID_BANDS
 from detection.stem_centernet_detector import (
     StemCenterNetDetector,
@@ -81,6 +81,184 @@ def _apply_extra_labels_inplace(ds: TileDetectionDataset, extra_labels_path: str
         n_added += len(add_xy)
 
     print(f"  Label refinement applied: +{n_added} promoted, -{n_removed} demoted")
+
+
+def _load_teacher_label_dict(path: str) -> dict[str, np.ndarray]:
+    if not path:
+        return {}
+    data = torch.load(path, map_location="cpu", weights_only=False)
+    labels = data.get("labels", data) if isinstance(data, dict) else data
+    out = {}
+    for tile_id, value in labels.items():
+        xy = value[0] if isinstance(value, (tuple, list)) else value
+        if torch.is_tensor(xy):
+            xy = xy.detach().cpu().numpy()
+        xy = np.asarray(xy, dtype=np.float32).reshape(-1, 2)
+        out[str(tile_id)] = xy
+    return out
+
+
+def _teacher_for_tile(teacher: dict[str, np.ndarray], tile_id: str) -> np.ndarray:
+    return teacher.get(tile_id, teacher.get(tile_id.replace("_euclid", ""), np.zeros((0, 2), dtype=np.float32)))
+
+
+def _points_near(points: np.ndarray, refs: np.ndarray, radius: float) -> np.ndarray:
+    points = np.asarray(points, dtype=np.float32).reshape(-1, 2)
+    refs = np.asarray(refs, dtype=np.float32).reshape(-1, 2)
+    if len(points) == 0:
+        return np.zeros(0, dtype=bool)
+    if len(refs) == 0 or radius <= 0:
+        return np.zeros(len(points), dtype=bool)
+    d2 = ((points[:, None, :] - refs[None, :, :]) ** 2).sum(axis=2)
+    return d2.min(axis=1) <= float(radius) ** 2
+
+
+def _points_in_mask(points: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    if len(points) == 0 or mask is None:
+        return np.zeros(len(points), dtype=bool)
+    h, w = mask.shape
+    px = np.clip(np.round(points[:, 0] * (w - 1)).astype(int), 0, w - 1)
+    py = np.clip(np.round(points[:, 1] * (h - 1)).astype(int), 0, h - 1)
+    return mask[py, px]
+
+
+def _disk_mask(shape: tuple[int, int], xs: np.ndarray, ys: np.ndarray, radius: int) -> np.ndarray:
+    h, w = shape
+    mask = np.zeros((h, w), dtype=bool)
+    if radius <= 0:
+        return mask
+    r2 = float(radius) ** 2
+    for x, y in zip(xs, ys):
+        x0 = max(0, int(np.floor(x - radius)))
+        x1 = min(w, int(np.ceil(x + radius)) + 1)
+        y0 = max(0, int(np.floor(y - radius)))
+        y1 = min(h, int(np.ceil(y + radius)) + 1)
+        yy, xx = np.ogrid[y0:y1, x0:x1]
+        mask[y0:y1, x0:x1] |= ((xx - x) ** 2 + (yy - y) ** 2) <= r2
+    return mask
+
+
+def _dedupe_labels(labels: np.ndarray, radius: float = 0.0025) -> np.ndarray:
+    labels = np.asarray(labels, dtype=np.float32).reshape(-1, 2)
+    if len(labels) <= 1:
+        return labels
+    keep = np.ones(len(labels), dtype=bool)
+    for i in range(len(labels)):
+        if not keep[i]:
+            continue
+        close = _points_near(labels[i + 1:], labels[i:i + 1], radius)
+        if close.any():
+            tail = keep[i + 1:]
+            tail[close] = False
+            keep[i + 1:] = tail
+    return labels[keep]
+
+
+def _apply_teacher_guidance_inplace(
+    ds: TileDetectionDataset,
+    teacher_labels_path: str = None,
+    euclid_dir: str = None,
+    teacher_match_radius: float = 0.012,
+    teacher_filter_mode: str = "bright",
+    teacher_add_labels: bool = True,
+    bright_ignore_radius: int = 0,
+    spike_radius: int = 40,
+    spike_width: float = 3.0,
+) -> None:
+    """Clean StemCenterNet labels using fused CenterNet as a proposal teacher.
+
+    Unmatched labels can be removed globally or only inside bright-star halo
+    regions. Broad halo regions become ignore masks for negative heatmap loss,
+    while the thin spike ridges remain hard negatives.
+    """
+    teacher = _load_teacher_label_dict(teacher_labels_path) if teacher_labels_path else {}
+    if not teacher and bright_ignore_radius <= 0:
+        return
+    if teacher_filter_mode not in {"none", "bright", "global"}:
+        raise ValueError("--teacher_filter_mode must be one of: none, bright, global")
+
+    if not hasattr(ds, "_ignore_cache"):
+        ds._ignore_cache = {}
+
+    n_teacher_added = 0
+    n_teacher_tiles = 0
+    n_removed_teacher = 0
+    n_removed_spike = 0
+    n_ignore = 0
+
+    euclid_dir_p = Path(euclid_dir) if euclid_dir else None
+    for idx in range(len(ds._base.tiles)):
+        tile = ds._base.tiles[idx]
+        tile_id = tile["tile_id"]
+        centroids_np, classes_np, h, w = ds._label_cache[idx]
+        teacher_xy = _teacher_for_tile(teacher, tile_id)
+        if len(teacher_xy) > 0:
+            n_teacher_tiles += 1
+
+        spike_mask = None
+        broad_mask = None
+        vis_path = tile.get("euclid_path")
+        if (not vis_path or not Path(vis_path).exists()) and euclid_dir_p is not None:
+            vis_path = euclid_dir_p / f"{tile_id}_euclid.npz"
+        if vis_path and Path(vis_path).exists() and (bright_ignore_radius > 0 or spike_radius > 0):
+            try:
+                edata = np.load(str(vis_path), allow_pickle=True, mmap_mode="r")
+                vis_img = np.nan_to_num(np.asarray(edata["img_VIS"], dtype=np.float32), nan=0.0)
+                bright_xs, bright_ys, spike_mask = _vis_bright_core_and_spike_mask(
+                    vis_img,
+                    spike_radius=spike_radius,
+                    spike_width=spike_width,
+                )
+                if bright_ignore_radius > 0 and len(bright_xs) > 0:
+                    broad_mask = _disk_mask(vis_img.shape, bright_xs, bright_ys, bright_ignore_radius)
+                    # Ambiguous halo pixels are ignored, but spike ridges remain
+                    # unignored so false detections on them are hard negatives.
+                    ignore_mask = broad_mask & ~spike_mask
+                    ds._ignore_cache[idx] = ignore_mask
+                    n_ignore += int(ignore_mask.sum())
+            except Exception as exc:
+                print(f"  [warn] teacher-guidance mask failed for {tile_id}: {exc}")
+
+        labels = np.asarray(centroids_np, dtype=np.float32).reshape(-1, 2)
+        keep = np.ones(len(labels), dtype=bool)
+
+        if spike_mask is not None and len(labels) > 0:
+            on_spike = _points_in_mask(labels, spike_mask)
+            keep &= ~on_spike
+            n_removed_spike += int(on_spike.sum())
+
+        if teacher and teacher_filter_mode != "none" and len(labels) > 0:
+            near_teacher = _points_near(labels, teacher_xy, teacher_match_radius)
+            if teacher_filter_mode == "global":
+                unsupported = ~near_teacher
+            else:
+                in_bright = _points_in_mask(labels, broad_mask) if broad_mask is not None else np.zeros(len(labels), dtype=bool)
+                unsupported = in_bright & ~near_teacher
+            n_removed_teacher += int((keep & unsupported).sum())
+            keep &= ~unsupported
+
+        labels = labels[keep]
+
+        if teacher_add_labels and len(teacher_xy) > 0:
+            teacher_keep = np.ones(len(teacher_xy), dtype=bool)
+            if spike_mask is not None:
+                teacher_keep &= ~_points_in_mask(teacher_xy, spike_mask)
+            add_xy = teacher_xy[teacher_keep]
+            if len(labels) > 0 and len(add_xy) > 0:
+                add_xy = add_xy[~_points_near(add_xy, labels, radius=0.0025)]
+            if len(add_xy) > 0:
+                labels = np.concatenate([labels, add_xy.astype(np.float32)], axis=0)
+                n_teacher_added += len(add_xy)
+
+        labels = _dedupe_labels(labels)
+        ds._label_cache[idx] = (labels.astype(np.float32), np.zeros(len(labels), dtype=np.int64), h, w)
+
+    print(
+        "  Teacher guidance: "
+        f"teacher_tiles={n_teacher_tiles}, +{n_teacher_added} teacher labels, "
+        f"-{n_removed_teacher} unsupported labels, -{n_removed_spike} spike labels, "
+        f"ignore_pixels={n_ignore}"
+    )
 
 
 def _ddp_info(args) -> tuple[bool, int, int, int]:
@@ -146,6 +324,17 @@ def train(args):
         augment=True,
     )
     _apply_extra_labels_inplace(full_ds, args.extra_labels)
+    _apply_teacher_guidance_inplace(
+        full_ds,
+        teacher_labels_path=args.teacher_labels,
+        euclid_dir=args.euclid_dir,
+        teacher_match_radius=args.teacher_match_radius,
+        teacher_filter_mode=args.teacher_filter_mode,
+        teacher_add_labels=not args.no_teacher_add_labels,
+        bright_ignore_radius=args.bright_ignore_radius,
+        spike_radius=args.teacher_spike_radius,
+        spike_width=args.teacher_spike_width,
+    )
 
     n_val = max(1, int(0.1 * len(full_ds)))
     n_tr = len(full_ds) - n_val
@@ -260,7 +449,14 @@ def train(args):
             rms = {b: v.to(device) for b, v in batch["rms"].items()}
 
             out = model(images, rms)
-            losses = criterion(out, [c.to(device) for c in batch["centroids"]])
+            ignore_masks = batch.get("ignore_mask")
+            if ignore_masks is not None:
+                ignore_masks = ignore_masks.to(device)
+            losses = criterion(
+                out,
+                [c.to(device) for c in batch["centroids"]],
+                ignore_masks=ignore_masks,
+            )
 
             optimizer.zero_grad()
             losses["loss_total"].backward()
@@ -298,7 +494,14 @@ def train(args):
                     images = {b: v.to(device) for b, v in batch["images"].items()}
                     rms = {b: v.to(device) for b, v in batch["rms"].items()}
                     out = model(images, rms)
-                    losses = criterion(out, [c.to(device) for c in batch["centroids"]])
+                    ignore_masks = batch.get("ignore_mask")
+                    if ignore_masks is not None:
+                        ignore_masks = ignore_masks.to(device)
+                    losses = criterion(
+                        out,
+                        [c.to(device) for c in batch["centroids"]],
+                        ignore_masks=ignore_masks,
+                    )
                     val_loss_sum += float(losses["loss_total"])
                     val_batches += 1
             finally:
@@ -327,7 +530,12 @@ def train(args):
                         sim = {b: v.to(device) for b, v in viz_sample["images"].items()}
                         srm = {b: v.to(device) for b, v in viz_sample["rms"].items()}
                         sout = model(sim, srm)
-                    log["viz/tile"] = _log_tile(viz_sample, sout, wandb, step, euclid_dir=args.euclid_dir)
+                    log["viz/tile"] = _log_tile(
+                        viz_sample, sout, wandb, step,
+                        euclid_dir=args.euclid_dir,
+                        spike_veto_radius=args.viz_spike_veto_radius,
+                        spike_veto_width=args.viz_spike_veto_width,
+                    )
                 except Exception as exc:
                     print(f"  [warn] viz failed: {exc}")
             wandb.log(log, step=step)
@@ -352,7 +560,7 @@ if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--rubin_dir", required=True)
     p.add_argument("--euclid_dir", default=None)
-    p.add_argument("--encoder_ckpt", required=True, help="Foundation V7 checkpoint")
+    p.add_argument("--encoder_ckpt", required=True, help="Foundation v8/v9/v10 checkpoint")
     p.add_argument("--extra_labels", default=None, help="Refined labels from previous self-training round")
     p.add_argument("--init_checkpoint", default=None, help="Initialize from an existing stem detector checkpoint")
     p.add_argument("--out", default="../checkpoints/stem_centernet_v7.pt")
@@ -365,6 +573,24 @@ if __name__ == "__main__":
     p.add_argument("--base_ch", type=int, default=32)
     p.add_argument("--unfreeze_stems", action="store_true",
                    help="Allow the reused V7 BandStem weights to keep training")
+    p.add_argument("--teacher_labels", default=None,
+                   help="Fused CenterNet label .pt file used as proposal teacher for StemCenterNet")
+    p.add_argument("--teacher_match_radius", type=float, default=0.012,
+                   help="Normalized radius for matching stem labels/detections to teacher proposals")
+    p.add_argument("--teacher_filter_mode", default="bright", choices=["none", "bright", "global"],
+                   help="Where to require teacher support: none, only bright-star zones, or globally")
+    p.add_argument("--no_teacher_add_labels", action="store_true",
+                   help="Do not merge teacher detections into the stem training labels")
+    p.add_argument("--bright_ignore_radius", type=int, default=0,
+                   help="VIS-pixel radius around bright cores to ignore negative loss except on thin spikes")
+    p.add_argument("--teacher_spike_radius", type=int, default=40,
+                   help="VIS-pixel radial search length for thin spike hard-negative cleaning")
+    p.add_argument("--teacher_spike_width", type=float, default=3.0,
+                   help="VIS-pixel half-width for thin spike hard-negative cleaning")
+    p.add_argument("--viz_spike_veto_radius", type=int, default=0,
+                   help="Apply thin VIS bright-star spike veto to W&B red-cross visualization; 0 disables")
+    p.add_argument("--viz_spike_veto_width", type=float, default=0.0,
+                   help="Thin spike veto half-width for W&B visualization")
     p.add_argument("--wandb_project", default=None)
     p.add_argument("--wandb_run", default=None)
     p.add_argument("--device", default="", help='Device to use: "cuda", "cuda:1", "cpu" (default: auto)')

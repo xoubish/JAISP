@@ -54,7 +54,17 @@ def _load_encoder(encoder_ckpt, device, freeze=True):
 # Visualization
 # ---------------------------------------------------------------------------
 
-def _log_tile(batch, out, wandb, step, conf_thr=0.3, nms_kernel=7, euclid_dir=None):
+def _log_tile(
+    batch,
+    out,
+    wandb,
+    step,
+    conf_thr=0.3,
+    nms_kernel=7,
+    euclid_dir=None,
+    spike_veto_radius: int = 0,
+    spike_veto_width: float = 0.0,
+):
     """Overlay GT centroids and CenterNet heatmap + detected peaks."""
     import sys
     import matplotlib
@@ -70,8 +80,10 @@ def _log_tile(batch, out, wandb, step, conf_thr=0.3, nms_kernel=7, euclid_dir=No
 
     # Background image: VIS (preferred), r-band fallback, or black
     rgb = None
+    vis_for_mask = None
     if 'images' in batch and 'euclid_VIS' in batch['images']:
         vis_band = batch['images']['euclid_VIS'][0, 0].cpu().numpy()
+        vis_for_mask = vis_band
         lo, hi = np.percentile(vis_band, [1, 99])
         rgb = np.clip((vis_band - lo) / max(hi - lo, 1e-6), 0, 1)
     elif 'images' in batch and 'rubin_r' in batch['images']:
@@ -98,6 +110,7 @@ def _log_tile(batch, out, wandb, step, conf_thr=0.3, nms_kernel=7, euclid_dir=No
                         vis = np.flipud(vis).copy()
                     if flip_lr:
                         vis = np.fliplr(vis).copy()
+                vis_for_mask = vis
                 lo, hi = np.percentile(vis, [1, 99])
                 rgb = np.clip((vis - lo) / max(hi - lo, 1e-6), 0, 1)
             except Exception:
@@ -125,6 +138,25 @@ def _log_tile(batch, out, wandb, step, conf_thr=0.3, nms_kernel=7, euclid_dir=No
     pad = nms_kernel // 2
     hm_max = F.max_pool2d(hm_t, nms_kernel, stride=1, padding=pad)
     peaks = (hm_t == hm_max) & (hm_t > conf_thr)
+    n_raw_pred = int(peaks.sum().item())
+    n_vetoed = 0
+
+    if spike_veto_radius > 0 and spike_veto_width > 0 and vis_for_mask is not None:
+        try:
+            from detection.dataset import _vis_bright_core_and_spike_mask
+            _, _, spike_mask = _vis_bright_core_and_spike_mask(
+                np.asarray(vis_for_mask, dtype=np.float32),
+                spike_radius=spike_veto_radius,
+                spike_width=spike_veto_width,
+            )
+            veto = torch.from_numpy(spike_mask.astype(np.float32)).unsqueeze(0).unsqueeze(0)
+            if veto.shape[-2:] != (hm_h, hm_w):
+                veto = F.interpolate(veto, size=(hm_h, hm_w), mode='nearest')
+            veto = veto > 0.5
+            n_vetoed = int((peaks & veto).sum().item())
+            peaks = peaks & ~veto
+        except Exception:
+            n_vetoed = 0
     n_pred = peaks.sum().item()
 
     if n_pred > 0:
@@ -134,11 +166,17 @@ def _log_tile(batch, out, wandb, step, conf_thr=0.3, nms_kernel=7, euclid_dir=No
         # Clamp so out-of-range offsets don't scatter outside the axes.
         px = ((xi.float() + off[0, yi, xi]) / max(hm_w - 1, 1) * (W - 1)).clamp(0, W - 1)
         py = ((yi.float() + off[1, yi, xi]) / max(hm_h - 1, 1) * (H - 1)).clamp(0, H - 1)
+        label = f'pred ({n_pred})'
+        if n_vetoed:
+            label += f', veto {n_vetoed}'
         ax.scatter(px.numpy(), py.numpy(),
-                   s=15, marker='x', c='red', lw=0.8, label=f'pred ({n_pred})')
+                   s=15, marker='x', c='red', lw=0.8, label=label)
 
     ax.legend(fontsize=6)
-    ax.set_title(f'step {step}  GT={len(gt_xy)}  pred={n_pred}')
+    title = f'step {step}  GT={len(gt_xy)}  pred={n_pred}'
+    if n_vetoed:
+        title += f'  veto={n_vetoed}/{n_raw_pred}'
+    ax.set_title(title)
     ax.axis('off')
 
     # Right: heatmap
@@ -390,7 +428,11 @@ def train(args):
                             srm = {b: v.to(device) for b, v in viz_sample['rms'].items()}
                             sout = model(sim, srm)
                     log['viz/tile'] = _log_tile(
-                        viz_sample, sout, wandb, step, euclid_dir=args.euclid_dir)
+                        viz_sample, sout, wandb, step,
+                        euclid_dir=args.euclid_dir,
+                        spike_veto_radius=args.viz_spike_veto_radius,
+                        spike_veto_width=args.viz_spike_veto_width,
+                    )
                 except Exception as exc:
                     print(f'  [warn] viz failed: {exc}')
             wandb.log(log, step=step)
@@ -436,6 +478,10 @@ if __name__ == '__main__':
                    help='CenterNet decoder width. Lower is faster/lighter; default 256.')
     p.add_argument('--predict_profile',  action='store_true',
                    help='Add profile head (e1, e2, r_half, sersic_n)')
+    p.add_argument('--viz_spike_veto_radius', type=int, default=0,
+                   help='Apply thin VIS bright-star spike veto to W&B red-cross visualization; 0 disables')
+    p.add_argument('--viz_spike_veto_width', type=float, default=0.0,
+                   help='Thin spike veto half-width for W&B visualization')
     p.add_argument('--wandb_project',    default=None)
     p.add_argument('--wandb_run',        default=None)
     p.add_argument('--device',           default='',

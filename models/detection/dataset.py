@@ -406,6 +406,18 @@ class TileDetectionDataset(Dataset):
             xy[:, 0] = 1.0 - xy[:, 0]
         return xy
 
+    @staticmethod
+    def _transform_mask(mask: np.ndarray, n_rot: int, flip_ud: bool, flip_lr: bool) -> np.ndarray:
+        """Apply the same augmentation to a 2D mask."""
+        m = np.asarray(mask, dtype=bool)
+        if n_rot % 4:
+            m = np.rot90(m, n_rot % 4).copy()
+        if flip_ud:
+            m = np.flipud(m).copy()
+        if flip_lr:
+            m = np.fliplr(m).copy()
+        return m
+
     def __len__(self) -> int:
         return len(self._base)
 
@@ -432,7 +444,7 @@ class TileDetectionDataset(Dataset):
         aug_params = item.get('aug_params', (0, False, False))
         centroids_np = self._transform_centroids(centroids_np, *aug_params)
 
-        return {
+        result = {
             'images':    images,                              # {band: [1,H,W]}
             'rms':       rms,                                 # {band: [1,H,W]}
             'centroids': torch.from_numpy(centroids_np),     # [M, 2]
@@ -440,6 +452,11 @@ class TileDetectionDataset(Dataset):
             'tile_id':   item['tile_id'],
             'tile_hw':   (H, W),
         }
+        ignore_cache = getattr(self, '_ignore_cache', None)
+        if ignore_cache is not None and idx in ignore_cache:
+            ignore_np = self._transform_mask(ignore_cache[idx], *aug_params)
+            result['ignore_mask'] = torch.from_numpy(ignore_np.astype(np.bool_))
+        return result
 
 
 def collate_fn(batch: List[dict]) -> dict:
@@ -450,7 +467,7 @@ def collate_fn(batch: List[dict]) -> dict:
     bands = list(batch[0]['images'].keys())
     images = {b: torch.stack([s['images'][b] for s in batch]) for b in bands}
     rms    = {b: torch.stack([s['rms'][b]    for s in batch]) for b in bands}
-    return {
+    result = {
         'images':    images,
         'rms':       rms,
         'centroids': [s['centroids'] for s in batch],
@@ -458,3 +475,6 @@ def collate_fn(batch: List[dict]) -> dict:
         'tile_id':   [s['tile_id']   for s in batch],
         'tile_hw':   [s['tile_hw']   for s in batch],
     }
+    if all('ignore_mask' in s for s in batch):
+        result['ignore_mask'] = torch.stack([s['ignore_mask'] for s in batch])
+    return result

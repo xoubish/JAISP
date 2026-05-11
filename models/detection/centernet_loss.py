@@ -90,6 +90,7 @@ def focal_loss(
     target: torch.Tensor, # [B, 1, H, W] in [0, 1]
     alpha: float = 2.0,
     beta: float = 4.0,
+    ignore_mask: torch.Tensor = None,  # [B, 1, H, W] bool; suppress negative loss only
 ) -> torch.Tensor:
     """Modified focal loss from CornerNet / CenterNet.
 
@@ -104,6 +105,8 @@ def focal_loss(
 
     pos_mask = target.eq(1).float()
     neg_mask = 1.0 - pos_mask
+    if ignore_mask is not None:
+        neg_mask = neg_mask * (~ignore_mask.bool()).float()
 
     pos_loss = -((1 - pred) ** alpha) * torch.log(pred) * pos_mask
     neg_loss = -((1 - target) ** beta) * (pred ** alpha) * torch.log(1 - pred) * neg_mask
@@ -141,6 +144,7 @@ class CenterNetLoss(nn.Module):
         pred: Dict[str, torch.Tensor],
         gt_centroids: List[torch.Tensor],
         gt_log_flux: List[torch.Tensor] = None,
+        ignore_masks: torch.Tensor = None,
     ) -> Dict[str, torch.Tensor]:
         hm_pred = pred['heatmap']                    # [B, 1, H, W]
         off_pred = pred['offset']                    # [B, 2, H, W]
@@ -151,8 +155,21 @@ class CenterNetLoss(nn.Module):
             gt_centroids, H, W, sigma=self.sigma, device=hm_pred.device,
         )
 
+        ignore = None
+        if ignore_masks is not None:
+            ignore = ignore_masks.to(device=hm_pred.device)
+            if ignore.ndim == 3:
+                ignore = ignore.unsqueeze(1)
+            elif ignore.ndim != 4:
+                raise ValueError('ignore_masks must have shape [B,H,W] or [B,1,H,W]')
+            if ignore.shape[-2:] != (H, W):
+                import torch.nn.functional as F
+                ignore = F.interpolate(ignore.float(), size=(H, W), mode='nearest') > 0.5
+            else:
+                ignore = ignore.bool()
+
         # Heatmap focal loss
-        loss_hm = focal_loss(hm_pred, hm_target)
+        loss_hm = focal_loss(hm_pred, hm_target, ignore_mask=ignore)
 
         # Offset L1 (only at GT positions)
         n_pos = off_mask.sum().clamp(min=1.0)

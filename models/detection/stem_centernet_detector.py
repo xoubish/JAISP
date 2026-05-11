@@ -308,6 +308,8 @@ class StemCenterNetDetector(nn.Module):
         tile_hw: Optional[Tuple[int, int]] = None,
         nms_kernel: int = 7,
         artifact_mask=None,
+        proposal_points=None,
+        proposal_radius: float = 0.0,
     ) -> Dict[str, torch.Tensor]:
         out = self(images, rms)
         hm = out["heatmap"][0, 0]
@@ -344,6 +346,20 @@ class StemCenterNetDetector(nn.Module):
         cy = ((yi.float() + dy) / max(H - 1, 1)).clamp(0.0, 1.0)
         centroids = torch.stack([cx, cy], dim=1)
         flux = out["log_flux"][0, yi, xi]
+
+        if proposal_points is not None and proposal_radius > 0:
+            proposals = torch.as_tensor(proposal_points, device=hm.device, dtype=centroids.dtype)
+            if proposals.ndim == 1:
+                proposals = proposals.view(-1, 2)
+            if proposals.numel() == 0:
+                keep_prop = torch.zeros(len(scores), dtype=torch.bool, device=hm.device)
+            else:
+                keep_prop = torch.cdist(centroids, proposals).min(dim=1).values <= float(proposal_radius)
+            centroids = centroids[keep_prop]
+            scores = scores[keep_prop]
+            flux = flux[keep_prop]
+            yi = yi[keep_prop]
+            xi = xi[keep_prop]
 
         result = {
             "centroids": centroids,

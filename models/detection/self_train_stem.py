@@ -26,9 +26,14 @@ for _p in (_HERE, _MODELS):
 from detection.dataset import TileDetectionDataset, _vis_bright_core_and_spike_mask
 from detection.stem_centernet_detector import (
     StemCenterNetDetector,
-    load_v7_foundation_from_checkpoint,
+    load_foundation_from_checkpoint,
 )
-from detection.train_stem_centernet import _apply_extra_labels_inplace
+from detection.train_stem_centernet import (
+    _apply_extra_labels_inplace,
+    _load_teacher_label_dict,
+    _points_near,
+    _teacher_for_tile,
+)
 
 
 def _run_training_round(
@@ -46,6 +51,15 @@ def _run_training_round(
     stream_ch: int = 16,
     base_ch: int = 32,
     unfreeze_stems: bool = False,
+    teacher_labels: str = None,
+    teacher_match_radius: float = 0.012,
+    teacher_filter_mode: str = "bright",
+    no_teacher_add_labels: bool = False,
+    bright_ignore_radius: int = 0,
+    teacher_spike_radius: int = 40,
+    teacher_spike_width: float = 3.0,
+    viz_spike_veto_radius: int = 0,
+    viz_spike_veto_width: float = 0.0,
     device: torch.device = None,
     wandb_project: str = None,
     wandb_name: str = None,
@@ -74,15 +88,26 @@ def _run_training_round(
         "--nsig", str(nsig),
         "--stream_ch", str(stream_ch),
         "--base_ch", str(base_ch),
+        "--viz_spike_veto_radius", str(viz_spike_veto_radius),
+        "--viz_spike_veto_width", str(viz_spike_veto_width),
+        "--teacher_match_radius", str(teacher_match_radius),
+        "--teacher_filter_mode", teacher_filter_mode,
+        "--bright_ignore_radius", str(bright_ignore_radius),
+        "--teacher_spike_radius", str(teacher_spike_radius),
+        "--teacher_spike_width", str(teacher_spike_width),
     ]
     if euclid_dir:
         cmd += ["--euclid_dir", euclid_dir]
     if extra_labels:
         cmd += ["--extra_labels", extra_labels]
+    if teacher_labels:
+        cmd += ["--teacher_labels", teacher_labels]
     if init_checkpoint:
         cmd += ["--init_checkpoint", init_checkpoint]
     if unfreeze_stems:
         cmd += ["--unfreeze_stems"]
+    if no_teacher_add_labels:
+        cmd += ["--no_teacher_add_labels"]
     if wandb_project:
         cmd += ["--wandb_project", wandb_project]
     if wandb_name:
@@ -114,12 +139,15 @@ def _refine_labels(
     match_radius: float = 0.01,
     promotion_spike_radius: int = 20,
     promotion_spike_width: float = 3.0,
+    teacher_labels: str = None,
+    teacher_match_radius: float = 0.012,
+    require_teacher_for_promotion: bool = False,
     device: torch.device = None,
 ) -> tuple[dict, dict]:
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    foundation = load_v7_foundation_from_checkpoint(encoder_ckpt, device=device)
+    foundation = load_foundation_from_checkpoint(encoder_ckpt, device=device)
     model = StemCenterNetDetector.load(detector_ckpt, foundation, device=device).eval()
 
     ds = TileDetectionDataset(
@@ -131,18 +159,21 @@ def _refine_labels(
         augment=False,
     )
     _apply_extra_labels_inplace(ds, extra_labels)
+    teacher = _load_teacher_label_dict(teacher_labels) if teacher_labels else {}
 
     promoted = {}
     demoted = {}
     total_promoted = 0
     total_demoted = 0
     total_artifact_vetoed = 0
+    total_teacher_vetoed = 0
 
     for idx in range(len(ds)):
         item = ds[idx]
         images, rms = _batchify_item(item, device)
         tile_id = item["tile_id"]
         orig_labels = item["centroids"].cpu().numpy()
+        teacher_xy = _teacher_for_tile(teacher, tile_id) if teacher else np.zeros((0, 2), dtype=np.float32)
         promotion_mask = None
         if promotion_spike_radius > 0 and "euclid_VIS" in item["images"]:
             vis_img = item["images"]["euclid_VIS"][0].cpu().numpy()
@@ -191,6 +222,11 @@ def _refine_labels(
                 total_artifact_vetoed += int((~keep).sum())
                 pred_xy = pred_xy[keep]
 
+            if require_teacher_for_promotion and len(pred_xy) > 0:
+                keep = _points_near(pred_xy, teacher_xy, teacher_match_radius)
+                total_teacher_vetoed += int((~keep).sum())
+                pred_xy = pred_xy[keep]
+
             if orig_labels.shape[0] == 0:
                 novel = pred_xy
             else:
@@ -211,12 +247,17 @@ def _refine_labels(
             f"on thin bright-star spike masks "
             f"(radius={promotion_spike_radius}px, width={promotion_spike_width:.1f}px)"
         )
+    if require_teacher_for_promotion:
+        print(
+            f"  Teacher-vetoed:  {total_teacher_vetoed} high-confidence peaks "
+            f"outside fused CenterNet proposals (radius={teacher_match_radius})"
+        )
     return promoted, demoted
 
 
 def main():
     p = argparse.ArgumentParser(description="Self-training loop for the stem-based detector.")
-    p.add_argument("--encoder_ckpt", required=True, help="Foundation V7 checkpoint")
+    p.add_argument("--encoder_ckpt", required=True, help="Foundation v8/v9/v10 checkpoint")
     p.add_argument("--rubin_dir", required=True)
     p.add_argument("--euclid_dir", default=None)
     p.add_argument("--out_dir", required=True)
@@ -237,6 +278,22 @@ def main():
                    help="Bright-star spike search radius for promoting novel detections; set 0 to disable")
     p.add_argument("--promotion_spike_width", type=float, default=3.0,
                    help="Thin spike veto half-width in VIS pixels for self-training promotion")
+    p.add_argument("--teacher_labels", default=None,
+                   help="Fused CenterNet label .pt file used as proposal teacher for StemCenterNet")
+    p.add_argument("--teacher_match_radius", type=float, default=0.012,
+                   help="Normalized radius for matching stem labels/promotions to teacher proposals")
+    p.add_argument("--teacher_filter_mode", default="bright", choices=["none", "bright", "global"],
+                   help="Where training labels require teacher support: none, bright-star zones, or globally")
+    p.add_argument("--no_teacher_add_labels", action="store_true",
+                   help="Do not merge teacher detections into stem training labels")
+    p.add_argument("--require_teacher_for_promotion", action="store_true",
+                   help="Only promote stem detections that are near fused CenterNet teacher proposals")
+    p.add_argument("--bright_ignore_radius", type=int, default=0,
+                   help="VIS-pixel radius around bright cores to ignore negative loss except on thin spikes")
+    p.add_argument("--teacher_spike_radius", type=int, default=40,
+                   help="VIS-pixel radial search length for thin spike hard-negative cleaning")
+    p.add_argument("--teacher_spike_width", type=float, default=3.0,
+                   help="VIS-pixel half-width for thin spike hard-negative cleaning")
     p.add_argument("--unfreeze_stems", action="store_true")
     p.add_argument("--init_checkpoint", default=None,
                    help="Existing stem-detector checkpoint to bootstrap from when start_round > 1")
@@ -273,6 +330,9 @@ def main():
             match_radius=args.match_radius,
             promotion_spike_radius=args.promotion_spike_radius,
             promotion_spike_width=args.promotion_spike_width,
+            teacher_labels=args.teacher_labels,
+            teacher_match_radius=args.teacher_match_radius,
+            require_teacher_for_promotion=args.require_teacher_for_promotion,
             device=device,
         )
         extra_labels_path = str(out_dir / f"refined_labels_round{prior_round}.pt")
@@ -301,6 +361,15 @@ def main():
             stream_ch=args.stream_ch,
             base_ch=args.base_ch,
             unfreeze_stems=args.unfreeze_stems,
+            teacher_labels=args.teacher_labels,
+            teacher_match_radius=args.teacher_match_radius,
+            teacher_filter_mode=args.teacher_filter_mode,
+            no_teacher_add_labels=args.no_teacher_add_labels,
+            bright_ignore_radius=args.bright_ignore_radius,
+            teacher_spike_radius=args.teacher_spike_radius,
+            teacher_spike_width=args.teacher_spike_width,
+            viz_spike_veto_radius=args.promotion_spike_radius,
+            viz_spike_veto_width=args.promotion_spike_width,
             device=device,
             wandb_project=args.wandb_project,
             wandb_name=f"stem-round{round_num}",
@@ -322,6 +391,9 @@ def main():
                 match_radius=args.match_radius,
                 promotion_spike_radius=args.promotion_spike_radius,
                 promotion_spike_width=args.promotion_spike_width,
+                teacher_labels=args.teacher_labels,
+                teacher_match_radius=args.teacher_match_radius,
+                require_teacher_for_promotion=args.require_teacher_for_promotion,
                 device=device,
             )
             extra_labels_path = str(out_dir / f"refined_labels_round{round_num}.pt")

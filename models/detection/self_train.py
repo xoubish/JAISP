@@ -61,6 +61,8 @@ def _run_training_round(
     sigma: float = 2.0,
     nsig: float = 3.0,
     head_ch: int = 256,
+    viz_spike_veto_radius: int = 0,
+    viz_spike_veto_width: float = 0.0,
     device: torch.device = None,
     wandb_project: str = None,
     wandb_name: str = None,
@@ -78,6 +80,8 @@ def _run_training_round(
         '--sigma', str(sigma),
         '--nsig', str(nsig),
         '--head_ch', str(head_ch),
+        '--viz_spike_veto_radius', str(viz_spike_veto_radius),
+        '--viz_spike_veto_width', str(viz_spike_veto_width),
     ]
     if euclid_dir:
         cmd += ['--euclid_dir', euclid_dir]
@@ -392,6 +396,8 @@ def main():
             sigma=args.sigma,
             nsig=args.nsig,
             head_ch=args.head_ch,
+            viz_spike_veto_radius=args.promotion_spike_radius,
+            viz_spike_veto_width=args.promotion_spike_width,
             device=device,
             wandb_project=args.wandb_project,
             wandb_name=f'round{round_num}',
