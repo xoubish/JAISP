@@ -181,6 +181,7 @@ def _refine_labels(
                 vis_img,
                 spike_radius=promotion_spike_radius,
                 spike_width=promotion_spike_width,
+                include_core=False,
             )
 
         with torch.no_grad():

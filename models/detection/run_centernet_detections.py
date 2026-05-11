@@ -159,6 +159,7 @@ def main():
                     spike_radius=args.spike_veto_radius,
                     min_star_area=args.spike_veto_min_star_area,
                     spike_width=args.spike_veto_width,
+                    include_core=False,
                 )
                 artifact_mask = torch.from_numpy(spike_mask).to(device)
 

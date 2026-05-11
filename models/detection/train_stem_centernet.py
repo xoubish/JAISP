@@ -208,6 +208,7 @@ def _apply_teacher_guidance_inplace(
                     vis_img,
                     spike_radius=spike_radius,
                     spike_width=spike_width,
+                    include_core=False,
                 )
                 if bright_ignore_radius > 0 and len(bright_xs) > 0:
                     broad_mask = _disk_mask(vis_img.shape, bright_xs, bright_ys, bright_ignore_radius)

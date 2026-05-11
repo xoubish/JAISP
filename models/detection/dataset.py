@@ -90,6 +90,7 @@ def _vis_bright_core_and_spike_mask(
     spike_width_slope: float = 0.004,
     n_angle_bins: int = 180,
     max_spike_angles: int = 6,
+    include_core: bool = True,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Return bright-source centroids and a thin mask on VIS spike ridges.
 
@@ -101,6 +102,10 @@ def _vis_bright_core_and_spike_mask(
 
     ``spike_radius`` controls the base radial search length; it still scales
     with saturated-core area and is capped by ``max_spike_radius``.
+    When ``include_core`` is true, the compact saturated core is included in the
+    returned mask; this is useful during classical peak filtering because the
+    bright-core centroid is returned separately. Teacher/export vetoes should
+    set it false so bright objects are not suppressed as artifacts.
     """
     from scipy.ndimage import center_of_mass, distance_transform_edt, find_objects, label as ndlabel
 
@@ -162,7 +167,8 @@ def _vis_bright_core_and_spike_mask(
 
         y_slice, x_slice = blob_slice
         if r_search <= 0 or spike_width <= 0:
-            spike_mask[y_slice, x_slice] |= labeled[y_slice, x_slice] == lb
+            if include_core:
+                spike_mask[y_slice, x_slice] |= labeled[y_slice, x_slice] == lb
             continue
 
         pad = int(np.ceil(r_search + core_r + 4))
@@ -178,9 +184,11 @@ def _vis_bright_core_and_spike_mask(
         dy = (yy + y0) - float(cy)
         rr = np.hypot(dx, dy)
 
-        # Always veto the saturated core itself, but only with a compact guard.
+        # During pseudo-label generation the saturated core is masked here
+        # because its centroid is returned separately. For teacher/export vetoes
+        # keep the core unmasked so very bright objects can remain detections.
         core_guard = distance_transform_edt(~local_blob) <= max(2.0, min(core_r, 10.0))
-        local_mask = core_guard.copy()
+        local_mask = core_guard.copy() if include_core else np.zeros_like(core_guard)
 
         annulus = (
             np.isfinite(local_img)

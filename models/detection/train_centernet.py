@@ -148,6 +148,7 @@ def _log_tile(
                 np.asarray(vis_for_mask, dtype=np.float32),
                 spike_radius=spike_veto_radius,
                 spike_width=spike_veto_width,
+                include_core=False,
             )
             veto = torch.from_numpy(spike_mask.astype(np.float32)).unsqueeze(0).unsqueeze(0)
             if veto.shape[-2:] != (hm_h, hm_w):
