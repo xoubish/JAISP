@@ -749,6 +749,8 @@ The implication: a global WCS correction can only remove the small ~5 mas cohere
 
 Libralato et al. (2024, A&A, arXiv:2411.02487) achieved **0.7 mas (1D, VIS)** and **~3 mas (NISP)** on bright unsaturated stars in NGC 6397, using individual unresampled exposures, iterative ePSF modelling, and Gaia DR3 as an external anchor. Our 30–50 mas scatter is *not* instrument-limited; it comes from working on resampled MER coadded mosaics (which destroy the sub-pixel phase that single exposures preserve), with faint galaxies (SNR 10–30, not >100), and without an external Gaia-anchored reference frame. Their finding that VIS has colour-dependent centroid systematics at the sub-mas level (their Appendix C) directly motivates feeding the full 10-band bottleneck into the position head: chromatic centroid shifts are real even for point sources and worse for galaxies with colour gradients.
 
+Euclid NIR DR1 processing notes add one practical caveat for NISP bands: conservative persistence masking can reduce the number of Gaia-matched sources available to the NIR astrometric calibration, especially on DET13/DET14, and in affected regions the NIR solution can degrade from the typical ~10 mas RMS to >=50 mas. The draft reports this as a small-area DR1 issue (~0.4% of the area under a 50 mas RMS threshold) and notes that the fix is expected for later processing. JAISP uses MER resampled mosaics rather than the original NIR detector products, so we may not see the persistence DQ flags directly; the relevant symptom for us is a local NISP/VIS agreement failure or high-residual anchor population that may trace upstream persistence masking, high variance, or streak-like artifacts rather than a learned-head failure.
+
 ---
 
 #### What we built (the pipeline)
@@ -1339,6 +1341,44 @@ W&B logs scalar train/validation losses plus diagnostic images:
 - `vis/coeff_hist`: residual-basis coefficient histograms.
 - `vis/median_pearson`, `vis/median_abs_chi`: compact visual-quality scalars.
 
+#### Empirical per-band ePSF baseline
+
+Notebook 08 diagnostics of the V10 Gaia/Gaussian run show that the broad profiles and moments are reasonable, but the remaining residuals are concentrated in the PSF core/first ring while the residual-head coefficients saturate. The next baseline is therefore a no-NN, no-spatial-variation empirical ePSF bank: fit one positive unit-flux oversampled ePSF per band directly through the native-pixel renderer, with analytic per-star flux/background solves and a core-weighted loss. This tests whether the simple per-band ePSF is already enough before reintroducing foundation-conditioned residuals.
+
+```bash
+python models/psf/fit_empirical_epsf_bank.py \
+    --train-dir data/psf_training_gaia_pm \
+    --output models/checkpoints/empirical_epsf_bank_gaia_pm.pt \
+    --epochs 80 \
+    --batch-size 128 \
+    --device cuda:0 \
+    --loss-radius-px 13 \
+    --loss-taper-px 2 \
+    --core-loss-radius-px 3 \
+    --core-loss-weight 3
+```
+
+Then test whether the learned residual head adds anything beyond that empirical base:
+
+```bash
+python -u models/psf/train_foundation_epsf_head.py \
+    --train-dir data/psf_training_gaia_pm \
+    --rubin-dir data/rubin_tiles_all \
+    --euclid-dir data/euclid_tiles_all \
+    --foundation-checkpoint models/checkpoints/jaisp_v10_warmstart/checkpoint_best.pt \
+    --features-cache-dir data/cached_features_v10_warmstart \
+    --output-dir models/checkpoints/foundation_epsf_head_empirical_base_v10_pm \
+    --base-epsf-mode checkpoint \
+    --base-epsf-checkpoint models/checkpoints/empirical_epsf_bank_gaia_pm.pt \
+    --epochs 40 \
+    --max-stars-per-tile 256 \
+    --min-snr 10 \
+    --val-frac 0.10 \
+    --core-loss-radius-px 3 \
+    --core-loss-weight 3 \
+    --device cuda:0
+```
+
 #### Archived PSF attempts
 
 The older PSFField, PCA, V4 NN-ePSF, CenterNet-star-selection, and validation scripts moved to `models/older_architectures/psf/`. Small reference checkpoints moved with them under `models/older_architectures/psf/checkpoints/`.
@@ -1905,6 +1945,7 @@ This section is intentionally redundant with earlier parts of the report. It is 
 - Cross-instrument evaluation on 790 ECDFS tiles: raw medians of 41-62 mas for Rubin g/r/i/z/y and NISP Y/J/H are reduced to **9-15 mas** after the head; Rubin u is reduced from **119 mas** to **30.5 mas**. Improvement is **~74-79%** in the median radial residual.
 - CenterNet-anchor evaluation is now tracked separately from the classical-anchor result. `anchors_centernet.npz` contains **491,748** source-band anchors, with **34,510** at `SNR >= 30`; median raw/head residuals are **39.8 mas -> 8.5 mas**. `anchors.npz` contains **630,120** source-band anchors, with **36,574** at `SNR >= 30`; median raw/head residuals are **44.2 mas -> 10.2 mas**. The CenterNet cache is a different detector-selected catalogue, not just a denser version of the classical cache.
 - Notebook 06 diagnosis: the large raw residual is **centering / centroid-definition scatter**. Smooth per-tile bulk field is **5.4 mas**, post-bulk source residual is **47.5 mas**, and the measured offset changes by **54.0 mas** when recentered from detection to PSF-fit centroids.
+- External NIR DR1 caveat: upstream persistence masking can locally worsen NISP astrometric calibration by removing Gaia matches, with the draft NIR paper noting rare regions degraded to >=50 mas RMS rather than the usual ~10 mas. Because JAISP starts from MER mosaics, treat this as a possible explanation for localized NISP/VIS residual outliers, not as a directly available correction flag.
 - Notebook 07 now tests before/after residuals, anchor-source effects, SNR-stratified refits, bootstrap/shuffled-null significance, a band-matched GP cross-check and sparse-field recovery. The `classical` slice means `SNR >= 30`; when the active cache is CenterNet, this is an SNR cut inside the CenterNet catalogue, not a classical-detector baseline.
 - Residual PINN/concordance after the head is a QA/fallback product. Its field amplitude is ~1 mas and changes the head residual medians by only ~0.0-0.2 mas. `Head`, `Head+PINN` and `|Fhead|` should be read separately: per-object residual, residual after subtracting the fitted smooth field, and fitted smooth-field amplitude.
 - Notebook 12 (`io/12_astrometry_hgp_vs_pinn.ipynb`) compares CenterNet post-head HGP against CenterNet post-head PINN. HGP edge structure tracks high posterior std and large nearest-anchor distance; after support masking it remains larger than PINN and does not improve actual anchor residuals relative to zero. The current conclusion is **no robust post-head smooth field detection**.

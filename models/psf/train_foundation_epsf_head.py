@@ -310,6 +310,45 @@ def radial_loss_weight(
     return torch.where(rr <= radius, weight, torch.zeros_like(weight))
 
 
+def annulus_mask(
+    data: torch.Tensor,
+    frac_xy: torch.Tensor,
+    r_min_px: float = 0.0,
+    r_max_px: float = 0.0,
+) -> torch.Tensor:
+    """Boolean annulus mask around each star in native-pixel coordinates."""
+    n, h, w = data.shape
+    yy, xx = torch.meshgrid(
+        torch.arange(h, device=data.device, dtype=data.dtype),
+        torch.arange(w, device=data.device, dtype=data.dtype),
+        indexing="ij",
+    )
+    cx = (w // 2) + frac_xy[:, 0].view(n, 1, 1).to(dtype=data.dtype)
+    cy = (h // 2) + frac_xy[:, 1].view(n, 1, 1).to(dtype=data.dtype)
+    rr = torch.hypot(xx.view(1, h, w) - cx, yy.view(1, h, w) - cy)
+    mask = rr >= float(r_min_px)
+    if float(r_max_px) > 0:
+        mask = mask & (rr < float(r_max_px))
+    return mask
+
+
+def apply_core_loss_weight(
+    pixel_weight: Optional[torch.Tensor],
+    data: torch.Tensor,
+    frac_xy: torch.Tensor,
+    core_radius_px: float = 0.0,
+    core_weight: float = 0.0,
+) -> Optional[torch.Tensor]:
+    """Optionally upweight the PSF core without changing the support window."""
+    if float(core_radius_px) <= 0 or float(core_weight) <= 0:
+        return pixel_weight
+    core = annulus_mask(data, frac_xy, 0.0, float(core_radius_px)).to(dtype=data.dtype)
+    boost = 1.0 + float(core_weight) * core
+    if pixel_weight is None:
+        return boost
+    return pixel_weight * boost
+
+
 def solve_flux_background(
     model_unit: torch.Tensor,
     data: torch.Tensor,
@@ -443,6 +482,8 @@ def psf_residual_loss_with_centroid_nuisance(
     loss_snr_cap: float = 0.0,
     loss_radius_px: float = 0.0,
     loss_taper_px: float = 0.0,
+    core_loss_radius_px: float = 0.0,
+    core_loss_weight: float = 0.0,
     charbonnier_eps: float = 1e-3,
     fit_background: bool = True,
     nonnegative_flux: bool = True,
@@ -468,6 +509,13 @@ def psf_residual_loss_with_centroid_nuisance(
             loss_radius_px=loss_radius_px,
             loss_taper_px=loss_taper_px,
         )
+        pixel_weight = apply_core_loss_weight(
+            pixel_weight,
+            data,
+            frac_xy,
+            core_radius_px=core_loss_radius_px,
+            core_weight=core_loss_weight,
+        )
         loss, stats = psf_residual_loss(
             native,
             data,
@@ -478,6 +526,15 @@ def psf_residual_loss_with_centroid_nuisance(
             fit_background=fit_background,
             nonnegative_flux=nonnegative_flux,
         )
+        flux = stats["flux"].view(-1, 1, 1)
+        bg = stats["background"].view(-1, 1, 1)
+        z_raw = (flux * native.squeeze(1) + bg - data) / rms.clamp(min=1e-6)
+        core_mask = annulus_mask(data, frac_xy, 0.0, 3.0)
+        wing_mask = annulus_mask(data, frac_xy, 5.0, 10.0)
+        if core_mask.any():
+            stats["chi_abs_core_median_raw"] = z_raw.abs()[core_mask].median()
+        if wing_mask.any():
+            stats["chi_abs_wing_median_raw"] = z_raw.abs()[wing_mask].median()
         zero = torch.zeros(frac_xy.shape[0], device=frac_xy.device, dtype=frac_xy.dtype)
         stats["centroid_shift_dx_median"] = zero.median()
         stats["centroid_shift_dy_median"] = zero.median()
@@ -506,6 +563,13 @@ def psf_residual_loss_with_centroid_nuisance(
                 loss_radius_px=loss_radius_px,
                 loss_taper_px=loss_taper_px,
             )
+            pixel_weight_trial = apply_core_loss_weight(
+                pixel_weight_trial,
+                data,
+                frac_trial,
+                core_radius_px=core_loss_radius_px,
+                core_weight=core_loss_weight,
+            )
             loss_star, _flux, _bg, _model, _z = _psf_fit_per_star(
                 native_trial,
                 data,
@@ -526,6 +590,13 @@ def psf_residual_loss_with_centroid_nuisance(
         loss_radius_px=loss_radius_px,
         loss_taper_px=loss_taper_px,
     )
+    pixel_weight = apply_core_loss_weight(
+        pixel_weight,
+        data,
+        frac_xy + best_shift,
+        core_radius_px=core_loss_radius_px,
+        core_weight=core_loss_weight,
+    )
     loss, stats = psf_residual_loss(
         native,
         data,
@@ -543,6 +614,15 @@ def psf_residual_loss_with_centroid_nuisance(
     stats["centroid_shift_r_p90"] = torch.quantile(shift_r, 0.90)
     stats["centroid_shift_edge_frac"] = (shift_r >= 0.95 * max_r).float().mean()
     stats["centroid_shift"] = best_shift
+    flux = stats["flux"].view(-1, 1, 1)
+    bg = stats["background"].view(-1, 1, 1)
+    z_raw = (flux * native.squeeze(1) + bg - data) / rms.clamp(min=1e-6)
+    core_mask = annulus_mask(data, frac_xy + best_shift, 0.0, 3.0)
+    wing_mask = annulus_mask(data, frac_xy + best_shift, 5.0, 10.0)
+    if core_mask.any():
+        stats["chi_abs_core_median_raw"] = z_raw.abs()[core_mask].median()
+    if wing_mask.any():
+        stats["chi_abs_wing_median_raw"] = z_raw.abs()[wing_mask].median()
     return loss, stats, native
 
 
@@ -717,6 +797,8 @@ def _run_visual_tile(
         loss_snr_cap=args.loss_snr_cap,
         loss_radius_px=args.loss_radius_px,
         loss_taper_px=args.loss_taper_px,
+        core_loss_radius_px=getattr(args, "core_loss_radius_px", 0.0),
+        core_loss_weight=getattr(args, "core_loss_weight", 0.0),
         charbonnier_eps=args.charbonnier_eps,
         fit_background=args.fit_background,
         nonnegative_flux=args.nonnegative_flux,
@@ -1108,6 +1190,8 @@ def run_one_tile(
             loss_snr_cap=args.loss_snr_cap,
             loss_radius_px=args.loss_radius_px,
             loss_taper_px=args.loss_taper_px,
+            core_loss_radius_px=getattr(args, "core_loss_radius_px", 0.0),
+            core_loss_weight=getattr(args, "core_loss_weight", 0.0),
             charbonnier_eps=args.charbonnier_eps,
             fit_background=args.fit_background,
             nonnegative_flux=args.nonnegative_flux,
@@ -1149,6 +1233,8 @@ def run_one_tile(
         "loss_rms_eff_ratio_median",
         "loss_rms_eff_ratio_p95",
         "loss_pixel_weight_frac",
+        "chi_abs_core_median_raw",
+        "chi_abs_wing_median_raw",
     ):
         if key in stats:
             row[key] = stats[key]
@@ -1325,6 +1411,8 @@ def train(args: argparse.Namespace) -> None:
         "loss_snr_cap": args.loss_snr_cap,
         "loss_radius_px": args.loss_radius_px,
         "loss_taper_px": args.loss_taper_px,
+        "core_loss_radius_px": args.core_loss_radius_px,
+        "core_loss_weight": args.core_loss_weight,
     }
 
     out_dir = Path(args.output_dir)
@@ -1398,6 +1486,7 @@ def train(args: argparse.Namespace) -> None:
             f"val_cap={val_metrics.get('loss_rms_cap_frac', float('nan')):.3f} "
             f"val_win={val_metrics.get('loss_pixel_weight_frac', 1.0):.3f} "
             f"val_rawchi={val_metrics.get('chi_abs_median_raw', float('nan')):.3f} "
+            f"val_corechi={val_metrics.get('chi_abs_core_median_raw', float('nan')):.3f} "
             f"n_train_tiles={len(train_rows)} n_val_tiles={len(val_rows)}"
         )
 
@@ -1571,6 +1660,18 @@ def build_argparser() -> argparse.ArgumentParser:
         type=float,
         default=2.0,
         help="Cosine-like taper width at --loss-radius-px. 0 gives a hard aperture.",
+    )
+    p.add_argument(
+        "--core-loss-radius-px",
+        type=float,
+        default=0.0,
+        help="Native-pixel core radius to upweight in the PSF loss. 0 disables.",
+    )
+    p.add_argument(
+        "--core-loss-weight",
+        type=float,
+        default=0.0,
+        help="Extra multiplicative weight inside --core-loss-radius-px. 0 disables.",
     )
     p.add_argument(
         "--centroid-fit-max-px",
