@@ -652,6 +652,8 @@ Since there is no curated source catalog for this field, both neural detectors u
 
 For the fused CenterNet path, round-2 promotion and final export can both use the thin spike veto (`promotion_spike_radius`, `promotion_spike_width`; the current recommended conservative values are radius 40 and width 3 VIS pixels). W&B red-cross visualizations use the same mask, so the displayed prediction count can include `veto=.../...` rather than showing raw heatmap peaks on spike ridges.
 
+Bright/extended galaxies need a separate treatment from diffraction spikes. The optional `--bright_rescue` path finds high-S/N resolved VIS components, assigns **one** center per component, and adds only those not already covered by an existing label or exported detection. "Near an existing object" is adaptive: the match radius scales with the component footprint, clipped by `--bright_rescue_match_min` and `--bright_rescue_match_max`, so broad galaxies get a larger coverage radius than compact stars. The rescue mask still removes thin spike ridges first, so it does not turn diffraction spikes into labels. Use this before generating a StemCenterNet teacher if bright galaxies are being missed by the fused detector.
+
 For the stem path, teacher-guided cleaning adds four extra controls:
 
 - **Teacher labels / proposals**: `--teacher_labels` points to a fused CenterNet detection-label `.pt` file. These labels can be merged into the stem label set and used to decide whether raw VIS labels near bright stars are supported.
@@ -678,10 +680,10 @@ Detection development originally used 130 training tiles and 14 validation tiles
 | `centernet_loss.py` | Focal loss, bounded Gaussian heatmap rendering (memory-safe at VIS scale), optional ignore masks for ambiguous negatives, masked offset/flux L1 |
 | `train_centernet.py` | CenterNet training loop (supports live encoder or cached features mode) plus spike-veto-aware W&B visualization |
 | `train_stem_centernet.py` | StemCenterNet training loop (live native-resolution stem features) with fused-CenterNet teacher guidance, bright-star ignore zones, and thin-spike hard negatives |
-| `run_centernet_detections.py` | Active v8/v9/v10 CenterNet batch exporter for detection-label `.pt` files; includes optional thin spike veto and reports veto counts |
+| `run_centernet_detections.py` | Active v8/v9/v10 CenterNet batch exporter for detection-label `.pt` files; includes optional thin spike veto plus bright/extended rescue labels and reports veto/rescue counts |
 | `precompute_features.py` | One-time foundation encoder feature caching; supports v7/v8/v9/v10 via `load_foundation()` (which routes via checkpoint config markers) |
 | `cached_dataset.py` | Dataset loading precomputed features + pseudo-labels with label refinement support |
-| `self_train.py` | Self-training loop: VIS labels → train → promote/demote with thin spike veto → retrain |
+| `self_train.py` | Self-training loop: VIS labels → train → promote/demote with thin spike veto and optional bright/extended rescue → retrain |
 | `self_train_stem.py` | Self-training loop for teacher-guided StemCenterNet, including teacher-gated promotion |
 | `dataset.py` | Pseudo-label generation (VIS with thin bright-star spike-ridge mask, or Rubin fallback), tile dataset, optional ignore masks |
 | `detect.png` | Example qualitative comparison figure for the three detection choices |
@@ -1345,14 +1347,16 @@ W&B logs scalar train/validation losses plus diagnostic images:
 
 Notebook 08 diagnostics of the V10 Gaia/Gaussian run show that the broad profiles and moments are reasonable, but the remaining residuals are concentrated in the PSF core/first ring while the residual-head coefficients saturate. The next baseline is therefore a no-NN, no-spatial-variation empirical ePSF bank: fit one positive unit-flux oversampled ePSF per band directly through the native-pixel renderer, with analytic per-star flux/background solves and a core-weighted loss. This tests whether the simple per-band ePSF is already enough before reintroducing foundation-conditioned residuals.
 
+With the 32x32 native training stamps, use a 15 native-pixel fit radius: this keeps the empirical wing constrained almost to the stamp edge without letting the radial-profile boundary at 13 px create an artificial dip.
+
 ```bash
 python models/psf/fit_empirical_epsf_bank.py \
-    --train-dir data/psf_training_gaia_pm \
-    --output models/checkpoints/empirical_epsf_bank_gaia_pm.pt \
+    --train-dir data/psf_training_gaia_pm_v2 \
+    --output models/checkpoints/empirical_epsf_bank_psf_training_gaia_pm_v2_r15.pt \
     --epochs 80 \
     --batch-size 128 \
     --device cuda:0 \
-    --loss-radius-px 13 \
+    --loss-radius-px 15 \
     --loss-taper-px 2 \
     --core-loss-radius-px 3 \
     --core-loss-weight 3
@@ -1362,14 +1366,14 @@ Then test whether the learned residual head adds anything beyond that empirical 
 
 ```bash
 python -u models/psf/train_foundation_epsf_head.py \
-    --train-dir data/psf_training_gaia_pm \
+    --train-dir data/psf_training_gaia_pm_v2 \
     --rubin-dir data/rubin_tiles_all \
     --euclid-dir data/euclid_tiles_all \
     --foundation-checkpoint models/checkpoints/jaisp_v10_warmstart/checkpoint_best.pt \
     --features-cache-dir data/cached_features_v10_warmstart \
     --output-dir models/checkpoints/foundation_epsf_head_empirical_base_v10_pm \
     --base-epsf-mode checkpoint \
-    --base-epsf-checkpoint models/checkpoints/empirical_epsf_bank_gaia_pm.pt \
+    --base-epsf-checkpoint models/checkpoints/empirical_epsf_bank_psf_training_gaia_pm_v2_r15.pt \
     --epochs 40 \
     --max-stars-per-tile 256 \
     --min-snr 10 \
@@ -1642,7 +1646,8 @@ python models/precompute_features.py \
 
 # Step 2: conservative round-2 continuation from a good round-1 checkpoint.
 # The thin spike veto prevents high-confidence peaks on diffraction ridges
-# from being promoted as novel labels; W&B red crosses use the same veto.
+# from being promoted as novel labels; bright_rescue adds one conservative
+# center for resolved bright VIS objects that are not already covered.
 python models/detection/self_train.py \
     --feature_dir  data/cached_features_v10_warmstart_200 \
     --rubin_dir    data/rubin_tiles_200 \
@@ -1662,11 +1667,14 @@ python models/detection/self_train.py \
     --match_radius 0.01 \
     --promotion_spike_radius 40 \
     --promotion_spike_width 3.0 \
+    --bright_rescue \
     --wandb_project jaisp-detection
 
 # Step 3: export fused CenterNet detections for downstream caches or for
 # StemCenterNet teacher guidance. This active exporter lives under
-# models/detection/, not older_architectures/.
+# models/detection/, not older_architectures/. Keep bright_rescue on here so
+# the teacher file includes any bright/extended VIS centers the network still
+# misses.
 python models/detection/run_centernet_detections.py \
     --encoder_ckpt   models/checkpoints/jaisp_v10_warmstart/checkpoint_best.pt \
     --centernet_ckpt checkpoints/centernet_v10_warmstart_nsig2_round2_conservative/centernet_best.pt \
@@ -1675,7 +1683,8 @@ python models/detection/run_centernet_detections.py \
     --out            data/detection_labels/centernet_v10_teacher_200.pt \
     --conf_threshold 0.3 \
     --spike_veto_radius 40 \
-    --spike_veto_width 3.0
+    --spike_veto_width 3.0 \
+    --bright_rescue
 
 # Option B: teacher-guided native-resolution StemCenterNet.
 # Fused CenterNet supplies the robust multiband source prior; StemCenterNet

@@ -441,7 +441,7 @@ def build_argparser() -> argparse.ArgumentParser:
 
     p.add_argument("--charbonnier-eps", type=float, default=1e-3)
     p.add_argument("--loss-snr-cap", type=float, default=1000.0)
-    p.add_argument("--loss-radius-px", type=float, default=13.0)
+    p.add_argument("--loss-radius-px", type=float, default=15.0)
     p.add_argument("--loss-taper-px", type=float, default=2.0)
     p.add_argument("--core-loss-radius-px", type=float, default=3.0)
     p.add_argument("--core-loss-weight", type=float, default=3.0)

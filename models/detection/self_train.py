@@ -45,7 +45,32 @@ for _p in (_HERE, _MODELS):
         sys.path.insert(0, str(_p))
 
 from detection.centernet_detector import CenterNetDetector
-from detection.dataset import PSEUDO_LABEL_CACHE_VERSION, _vis_bright_core_and_spike_mask
+from detection.dataset import (
+    PSEUDO_LABEL_CACHE_VERSION,
+    _vis_bright_core_and_spike_mask,
+    _vis_bright_extended_rescue_labels,
+)
+
+
+def _dedupe_points(points: np.ndarray, radius: float) -> np.ndarray:
+    """Keep the first point in each small normalized-radius cluster."""
+    pts = np.asarray(points, dtype=np.float32)
+    if pts.shape[0] <= 1:
+        return pts
+    keep = []
+    r = float(max(radius, 0.0))
+    for pt in pts:
+        if not np.isfinite(pt).all():
+            continue
+        if not keep:
+            keep.append(pt)
+            continue
+        old = np.stack(keep, axis=0)
+        if np.hypot(old[:, 0] - pt[0], old[:, 1] - pt[1]).min() > r:
+            keep.append(pt)
+    if not keep:
+        return np.zeros((0, 2), dtype=np.float32)
+    return np.stack(keep, axis=0).astype(np.float32)
 
 
 def _run_training_round(
@@ -113,6 +138,15 @@ def _refine_labels(
     match_radius: float = 0.01,
     promotion_spike_radius: int = 20,
     promotion_spike_width: float = 3.0,
+    bright_rescue: bool = False,
+    bright_rescue_nsig: float = 2.5,
+    bright_rescue_min_area: int = 45,
+    bright_rescue_min_radius: float = 5.0,
+    bright_rescue_min_peak_snr: float = 8.0,
+    bright_rescue_match_scale: float = 1.5,
+    bright_rescue_match_min: float = 8.0,
+    bright_rescue_match_max: float = 35.0,
+    bright_rescue_max_per_tile: int = 32,
     device: torch.device = None,
 ) -> tuple:
     """Run trained detector on all tiles. Promote novel high-confidence
@@ -178,6 +212,7 @@ def _refine_labels(
     total_demoted = 0
     total_tiles = 0
     total_artifact_vetoed = 0
+    total_bright_rescue = 0
 
     for feat_path in feat_files:
         tile_id = feat_path.stem.rsplit('_aug', 1)[0]
@@ -185,20 +220,23 @@ def _refine_labels(
         feats = cached['features'].unsqueeze(0).to(device)
 
         promotion_mask = None
-        if promotion_spike_radius > 0 and euclid_dir:
+        vis_img = None
+        if euclid_dir and (promotion_spike_radius > 0 or bright_rescue):
             vis_path = Path(euclid_dir) / f'{tile_id}_euclid.npz'
             if vis_path.exists():
                 try:
                     edata = np.load(str(vis_path), allow_pickle=True, mmap_mode='r')
                     vis_img = np.nan_to_num(
                         np.asarray(edata['img_VIS'], dtype=np.float32), nan=0.0)
-                    _, _, promotion_mask = _vis_bright_core_and_spike_mask(
-                        vis_img,
-                        spike_radius=promotion_spike_radius,
-                        spike_width=promotion_spike_width,
-                        include_core=False,
-                    )
+                    if promotion_spike_radius > 0:
+                        _, _, promotion_mask = _vis_bright_core_and_spike_mask(
+                            vis_img,
+                            spike_radius=promotion_spike_radius,
+                            spike_width=promotion_spike_width,
+                            include_core=False,
+                        )
                 except Exception:
+                    vis_img = None
                     promotion_mask = None
 
         # Run detector
@@ -217,6 +255,28 @@ def _refine_labels(
             orig_labels = _load_labels_fallback(
                 tile_id, euclid_dir, rubin_dir, nsig)
 
+        rescue_xy = np.zeros((0, 2), dtype=np.float32)
+        if bright_rescue and vis_img is not None:
+            try:
+                rescue_xy, _ = _vis_bright_extended_rescue_labels(
+                    vis_img,
+                    existing_norm=orig_labels,
+                    thresh_nsig=bright_rescue_nsig,
+                    min_area=bright_rescue_min_area,
+                    min_radius=bright_rescue_min_radius,
+                    min_peak_snr=bright_rescue_min_peak_snr,
+                    match_radius_scale=bright_rescue_match_scale,
+                    match_radius_min=bright_rescue_match_min,
+                    match_radius_max=bright_rescue_match_max,
+                    spike_radius=promotion_spike_radius,
+                    spike_width=promotion_spike_width,
+                    max_rescue_per_tile=bright_rescue_max_per_tile,
+                )
+            except Exception as exc:
+                print(f'  [warn] bright rescue failed for {tile_id}: {exc}')
+                rescue_xy = np.zeros((0, 2), dtype=np.float32)
+        total_bright_rescue += int(rescue_xy.shape[0])
+
         hm_np = hm[0, 0].cpu().numpy()
 
         # --- DEMOTE: vectorized confidence check at label positions ---
@@ -234,6 +294,7 @@ def _refine_labels(
         # --- PROMOTE: find high-confidence predictions with no matching label ---
         hm_max = F.max_pool2d(hm, 3, stride=1, padding=1)
         peaks = (hm == hm_max) & (hm > promote_conf)
+        novel = np.zeros((0, 2), dtype=np.float32)
 
         if peaks.any():
             yi, xi = torch.where(peaks[0, 0])
@@ -263,9 +324,13 @@ def _refine_labels(
                 dists = cdist(pred_xy, orig_labels)  # [n_pred, n_labels]
                 novel = pred_xy[dists.min(axis=1) > match_radius]
 
-            if len(novel) > 0:
-                promoted[tile_id] = novel.astype(np.float32)
-                total_promoted += len(novel)
+        if rescue_xy.shape[0] > 0:
+            novel = np.concatenate([novel, rescue_xy], axis=0)
+            novel = _dedupe_points(novel, radius=min(match_radius, 0.005))
+
+        if len(novel) > 0:
+            promoted[tile_id] = novel.astype(np.float32)
+            total_promoted += len(novel)
 
         total_tiles += 1
 
@@ -277,6 +342,11 @@ def _refine_labels(
             f'  Artifact-vetoed: {total_artifact_vetoed} high-confidence peaks '
             f'on thin bright-star spike masks '
             f'(radius={promotion_spike_radius}px, width={promotion_spike_width:.1f}px)'
+        )
+    if bright_rescue:
+        print(
+            f'  Bright/extended rescue labels: {total_bright_rescue} '
+            f'(not already covered by VIS pseudo-labels)'
         )
     return promoted, demoted
 
@@ -339,6 +409,24 @@ def main():
                    help='Bright-star spike search radius for promoting novel detections; set 0 to disable')
     p.add_argument('--promotion_spike_width', type=float, default=3.0,
                    help='Thin spike veto half-width in VIS pixels for self-training promotion')
+    p.add_argument('--bright_rescue', action='store_true',
+                   help='Append conservative bright/extended VIS rescue labels to round refinement')
+    p.add_argument('--bright_rescue_nsig', type=float, default=2.5,
+                   help='Robust S/N threshold for bright/extended rescue components')
+    p.add_argument('--bright_rescue_min_area', type=int, default=45,
+                   help='Minimum connected VIS area in pixels for bright/extended rescue')
+    p.add_argument('--bright_rescue_min_radius', type=float, default=5.0,
+                   help='Minimum footprint/moment radius in VIS pixels for bright/extended rescue')
+    p.add_argument('--bright_rescue_min_peak_snr', type=float, default=8.0,
+                   help='Minimum peak robust S/N for bright/extended rescue')
+    p.add_argument('--bright_rescue_match_scale', type=float, default=1.5,
+                   help='Adaptive existing-label match radius = scale * footprint radius')
+    p.add_argument('--bright_rescue_match_min', type=float, default=8.0,
+                   help='Minimum existing-label match radius in VIS pixels for rescue coverage')
+    p.add_argument('--bright_rescue_match_max', type=float, default=35.0,
+                   help='Maximum existing-label match radius in VIS pixels for rescue coverage')
+    p.add_argument('--bright_rescue_max_per_tile', type=int, default=32,
+                   help='Maximum bright/extended rescue labels to add per tile')
     p.add_argument('--init_checkpoint', default=None,
                    help='Existing detector checkpoint to bootstrap from when start_round > 1')
     p.add_argument('--wandb_project', default=None)
@@ -371,6 +459,15 @@ def main():
             match_radius=args.match_radius,
             promotion_spike_radius=args.promotion_spike_radius,
             promotion_spike_width=args.promotion_spike_width,
+            bright_rescue=args.bright_rescue,
+            bright_rescue_nsig=args.bright_rescue_nsig,
+            bright_rescue_min_area=args.bright_rescue_min_area,
+            bright_rescue_min_radius=args.bright_rescue_min_radius,
+            bright_rescue_min_peak_snr=args.bright_rescue_min_peak_snr,
+            bright_rescue_match_scale=args.bright_rescue_match_scale,
+            bright_rescue_match_min=args.bright_rescue_match_min,
+            bright_rescue_match_max=args.bright_rescue_match_max,
+            bright_rescue_max_per_tile=args.bright_rescue_max_per_tile,
             device=device,
         )
         extra_labels_path = str(out_dir / f'refined_labels_round{prior_round}.pt')
@@ -420,6 +517,15 @@ def main():
                 match_radius=args.match_radius,
                 promotion_spike_radius=args.promotion_spike_radius,
                 promotion_spike_width=args.promotion_spike_width,
+                bright_rescue=args.bright_rescue,
+                bright_rescue_nsig=args.bright_rescue_nsig,
+                bright_rescue_min_area=args.bright_rescue_min_area,
+                bright_rescue_min_radius=args.bright_rescue_min_radius,
+                bright_rescue_min_peak_snr=args.bright_rescue_min_peak_snr,
+                bright_rescue_match_scale=args.bright_rescue_match_scale,
+                bright_rescue_match_min=args.bright_rescue_match_min,
+                bright_rescue_match_max=args.bright_rescue_match_max,
+                bright_rescue_max_per_tile=args.bright_rescue_max_per_tile,
                 device=device,
             )
             extra_labels_path = str(out_dir / f'refined_labels_round{round_num}.pt')

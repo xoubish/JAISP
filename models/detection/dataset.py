@@ -324,6 +324,133 @@ def _pseudo_labels_vis(
     return centroids, classes, H, W
 
 
+def _vis_bright_extended_rescue_labels(
+    vis_img: np.ndarray,
+    existing_norm: Optional[np.ndarray] = None,
+    thresh_nsig: float = 2.5,
+    min_area: int = 45,
+    min_radius: float = 5.0,
+    min_peak_snr: float = 8.0,
+    match_radius_scale: float = 1.5,
+    match_radius_min: float = 8.0,
+    match_radius_max: float = 35.0,
+    spike_radius: int = 40,
+    spike_width: float = 3.0,
+    min_star_area: int = 20,
+    max_area_frac: float = 0.05,
+    max_rescue_per_tile: int = 32,
+) -> Tuple[np.ndarray, list]:
+    """Find missing bright/extended VIS objects as one-center rescue labels.
+
+    This is intentionally different from the thin spike veto.  It looks for
+    resolved high-S/N connected components, estimates one centroid per component,
+    and only returns candidates that are not already covered by an existing
+    detection.  Coverage uses an adaptive radius tied to the component footprint:
+    a broad galaxy is allowed a larger match radius than a compact source.
+    """
+    from scipy.ndimage import gaussian_filter, label as ndlabel
+
+    img = np.asarray(vis_img, dtype=np.float32)
+    finite = np.isfinite(img)
+    if finite.sum() <= 100:
+        return np.zeros((0, 2), dtype=np.float32), []
+
+    clean = np.nan_to_num(img, nan=0.0, posinf=0.0, neginf=0.0)
+    vals = img[finite]
+    med = float(np.median(vals))
+    mad = float(np.median(np.abs(vals - med)))
+    sig = max(1.4826 * mad, 1e-6)
+    if not np.isfinite(sig) or sig <= 0:
+        return np.zeros((0, 2), dtype=np.float32), []
+
+    H, W = clean.shape
+    smooth = gaussian_filter(clean, sigma=1.0)
+    threshold = med + float(thresh_nsig) * sig
+    candidate_mask = finite & (smooth >= threshold)
+
+    if spike_radius > 0 and spike_width > 0:
+        try:
+            _, _, spike_mask = _vis_bright_core_and_spike_mask(
+                clean,
+                spike_radius=spike_radius,
+                min_star_area=min_star_area,
+                spike_width=spike_width,
+                include_core=False,
+            )
+            candidate_mask &= ~spike_mask
+        except Exception:
+            pass
+
+    labeled, n_comp = ndlabel(candidate_mask)
+    if n_comp <= 0:
+        return np.zeros((0, 2), dtype=np.float32), []
+
+    existing_px = np.zeros((0, 2), dtype=np.float32)
+    if existing_norm is not None and len(existing_norm) > 0:
+        ex = np.asarray(existing_norm, dtype=np.float32)
+        good = np.isfinite(ex).all(axis=1)
+        if good.any():
+            ex = ex[good]
+            existing_px = np.stack(
+                [ex[:, 0] * max(W - 1, 1), ex[:, 1] * max(H - 1, 1)],
+                axis=1,
+            ).astype(np.float32)
+
+    max_area = max(float(min_area), float(H * W) * float(max_area_frac))
+    candidates = []
+    for lb in range(1, n_comp + 1):
+        yy, xx = np.nonzero(labeled == lb)
+        area = int(len(xx))
+        if area < int(min_area) or area > max_area:
+            continue
+
+        vals_comp = clean[yy, xx]
+        peak_snr = float((np.max(vals_comp) - med) / sig)
+        if peak_snr < float(min_peak_snr):
+            continue
+
+        weights = np.clip(smooth[yy, xx] - threshold, 0.0, None).astype(np.float64)
+        if weights.sum() <= 0:
+            weights = np.ones_like(weights, dtype=np.float64)
+        wsum = float(weights.sum())
+        cx = float(np.sum(xx * weights) / wsum)
+        cy = float(np.sum(yy * weights) / wsum)
+
+        moment_r = float(np.sqrt(np.sum(((xx - cx) ** 2 + (yy - cy) ** 2) * weights) / wsum))
+        footprint_r = float(np.sqrt(area / np.pi))
+        radius = max(moment_r, footprint_r)
+        if radius < float(min_radius):
+            continue
+
+        match_radius = float(np.clip(
+            match_radius_scale * radius,
+            match_radius_min,
+            match_radius_max,
+        ))
+        if existing_px.shape[0] > 0:
+            d = np.hypot(existing_px[:, 0] - cx, existing_px[:, 1] - cy)
+            if float(d.min()) <= match_radius:
+                continue
+
+        candidates.append({
+            'xy': np.array([cx / max(W - 1, 1), cy / max(H - 1, 1)], dtype=np.float32),
+            'score': peak_snr * np.sqrt(area),
+            'area': area,
+            'radius_px': radius,
+            'match_radius_px': match_radius,
+            'peak_snr': peak_snr,
+        })
+
+    if not candidates:
+        return np.zeros((0, 2), dtype=np.float32), []
+
+    candidates.sort(key=lambda c: c['score'], reverse=True)
+    if max_rescue_per_tile > 0:
+        candidates = candidates[:int(max_rescue_per_tile)]
+    centroids = np.stack([c['xy'] for c in candidates], axis=0).astype(np.float32)
+    return centroids, candidates
+
+
 class TileDetectionDataset(Dataset):
     """
     Parameters

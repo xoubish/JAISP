@@ -40,7 +40,10 @@ for _p in (_HERE, _MODELS):
         sys.path.insert(0, str(_p))
 
 from detection.centernet_detector import CenterNetDetector                 # noqa: E402
-from detection.dataset import _vis_bright_core_and_spike_mask              # noqa: E402
+from detection.dataset import (                                           # noqa: E402
+    _vis_bright_core_and_spike_mask,
+    _vis_bright_extended_rescue_labels,
+)
 from detection.detector import JAISPEncoderWrapper                         # noqa: E402
 from jaisp_foundation_v10 import EUCLID_BANDS, RUBIN_BANDS                 # noqa: E402
 from load_foundation import load_foundation                                # noqa: E402
@@ -104,6 +107,26 @@ def main():
                    help='Base radial search length for the bright-star spike veto.')
     p.add_argument('--spike_veto_min_star_area', type=int, default=20,
                    help='Minimum saturated VIS blob area for the spike veto anchor.')
+    p.add_argument('--bright_rescue', action='store_true',
+                   help='Append conservative bright/extended VIS rescue labels to exported teacher labels.')
+    p.add_argument('--bright_rescue_nsig', type=float, default=2.5,
+                   help='Robust S/N threshold for bright/extended rescue components.')
+    p.add_argument('--bright_rescue_min_area', type=int, default=45,
+                   help='Minimum connected VIS area in pixels for bright/extended rescue.')
+    p.add_argument('--bright_rescue_min_radius', type=float, default=5.0,
+                   help='Minimum footprint/moment radius in VIS pixels for bright/extended rescue.')
+    p.add_argument('--bright_rescue_min_peak_snr', type=float, default=8.0,
+                   help='Minimum peak robust S/N for bright/extended rescue.')
+    p.add_argument('--bright_rescue_match_scale', type=float, default=1.5,
+                   help='Adaptive existing-detection match radius = scale * footprint radius.')
+    p.add_argument('--bright_rescue_match_min', type=float, default=8.0,
+                   help='Minimum existing-detection match radius in VIS pixels for rescue coverage.')
+    p.add_argument('--bright_rescue_match_max', type=float, default=35.0,
+                   help='Maximum existing-detection match radius in VIS pixels for rescue coverage.')
+    p.add_argument('--bright_rescue_max_per_tile', type=int, default=32,
+                   help='Maximum bright/extended rescue labels to append per tile.')
+    p.add_argument('--bright_rescue_score', type=float, default=0.95,
+                   help='Score assigned to exported bright/extended rescue labels.')
     p.add_argument('--device', default='')
     p.add_argument('--max_tiles', type=int, default=0, help='0 = all tiles')
     args = p.parse_args()
@@ -145,6 +168,7 @@ def main():
     n_errors = 0
     tot_det = 0
     tot_vetoed = 0
+    tot_rescue = 0
 
     for i, tile in enumerate(tiles):
         try:
@@ -184,9 +208,39 @@ def main():
                 tot_vetoed += int(raw_result['scores'].numel() - result['scores'].numel())
 
             xy_norm = result['centroids'].detach().cpu().numpy().astype(np.float32)
+            score_tensor = result['scores'].detach().cpu()
+            if args.bright_rescue and vis_img is not None:
+                try:
+                    rescue_xy, _ = _vis_bright_extended_rescue_labels(
+                        vis_img,
+                        existing_norm=xy_norm,
+                        thresh_nsig=args.bright_rescue_nsig,
+                        min_area=args.bright_rescue_min_area,
+                        min_radius=args.bright_rescue_min_radius,
+                        min_peak_snr=args.bright_rescue_min_peak_snr,
+                        match_radius_scale=args.bright_rescue_match_scale,
+                        match_radius_min=args.bright_rescue_match_min,
+                        match_radius_max=args.bright_rescue_match_max,
+                        spike_radius=args.spike_veto_radius,
+                        spike_width=args.spike_veto_width,
+                        min_star_area=args.spike_veto_min_star_area,
+                        max_rescue_per_tile=args.bright_rescue_max_per_tile,
+                    )
+                    if rescue_xy.shape[0] > 0:
+                        xy_norm = np.concatenate([xy_norm, rescue_xy], axis=0).astype(np.float32)
+                        rescue_scores = torch.full(
+                            (rescue_xy.shape[0],),
+                            float(args.bright_rescue_score),
+                            dtype=score_tensor.dtype,
+                        )
+                        score_tensor = torch.cat([score_tensor, rescue_scores], dim=0)
+                        tot_rescue += int(rescue_xy.shape[0])
+                except Exception as exc:
+                    print(f'  [warn] bright rescue failed for {tile["stem"]}: {exc}')
+
             cls = np.zeros(xy_norm.shape[0], dtype=np.int64)
             labels[tile['stem']] = (xy_norm, cls)
-            scores[tile['stem']] = result['scores'].detach().cpu()
+            scores[tile['stem']] = score_tensor
             tot_det += xy_norm.shape[0]
         except Exception as exc:
             n_errors += 1
@@ -200,6 +254,7 @@ def main():
             mean_det = tot_det / max(1, (i + 1 - n_errors))
             print(f'  [{i+1:4d}/{len(tiles)}]  '
                   f'mean_det={mean_det:.0f}  '
+                  f'rescue={tot_rescue}  '
                   f'vetoed={tot_vetoed}  '
                   f'rate={rate:.2f} tile/s  '
                   f'eta={eta/60:.1f} min')
@@ -218,12 +273,26 @@ def main():
             'spike_veto_width': args.spike_veto_width,
             'spike_veto_radius': args.spike_veto_radius,
             'spike_veto_min_star_area': args.spike_veto_min_star_area,
+            'bright_rescue': args.bright_rescue,
+            'bright_rescue_nsig': args.bright_rescue_nsig,
+            'bright_rescue_min_area': args.bright_rescue_min_area,
+            'bright_rescue_min_radius': args.bright_rescue_min_radius,
+            'bright_rescue_min_peak_snr': args.bright_rescue_min_peak_snr,
+            'bright_rescue_match_scale': args.bright_rescue_match_scale,
+            'bright_rescue_match_min': args.bright_rescue_match_min,
+            'bright_rescue_match_max': args.bright_rescue_match_max,
+            'bright_rescue_max_per_tile': args.bright_rescue_max_per_tile,
+            'bright_rescue_score': args.bright_rescue_score,
             'n_tiles': len(labels),
             'n_errors': n_errors,
             'n_vetoed': tot_vetoed,
+            'n_bright_rescue': tot_rescue,
         },
     }, out_path)
-    print(f'Saved {len(labels)} tiles to {out_path}  ({n_errors} errors, vetoed={tot_vetoed})')
+    print(
+        f'Saved {len(labels)} tiles to {out_path}  '
+        f'({n_errors} errors, vetoed={tot_vetoed}, bright_rescue={tot_rescue})'
+    )
 
 
 if __name__ == '__main__':
