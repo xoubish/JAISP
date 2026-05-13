@@ -48,6 +48,17 @@ def _run_training_round(
     lr: float = 1e-4,
     sigma: float = 2.0,
     nsig: float = 3.0,
+    labels_mode: str = "vis_peak",
+    uncertain_ignore: bool = False,
+    uncertain_nsig: float = 1.8,
+    uncertain_radius_px: float = 5.0,
+    synthetic_sources_per_tile: int = 0,
+    synthetic_prob: float = 1.0,
+    synthetic_min_snr: float = 5.0,
+    synthetic_max_snr: float = 20.0,
+    synthetic_min_sigma_px: float = 1.1,
+    synthetic_max_sigma_px: float = 3.5,
+    synthetic_weight: float = 1.5,
     stream_ch: int = 16,
     base_ch: int = 32,
     unfreeze_stems: bool = False,
@@ -86,6 +97,16 @@ def _run_training_round(
         "--lr", str(lr),
         "--sigma", str(sigma),
         "--nsig", str(nsig),
+        "--labels_mode", labels_mode,
+        "--uncertain_nsig", str(uncertain_nsig),
+        "--uncertain_radius_px", str(uncertain_radius_px),
+        "--synthetic_sources_per_tile", str(synthetic_sources_per_tile),
+        "--synthetic_prob", str(synthetic_prob),
+        "--synthetic_min_snr", str(synthetic_min_snr),
+        "--synthetic_max_snr", str(synthetic_max_snr),
+        "--synthetic_min_sigma_px", str(synthetic_min_sigma_px),
+        "--synthetic_max_sigma_px", str(synthetic_max_sigma_px),
+        "--synthetic_weight", str(synthetic_weight),
         "--stream_ch", str(stream_ch),
         "--base_ch", str(base_ch),
         "--viz_spike_veto_radius", str(viz_spike_veto_radius),
@@ -108,6 +129,8 @@ def _run_training_round(
         cmd += ["--unfreeze_stems"]
     if no_teacher_add_labels:
         cmd += ["--no_teacher_add_labels"]
+    if uncertain_ignore:
+        cmd += ["--uncertain_ignore"]
     if wandb_project:
         cmd += ["--wandb_project", wandb_project]
     if wandb_name:
@@ -270,6 +293,19 @@ def main():
     p.add_argument("--lr", type=float, default=1e-4)
     p.add_argument("--nsig", type=float, default=3.0)
     p.add_argument("--sigma", type=float, default=2.0)
+    p.add_argument("--labels_mode", default="vis_peak", choices=["vis_peak", "multiband"],
+                   help="Pseudo-label source passed to each stem training round")
+    p.add_argument("--uncertain_ignore", action="store_true",
+                   help="Ignore negative heatmap loss around low-threshold uncertain source proposals")
+    p.add_argument("--uncertain_nsig", type=float, default=1.8)
+    p.add_argument("--uncertain_radius_px", type=float, default=5.0)
+    p.add_argument("--synthetic_sources_per_tile", type=int, default=0)
+    p.add_argument("--synthetic_prob", type=float, default=1.0)
+    p.add_argument("--synthetic_min_snr", type=float, default=5.0)
+    p.add_argument("--synthetic_max_snr", type=float, default=20.0)
+    p.add_argument("--synthetic_min_sigma_px", type=float, default=1.1)
+    p.add_argument("--synthetic_max_sigma_px", type=float, default=3.5)
+    p.add_argument("--synthetic_weight", type=float, default=1.5)
     p.add_argument("--stream_ch", type=int, default=16)
     p.add_argument("--base_ch", type=int, default=32)
     p.add_argument("--promote_conf", type=float, default=0.8)
@@ -359,6 +395,17 @@ def main():
             lr=args.lr,
             sigma=args.sigma,
             nsig=args.nsig,
+            labels_mode=args.labels_mode,
+            uncertain_ignore=args.uncertain_ignore,
+            uncertain_nsig=args.uncertain_nsig,
+            uncertain_radius_px=args.uncertain_radius_px,
+            synthetic_sources_per_tile=args.synthetic_sources_per_tile,
+            synthetic_prob=args.synthetic_prob,
+            synthetic_min_snr=args.synthetic_min_snr,
+            synthetic_max_snr=args.synthetic_max_snr,
+            synthetic_min_sigma_px=args.synthetic_min_sigma_px,
+            synthetic_max_sigma_px=args.synthetic_max_sigma_px,
+            synthetic_weight=args.synthetic_weight,
             stream_ch=args.stream_ch,
             base_ch=args.base_ch,
             unfreeze_stems=args.unfreeze_stems,

@@ -276,6 +276,17 @@ def train(args):
             max_sources=1000,
             use_all_bands=args.use_euclid_bands,
             augment=True,
+            labels_mode=args.labels_mode,
+            uncertain_ignore=args.uncertain_ignore,
+            uncertain_nsig=args.uncertain_nsig,
+            uncertain_radius_px=args.uncertain_radius_px,
+            synthetic_sources_per_tile=args.synthetic_sources_per_tile,
+            synthetic_prob=args.synthetic_prob,
+            synthetic_min_snr=args.synthetic_min_snr,
+            synthetic_max_snr=args.synthetic_max_snr,
+            synthetic_min_sigma_px=args.synthetic_min_sigma_px,
+            synthetic_max_sigma_px=args.synthetic_max_sigma_px,
+            synthetic_weight=args.synthetic_weight,
         )
         n_val = max(1, int(0.1 * len(full_ds)))
         n_tr  = len(full_ds) - n_val
@@ -359,9 +370,17 @@ def train(args):
                 rms = {b: v.to(device) for b, v in batch['rms'].items()}
                 out = model(images, rms)
 
+            gt_weights = batch.get('source_weights')
+            if gt_weights is not None:
+                gt_weights = [w.to(device) for w in gt_weights]
+            ignore_masks = batch.get('ignore_mask')
+            if ignore_masks is not None:
+                ignore_masks = ignore_masks.to(device)
             losses = criterion(
                 out,
                 [c.to(device) for c in batch['centroids']],
+                gt_weights=gt_weights,
+                ignore_masks=ignore_masks,
             )
             optimizer.zero_grad()
             losses['loss_total'].backward()
@@ -398,9 +417,17 @@ def train(args):
                         images = {b: v.to(device) for b, v in batch['images'].items()}
                         rms = {b: v.to(device) for b, v in batch['rms'].items()}
                         out = model(images, rms)
+                    gt_weights = batch.get('source_weights')
+                    if gt_weights is not None:
+                        gt_weights = [w.to(device) for w in gt_weights]
+                    ignore_masks = batch.get('ignore_mask')
+                    if ignore_masks is not None:
+                        ignore_masks = ignore_masks.to(device)
                     losses = criterion(
                         out,
                         [c.to(device) for c in batch['centroids']],
+                        gt_weights=gt_weights,
+                        ignore_masks=ignore_masks,
                     )
                     val_losses.append(float(losses['loss_total']))
             finally:
@@ -473,6 +500,24 @@ if __name__ == '__main__':
     p.add_argument('--lr',               type=float, default=1e-4)
     p.add_argument('--nsig',             type=float, default=3.0,
                    help='Detection significance for pseudo-labels')
+    p.add_argument('--labels_mode', default='vis_peak', choices=['vis_peak', 'multiband'],
+                   help='Pseudo-label source: improved VIS classical labels or multi-band SEP labels')
+    p.add_argument('--uncertain_ignore', action='store_true',
+                   help='Ignore negative heatmap loss around low-threshold uncertain source proposals')
+    p.add_argument('--uncertain_nsig', type=float, default=1.8,
+                   help='Low-threshold proposal significance for uncertainty ignore masks')
+    p.add_argument('--uncertain_radius_px', type=float, default=5.0,
+                   help='VIS-pixel radius ignored around uncertain proposals')
+    p.add_argument('--synthetic_sources_per_tile', type=int, default=0,
+                   help='Number of synthetic perfect-label sources injected per augmented training tile')
+    p.add_argument('--synthetic_prob', type=float, default=1.0,
+                   help='Probability of injecting synthetic sources into a training tile')
+    p.add_argument('--synthetic_min_snr', type=float, default=5.0)
+    p.add_argument('--synthetic_max_snr', type=float, default=20.0)
+    p.add_argument('--synthetic_min_sigma_px', type=float, default=1.1)
+    p.add_argument('--synthetic_max_sigma_px', type=float, default=3.5)
+    p.add_argument('--synthetic_weight', type=float, default=1.5,
+                   help='Positive loss weight for synthetic perfect-label sources')
     p.add_argument('--sigma',            type=float, default=2.0,
                    help='Gaussian sigma for heatmap targets (feature-map pixels)')
     p.add_argument('--head_ch',          type=int, default=256,

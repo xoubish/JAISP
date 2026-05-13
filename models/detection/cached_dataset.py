@@ -274,6 +274,7 @@ class CachedFeatureDataset(Dataset):
             'features':  features,                                # [C, H, W]
             'centroids': torch.from_numpy(centroids_np),         # [M, 2]
             'classes':   torch.from_numpy(classes_np),           # [M]
+            'source_weights': torch.ones(len(centroids_np), dtype=torch.float32),
             'tile_id':   tile_id,
             'aug_idx':   cached['aug_idx'],
         }
@@ -285,6 +286,7 @@ def collate_cached(batch: List[dict]) -> dict:
         'features':  torch.stack([s['features'] for s in batch]),  # [B, C, H, W]
         'centroids': [s['centroids'] for s in batch],
         'classes':   [s['classes'] for s in batch],
+        'source_weights': [s['source_weights'] for s in batch],
         'tile_id':   [s['tile_id'] for s in batch],
         'aug_idx':   [s['aug_idx'] for s in batch],
     }

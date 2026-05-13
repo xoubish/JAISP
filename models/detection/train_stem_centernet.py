@@ -68,6 +68,8 @@ def _apply_extra_labels_inplace(ds: TileDetectionDataset, extra_labels_path: str
             keep &= (d > 0.005)
         n_before = len(centroids_np)
         ds._label_cache[idx] = (centroids_np[keep], classes_np[keep], H, W)
+        if hasattr(ds, "_weight_cache") and idx in ds._weight_cache:
+            ds._weight_cache[idx] = ds._weight_cache[idx][keep]
         n_removed += n_before - int(keep.sum())
 
     for tile_id, add_xy in promoted.items():
@@ -78,6 +80,10 @@ def _apply_extra_labels_inplace(ds: TileDetectionDataset, extra_labels_path: str
         merged_c = np.concatenate([centroids_np, add_xy.astype(np.float32)], axis=0)
         merged_cls = np.zeros(len(merged_c), dtype=np.int64)
         ds._label_cache[idx] = (merged_c, merged_cls, H, W)
+        if hasattr(ds, "_weight_cache"):
+            old_w = ds._weight_cache.get(idx, np.ones(len(centroids_np), dtype=np.float32))
+            add_w = np.full(len(add_xy), 0.6, dtype=np.float32)
+            ds._weight_cache[idx] = np.concatenate([old_w, add_w], axis=0)
         n_added += len(add_xy)
 
     print(f"  Label refinement applied: +{n_added} promoted, -{n_removed} demoted")
@@ -177,7 +183,7 @@ def _apply_teacher_guidance_inplace(
     if teacher_filter_mode not in {"none", "bright", "global"}:
         raise ValueError("--teacher_filter_mode must be one of: none, bright, global")
 
-    if not hasattr(ds, "_ignore_cache"):
+    if getattr(ds, "_ignore_cache", None) is None:
         ds._ignore_cache = {}
 
     n_teacher_added = 0
@@ -215,7 +221,10 @@ def _apply_teacher_guidance_inplace(
                     # Ambiguous halo pixels are ignored, but spike ridges remain
                     # unignored so false detections on them are hard negatives.
                     ignore_mask = broad_mask & ~spike_mask
-                    ds._ignore_cache[idx] = ignore_mask
+                    if idx in ds._ignore_cache:
+                        ds._ignore_cache[idx] = ds._ignore_cache[idx] | ignore_mask
+                    else:
+                        ds._ignore_cache[idx] = ignore_mask
                     n_ignore += int(ignore_mask.sum())
             except Exception as exc:
                 print(f"  [warn] teacher-guidance mask failed for {tile_id}: {exc}")
@@ -239,6 +248,15 @@ def _apply_teacher_guidance_inplace(
             keep &= ~unsupported
 
         labels = labels[keep]
+        if hasattr(ds, "_weight_cache"):
+            weights = ds._weight_cache.get(idx, np.ones(len(centroids_np), dtype=np.float32))
+            weights = np.asarray(weights, dtype=np.float32).reshape(-1)
+            if len(weights) == len(keep):
+                weights = weights[keep]
+            else:
+                weights = np.ones(len(labels), dtype=np.float32)
+        else:
+            weights = np.ones(len(labels), dtype=np.float32)
 
         if teacher_add_labels and len(teacher_xy) > 0:
             teacher_keep = np.ones(len(teacher_xy), dtype=bool)
@@ -249,10 +267,22 @@ def _apply_teacher_guidance_inplace(
                 add_xy = add_xy[~_points_near(add_xy, labels, radius=0.0025)]
             if len(add_xy) > 0:
                 labels = np.concatenate([labels, add_xy.astype(np.float32)], axis=0)
+                weights = np.concatenate([
+                    weights,
+                    np.full(len(add_xy), 0.8, dtype=np.float32),
+                ], axis=0)
                 n_teacher_added += len(add_xy)
 
+        before_dedupe = len(labels)
         labels = _dedupe_labels(labels)
+        if len(labels) != before_dedupe:
+            # Fallback to uniform weights after rare teacher dedupe collisions.
+            weights = np.ones(len(labels), dtype=np.float32)
         ds._label_cache[idx] = (labels.astype(np.float32), np.zeros(len(labels), dtype=np.int64), h, w)
+        if hasattr(ds, "_weight_cache"):
+            if len(weights) != len(labels):
+                weights = np.ones(len(labels), dtype=np.float32)
+            ds._weight_cache[idx] = weights.astype(np.float32)
 
     print(
         "  Teacher guidance: "
@@ -323,6 +353,17 @@ def train(args):
         max_sources=1000,
         use_all_bands=(args.euclid_dir is not None),
         augment=True,
+        labels_mode=args.labels_mode,
+        uncertain_ignore=args.uncertain_ignore,
+        uncertain_nsig=args.uncertain_nsig,
+        uncertain_radius_px=args.uncertain_radius_px,
+        synthetic_sources_per_tile=args.synthetic_sources_per_tile,
+        synthetic_prob=args.synthetic_prob,
+        synthetic_min_snr=args.synthetic_min_snr,
+        synthetic_max_snr=args.synthetic_max_snr,
+        synthetic_min_sigma_px=args.synthetic_min_sigma_px,
+        synthetic_max_sigma_px=args.synthetic_max_sigma_px,
+        synthetic_weight=args.synthetic_weight,
     )
     _apply_extra_labels_inplace(full_ds, args.extra_labels)
     _apply_teacher_guidance_inplace(
@@ -457,6 +498,7 @@ def train(args):
                 out,
                 [c.to(device) for c in batch["centroids"]],
                 ignore_masks=ignore_masks,
+                gt_weights=[w.to(device) for w in batch.get("source_weights", [])] or None,
             )
 
             optimizer.zero_grad()
@@ -502,6 +544,7 @@ def train(args):
                         out,
                         [c.to(device) for c in batch["centroids"]],
                         ignore_masks=ignore_masks,
+                        gt_weights=[w.to(device) for w in batch.get("source_weights", [])] or None,
                     )
                     val_loss_sum += float(losses["loss_total"])
                     val_batches += 1
@@ -569,6 +612,24 @@ if __name__ == "__main__":
     p.add_argument("--batch_size", type=int, default=1)
     p.add_argument("--lr", type=float, default=1e-4)
     p.add_argument("--nsig", type=float, default=3.0)
+    p.add_argument("--labels_mode", default="vis_peak", choices=["vis_peak", "multiband"],
+                   help="Pseudo-label source: improved VIS classical labels or multi-band SEP labels")
+    p.add_argument("--uncertain_ignore", action="store_true",
+                   help="Ignore negative heatmap loss around low-threshold uncertain source proposals")
+    p.add_argument("--uncertain_nsig", type=float, default=1.8,
+                   help="Low-threshold proposal significance for uncertainty ignore masks")
+    p.add_argument("--uncertain_radius_px", type=float, default=5.0,
+                   help="VIS-pixel radius ignored around uncertain proposals")
+    p.add_argument("--synthetic_sources_per_tile", type=int, default=0,
+                   help="Number of synthetic perfect-label sources injected per augmented training tile")
+    p.add_argument("--synthetic_prob", type=float, default=1.0,
+                   help="Probability of injecting synthetic sources into a training tile")
+    p.add_argument("--synthetic_min_snr", type=float, default=5.0)
+    p.add_argument("--synthetic_max_snr", type=float, default=20.0)
+    p.add_argument("--synthetic_min_sigma_px", type=float, default=1.1)
+    p.add_argument("--synthetic_max_sigma_px", type=float, default=3.5)
+    p.add_argument("--synthetic_weight", type=float, default=1.5,
+                   help="Positive loss weight for synthetic perfect-label sources")
     p.add_argument("--sigma", type=float, default=2.0)
     p.add_argument("--stream_ch", type=int, default=16)
     p.add_argument("--base_ch", type=int, default=32)

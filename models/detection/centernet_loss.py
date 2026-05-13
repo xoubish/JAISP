@@ -18,7 +18,8 @@ def render_heatmap_targets(
     feat_w: int,
     sigma: float = 2.0,
     device: torch.device = None,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    gt_weights: List[torch.Tensor] = None,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Render Gaussian-splat heatmap targets from normalized GT centroids.
 
     Returns
@@ -26,12 +27,14 @@ def render_heatmap_targets(
     hm_target  : [B, 1, H, W]  heatmap target (max of Gaussians, in [0, 1])
     off_target : [B, 2, H, W]  sub-pixel offset target (fractional part)
     off_mask   : [B, 1, H, W]  mask: 1 at GT integer positions, 0 elsewhere
+    weight_map : [B, 1, H, W]  source confidence weight at GT positions
     n_sources  : [B]            number of GT sources per sample
     """
     B = len(gt_centroids)
     hm = torch.zeros(B, 1, feat_h, feat_w, device=device)
     off = torch.zeros(B, 2, feat_h, feat_w, device=device)
     mask = torch.zeros(B, 1, feat_h, feat_w, device=device)
+    weight_map = torch.zeros(B, 1, feat_h, feat_w, device=device)
     n_src = torch.zeros(B, device=device)
 
     # Pre-compute 1-D coordinate vectors (reused for bounding-box sub-grids)
@@ -50,6 +53,10 @@ def render_heatmap_targets(
         pts = pts.to(device=device, dtype=torch.float32)
         M = pts.shape[0]
         n_src[b] = M
+        if gt_weights is not None and gt_weights[b] is not None and gt_weights[b].shape[0] == M:
+            weights = gt_weights[b].to(device=device, dtype=torch.float32).clamp(min=0.0)
+        else:
+            weights = torch.ones(M, device=device, dtype=torch.float32)
 
         # Convert normalized coords to feature-map pixel coords
         cx = pts[:, 0] * (feat_w - 1)   # [M]
@@ -81,8 +88,12 @@ def render_heatmap_targets(
         off[b, 0, cy_int, cx_int] = cx - cx_int.float()
         off[b, 1, cy_int, cx_int] = cy - cy_int.float()
         mask[b, 0, cy_int, cx_int] = 1.0
+        weight_map[b, 0, cy_int, cx_int] = torch.maximum(
+            weight_map[b, 0, cy_int, cx_int],
+            weights,
+        )
 
-    return hm, off, mask, n_src
+    return hm, off, mask, weight_map, n_src
 
 
 def focal_loss(
@@ -91,6 +102,7 @@ def focal_loss(
     alpha: float = 2.0,
     beta: float = 4.0,
     ignore_mask: torch.Tensor = None,  # [B, 1, H, W] bool; suppress negative loss only
+    pos_weight: torch.Tensor = None,    # [B, 1, H, W] float; weights positive centers
 ) -> torch.Tensor:
     """Modified focal loss from CornerNet / CenterNet.
 
@@ -108,10 +120,15 @@ def focal_loss(
     if ignore_mask is not None:
         neg_mask = neg_mask * (~ignore_mask.bool()).float()
 
-    pos_loss = -((1 - pred) ** alpha) * torch.log(pred) * pos_mask
+    if pos_weight is None:
+        pos_weight = pos_mask
+    else:
+        pos_weight = pos_weight.to(device=pred.device, dtype=pred.dtype) * pos_mask
+
+    pos_loss = -((1 - pred) ** alpha) * torch.log(pred) * pos_weight
     neg_loss = -((1 - target) ** beta) * (pred ** alpha) * torch.log(1 - pred) * neg_mask
 
-    n_pos = pos_mask.sum().clamp(min=1.0)
+    n_pos = pos_weight.sum().clamp(min=1.0)
     return (pos_loss.sum() + neg_loss.sum()) / n_pos
 
 
@@ -145,14 +162,16 @@ class CenterNetLoss(nn.Module):
         gt_centroids: List[torch.Tensor],
         gt_log_flux: List[torch.Tensor] = None,
         ignore_masks: torch.Tensor = None,
+        gt_weights: List[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
         hm_pred = pred['heatmap']                    # [B, 1, H, W]
         off_pred = pred['offset']                    # [B, 2, H, W]
         flux_pred = pred['log_flux']                 # [B, H, W]
         B, _, H, W = hm_pred.shape
 
-        hm_target, off_target, off_mask, n_src = render_heatmap_targets(
+        hm_target, off_target, off_mask, weight_map, n_src = render_heatmap_targets(
             gt_centroids, H, W, sigma=self.sigma, device=hm_pred.device,
+            gt_weights=gt_weights,
         )
 
         ignore = None
@@ -169,11 +188,12 @@ class CenterNetLoss(nn.Module):
                 ignore = ignore.bool()
 
         # Heatmap focal loss
-        loss_hm = focal_loss(hm_pred, hm_target, ignore_mask=ignore)
+        loss_hm = focal_loss(hm_pred, hm_target, ignore_mask=ignore, pos_weight=weight_map)
 
         # Offset L1 (only at GT positions)
-        n_pos = off_mask.sum().clamp(min=1.0)
-        loss_off = (torch.abs(off_pred - off_target) * off_mask).sum() / n_pos
+        weighted_mask = off_mask * weight_map.clamp(min=0.0)
+        n_pos = weighted_mask.sum().clamp(min=1.0)
+        loss_off = (torch.abs(off_pred - off_target) * weighted_mask).sum() / n_pos
 
         # Flux L1 (only at GT positions, if available)
         loss_flux = hm_pred.new_zeros(1)
@@ -186,7 +206,7 @@ class CenterNetLoss(nn.Module):
                     cy_int = (pts[:, 1] * (H - 1)).round().long().clamp(0, H - 1)
                     fl = gt_log_flux[b].to(device=hm_pred.device, dtype=torch.float32)
                     flux_target[b, cy_int, cx_int] = fl
-            loss_flux = (torch.abs(flux_pred - flux_target) * off_mask.squeeze(1)).sum() / n_pos
+            loss_flux = (torch.abs(flux_pred - flux_target) * weighted_mask.squeeze(1)).sum() / n_pos
 
         losses = {
             'loss_hm':    self.lambda_hm   * loss_hm,
@@ -195,4 +215,7 @@ class CenterNetLoss(nn.Module):
         }
         losses['loss_total'] = sum(losses.values())
         losses['n_sources'] = n_src.mean()
+        losses['mean_source_weight'] = (
+            weight_map.sum() / off_mask.sum().clamp(min=1.0)
+        )
         return losses
