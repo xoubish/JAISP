@@ -86,6 +86,17 @@ def _run_training_round(
     sigma: float = 2.0,
     nsig: float = 3.0,
     head_ch: int = 256,
+    labels_mode: str = 'vis_peak',
+    uncertain_ignore: bool = False,
+    uncertain_nsig: float = 1.8,
+    uncertain_radius_px: float = 5.0,
+    synthetic_sources_per_tile: int = 0,
+    synthetic_prob: float = 1.0,
+    synthetic_min_snr: float = 5.0,
+    synthetic_max_snr: float = 20.0,
+    synthetic_min_sigma_px: float = 1.1,
+    synthetic_max_sigma_px: float = 3.5,
+    synthetic_weight: float = 1.5,
     viz_spike_veto_radius: int = 0,
     viz_spike_veto_width: float = 0.0,
     device: torch.device = None,
@@ -105,6 +116,16 @@ def _run_training_round(
         '--sigma', str(sigma),
         '--nsig', str(nsig),
         '--head_ch', str(head_ch),
+        '--labels_mode', labels_mode,
+        '--uncertain_nsig', str(uncertain_nsig),
+        '--uncertain_radius_px', str(uncertain_radius_px),
+        '--synthetic_sources_per_tile', str(synthetic_sources_per_tile),
+        '--synthetic_prob', str(synthetic_prob),
+        '--synthetic_min_snr', str(synthetic_min_snr),
+        '--synthetic_max_snr', str(synthetic_max_snr),
+        '--synthetic_min_sigma_px', str(synthetic_min_sigma_px),
+        '--synthetic_max_sigma_px', str(synthetic_max_sigma_px),
+        '--synthetic_weight', str(synthetic_weight),
         '--viz_spike_veto_radius', str(viz_spike_veto_radius),
         '--viz_spike_veto_width', str(viz_spike_veto_width),
     ]
@@ -114,6 +135,8 @@ def _run_training_round(
         cmd += ['--extra_labels', extra_labels]
     if init_checkpoint:
         cmd += ['--init_checkpoint', init_checkpoint]
+    if uncertain_ignore:
+        cmd += ['--uncertain_ignore']
     if wandb_project:
         cmd += ['--wandb_project', wandb_project]
     if wandb_name:
@@ -161,14 +184,24 @@ def _refine_labels(
     if device is None:
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    # Load trained model (head only)
+    # Load trained model (head only). Checkpoints saved from the live-encoder
+    # training path contain encoder.* weights; strip them — refinement runs on
+    # cached features so the encoder is irrelevant here.
     ckpt = torch.load(checkpoint, map_location='cpu', weights_only=True)
     model = CenterNetDetector(
         encoder=None,
         encoder_dim=ckpt['encoder_dim'],
         head_ch=ckpt.get('head_ch', 256),
     )
-    model.load_state_dict(ckpt['state_dict'])
+    head_state = {k: v for k, v in ckpt['state_dict'].items()
+                  if not k.startswith('encoder.')}
+    missing, unexpected = model.load_state_dict(head_state, strict=False)
+    missing_non_encoder = [k for k in missing if not k.startswith('encoder.')]
+    if missing_non_encoder:
+        raise RuntimeError(
+            f'Missing detector keys in {checkpoint}: {missing_non_encoder}')
+    if unexpected:
+        print(f'  [warn] Unexpected keys in {checkpoint}: {unexpected}')
     model = model.to(device).eval()
 
     feature_dir = Path(feature_dir)
@@ -398,6 +431,24 @@ def main():
     p.add_argument('--sigma',       type=float, default=2.0)
     p.add_argument('--head_ch',     type=int, default=256,
                    help='CenterNet decoder width. Lower is faster/lighter; default 256.')
+    p.add_argument('--labels_mode', default='vis_peak', choices=['vis_peak', 'multiband'],
+                   help='Pseudo-label source: improved VIS classical labels or multi-band SEP labels')
+    p.add_argument('--uncertain_ignore', action='store_true',
+                   help='Ignore negative heatmap loss around low-threshold uncertain source proposals')
+    p.add_argument('--uncertain_nsig', type=float, default=1.8,
+                   help='Low-threshold proposal significance for uncertainty ignore masks')
+    p.add_argument('--uncertain_radius_px', type=float, default=5.0,
+                   help='VIS-pixel radius ignored around uncertain proposals')
+    p.add_argument('--synthetic_sources_per_tile', type=int, default=0,
+                   help='Number of synthetic perfect-label sources injected per augmented training tile')
+    p.add_argument('--synthetic_prob', type=float, default=1.0,
+                   help='Probability of injecting synthetic sources into a training tile')
+    p.add_argument('--synthetic_min_snr', type=float, default=5.0)
+    p.add_argument('--synthetic_max_snr', type=float, default=20.0)
+    p.add_argument('--synthetic_min_sigma_px', type=float, default=1.1)
+    p.add_argument('--synthetic_max_sigma_px', type=float, default=3.5)
+    p.add_argument('--synthetic_weight', type=float, default=1.5,
+                   help='Positive loss weight for synthetic perfect-label sources')
     p.add_argument('--promote_conf', type=float, default=0.8,
                    help='Confidence threshold for promoting novel detections')
     p.add_argument('--demote_conf', type=float, default=0.3,
@@ -429,7 +480,16 @@ def main():
                    help='Maximum bright/extended rescue labels to add per tile')
     p.add_argument('--init_checkpoint', default=None,
                    help='Existing detector checkpoint to bootstrap from when start_round > 1')
+    p.add_argument('--refine_only', action='store_true',
+                   help='Run label refinement against --init_checkpoint and exit. '
+                        'Writes refined_labels_round1.pt to --out_dir. Use when you '
+                        'want to drive round-2 training manually via train_centernet.py '
+                        '(e.g. to preserve uncertain/synthetic flags that the cached '
+                        'training path does not support).')
     p.add_argument('--wandb_project', default=None)
+    p.add_argument('--wandb_run', default=None,
+                   help='W&B run name. If set, used verbatim (collides across rounds); '
+                        'if unset, defaults to "round{N}" per round.')
     args = p.parse_args()
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -438,6 +498,37 @@ def main():
 
     extra_labels_path = None
     init_checkpoint = args.init_checkpoint
+
+    if args.refine_only:
+        if not init_checkpoint:
+            raise ValueError('--refine_only requires --init_checkpoint')
+        print(f'\n--- Refine-only mode: refining labels against {init_checkpoint} ---')
+        promoted, demoted_labels = _refine_labels(
+            feature_dir=args.feature_dir,
+            checkpoint=init_checkpoint,
+            rubin_dir=args.rubin_dir,
+            euclid_dir=args.euclid_dir,
+            nsig=args.nsig,
+            promote_conf=args.promote_conf,
+            demote_conf=args.demote_conf,
+            match_radius=args.match_radius,
+            promotion_spike_radius=args.promotion_spike_radius,
+            promotion_spike_width=args.promotion_spike_width,
+            bright_rescue=args.bright_rescue,
+            bright_rescue_nsig=args.bright_rescue_nsig,
+            bright_rescue_min_area=args.bright_rescue_min_area,
+            bright_rescue_min_radius=args.bright_rescue_min_radius,
+            bright_rescue_min_peak_snr=args.bright_rescue_min_peak_snr,
+            bright_rescue_match_scale=args.bright_rescue_match_scale,
+            bright_rescue_match_min=args.bright_rescue_match_min,
+            bright_rescue_match_max=args.bright_rescue_match_max,
+            bright_rescue_max_per_tile=args.bright_rescue_max_per_tile,
+            device=device,
+        )
+        out_path = str(out_dir / 'refined_labels_round1.pt')
+        torch.save({'promoted': promoted, 'demoted': demoted_labels}, out_path)
+        print(f'Saved refined labels to {out_path}')
+        return
 
     if args.start_round < 1 or args.start_round > args.rounds:
         raise ValueError(f'--start_round must be between 1 and --rounds ({args.rounds})')
@@ -494,11 +585,22 @@ def main():
             sigma=args.sigma,
             nsig=args.nsig,
             head_ch=args.head_ch,
+            labels_mode=args.labels_mode,
+            uncertain_ignore=args.uncertain_ignore,
+            uncertain_nsig=args.uncertain_nsig,
+            uncertain_radius_px=args.uncertain_radius_px,
+            synthetic_sources_per_tile=args.synthetic_sources_per_tile,
+            synthetic_prob=args.synthetic_prob,
+            synthetic_min_snr=args.synthetic_min_snr,
+            synthetic_max_snr=args.synthetic_max_snr,
+            synthetic_min_sigma_px=args.synthetic_min_sigma_px,
+            synthetic_max_sigma_px=args.synthetic_max_sigma_px,
+            synthetic_weight=args.synthetic_weight,
             viz_spike_veto_radius=args.promotion_spike_radius,
             viz_spike_veto_width=args.promotion_spike_width,
             device=device,
             wandb_project=args.wandb_project,
-            wandb_name=f'round{round_num}',
+            wandb_name=args.wandb_run if args.wandb_run else f'round{round_num}',
         )
         init_checkpoint = None
 

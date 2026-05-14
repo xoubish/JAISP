@@ -25,7 +25,8 @@ Run::
         --rubin-dir   data/rubin_tiles_all \\
         --euclid-dir  data/euclid_tiles_all \\
         --out-dir     data/psf_training_gaia \\
-        --stamp-size  32
+        --stamp-size  32 \\
+        --max-centroid-resid-px 1.0
 """
 
 import argparse
@@ -226,11 +227,11 @@ def main():
     p.add_argument(
         "--max-centroid-resid-px",
         type=float,
-        default=0.35,
+        default=1.0,
         help=(
             "Reject stamps whose post-cut aperture centroid differs from the "
             "recorded sub-pixel centre by more than this many native pixels. "
-            "Set <=0 to disable."
+            "Default: 1.0. Set <=0 to disable."
         ),
     )
     p.add_argument("--centroid-ap-radius", type=float, default=5.0)
