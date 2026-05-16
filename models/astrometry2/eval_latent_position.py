@@ -9,17 +9,19 @@ full multi-band latent representation.
 Regimes compared per band:
   1. Raw offset:        band centroid in VIS frame vs VIS centroid
   2. Head-corrected:    head prediction applied to the projected position
-  3. Head + PSFField:   head output further polished by PSFField template fit
-                        (optional, enabled via --psf-checkpoint)
+  3. ePSF centroids:    optional FoundationEPSFHead centroid engine for a
+                        fresh PSF-label ablation
+  4. Head + PSFField:   optional archived PSFField polish for old comparisons
 
 Usage:
     PYTHONPATH=models python models/astrometry2/eval_latent_position.py \
         --rubin-dir  data/rubin_tiles_all \
         --euclid-dir data/euclid_tiles_all \
-        --foundation-checkpoint models/checkpoints/jaisp_v8_fine/checkpoint_best.pt \
-        --head-checkpoint models/checkpoints/latent_position_v8_no_psf/best.pt \
-        --psf-checkpoint  models/checkpoints/psf_field_v3.pt \
-        --output-dir      models/checkpoints/latent_position_v8_no_psf/eval
+        --foundation-checkpoint models/checkpoints/jaisp_v10_warmstart/checkpoint_best.pt \
+        --head-checkpoint models/checkpoints/latent_position_v10_no_psf/best.pt \
+        --detector-labels data/detection_labels/centernet_v10_790_thresh03.pt \
+        --save-anchors models/checkpoints/latent_position_v10_no_psf/anchors_centernet_v10.npz \
+        --output-dir      models/checkpoints/latent_position_v10_no_psf/eval_centernet
 """
 
 import argparse
@@ -65,6 +67,36 @@ from source_matching import (
 from astropy.wcs import WCS
 
 
+def load_neural_detector(
+    detector_checkpoint: str,
+    foundation_checkpoint: str,
+    device: torch.device,
+):
+    """Load either the fused CenterNet or native-stem CenterNet detector."""
+    from load_foundation import load_foundation
+
+    ckpt = torch.load(detector_checkpoint, map_location='cpu', weights_only=True)
+    model_type = ckpt.get('model_type', 'centernet')
+    det_foundation = load_foundation(foundation_checkpoint, device=device, freeze=True)
+
+    if model_type == 'stem_centernet':
+        from detection.stem_centernet_detector import StemCenterNetDetector
+        detector = StemCenterNetDetector.load(
+            detector_checkpoint, foundation=det_foundation, device=device,
+        )
+    elif model_type == 'centernet':
+        from detection.centernet_detector import CenterNetDetector
+        from detection.detector import JAISPEncoderWrapper
+        det_encoder = JAISPEncoderWrapper(det_foundation, freeze=True).to(device)
+        detector = CenterNetDetector.load(
+            detector_checkpoint, encoder=det_encoder, device=device,
+        )
+    else:
+        raise ValueError(f'Unsupported detector model_type={model_type!r} in {detector_checkpoint}')
+
+    return detector.eval(), model_type
+
+
 # ============================================================
 # Per-band centroiding and projection to VIS
 # ============================================================
@@ -76,6 +108,13 @@ def centroid_in_band_and_project(
     vis_wcs: WCS,
     refine_radius: int = 3,
     fwhm_guess: float = 3.0,
+    band_rms: np.ndarray = None,
+    epsf_head=None,
+    epsf_features: Dict[str, object] = None,
+    epsf_stamp_size: int = 21,
+    epsf_search_radius_px: float = 0.5,
+    epsf_search_steps: int = 7,
+    band_name: str = '',
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Centroid sources in a single band and project back to VIS frame.
 
@@ -122,11 +161,32 @@ def centroid_in_band_and_project(
     if not valid.any():
         return band_xy_in_vis, offset_arcsec, valid, snr
 
-    # PSF-fit centroid in the band's native pixel frame
-    refined_xy, band_snr, _ = refine_centroids_psf_fit(
-        band_img, seed_xy[valid],
-        radius=refine_radius, fwhm_guess=fwhm_guess,
-    )
+    # Centroid in the band's native pixel frame: Foundation ePSF if requested,
+    # otherwise the historical circular-Gaussian photon centroid convention.
+    if epsf_head is not None:
+        from psf.epsf_centroid_refinement import refine_centroids_foundation_epsf
+        epsf_features = epsf_features or {}
+        refined_xy, band_snr, _ = refine_centroids_foundation_epsf(
+            band_img,
+            seed_xy[valid],
+            epsf_head,
+            band_name=band_name,
+            tile_hw=band_img.shape,
+            rms=band_rms,
+            bottleneck=epsf_features.get('bottleneck'),
+            vis_stem_features=epsf_features.get('vis_stem'),
+            source_positions_vis=vis_xy[valid],
+            fused_hw=epsf_features.get('fused_hw'),
+            vis_hw=epsf_features.get('vis_hw'),
+            stamp_size=epsf_stamp_size,
+            search_radius_px=epsf_search_radius_px,
+            search_steps=epsf_search_steps,
+        )
+    else:
+        refined_xy, band_snr, _ = refine_centroids_psf_fit(
+            band_img, seed_xy[valid],
+            radius=refine_radius, fwhm_guess=fwhm_guess,
+        )
     snr[valid] = band_snr
 
     # Project refined band positions back to VIS frame
@@ -168,42 +228,70 @@ def evaluate(args):
     head.eval()
     print(f'Loaded head from {args.head_checkpoint} (epoch {head_ckpt.get("epoch", "?")})')
 
-    # Optional PSFField for inference-time sub-pixel polish
+    # Optional PSF model for centroiding / inference-time sub-pixel polish.
     psf_field = None
+    epsf_head = None
     if args.psf_checkpoint:
-        from psf.psf_field import PSFField
         pckpt = torch.load(args.psf_checkpoint, map_location='cpu', weights_only=False)
-        pcfg = pckpt['config']
-        psf_field = PSFField(
-            sed_embed_dim=pcfg['sed_embed_dim'],
-            band_embed_dim=pcfg['band_embed_dim'],
-            tile_freqs=pcfg['tile_freqs'],
-            siren_hidden=pcfg['siren_hidden'],
-            siren_depth=pcfg['siren_depth'],
-            w0_first=pcfg['w0_first'],
-            envelope_r_rubin=pcfg.get('envelope_r_rubin', 0.0),
-            envelope_r_euclid=pcfg.get('envelope_r_euclid', 0.0),
-            envelope_power=pcfg.get('envelope_power', 4.0),
-        ).to(device).eval()
-        psf_field.load_state_dict(pckpt['psf_field_state'])
-        print(f'Loaded PSFField from {args.psf_checkpoint}')
+        if 'psf_field_state' in pckpt:
+            from psf.psf_field import PSFField
+            pcfg = pckpt['config']
+            psf_field = PSFField(
+                sed_embed_dim=pcfg['sed_embed_dim'],
+                band_embed_dim=pcfg['band_embed_dim'],
+                tile_freqs=pcfg['tile_freqs'],
+                siren_hidden=pcfg['siren_hidden'],
+                siren_depth=pcfg['siren_depth'],
+                w0_first=pcfg['w0_first'],
+                envelope_r_rubin=pcfg.get('envelope_r_rubin', 0.0),
+                envelope_r_euclid=pcfg.get('envelope_r_euclid', 0.0),
+                envelope_power=pcfg.get('envelope_power', 4.0),
+            ).to(device).eval()
+            psf_field.load_state_dict(pckpt['psf_field_state'])
+            print(f'Loaded archived PSFField from {args.psf_checkpoint}')
+        else:
+            from psf.foundation_epsf_head import load_foundation_epsf_head
+            epsf_head = load_foundation_epsf_head(args.psf_checkpoint, device=device)
+            print(f'Loaded FoundationEPSFHead from {args.psf_checkpoint}')
+
+    if args.centroid_engine == 'epsf' and epsf_head is None:
+        raise ValueError('--centroid-engine epsf requires a FoundationEPSFHead --psf-checkpoint')
 
     # Optional neural detector for VIS seed positions (replaces classical peak-finder).
-    # Re-uses the same foundation as the head, so memory cost is one extra wrapper + small CenterNet head.
+    # The detector can use a different foundation checkpoint from the latent head
+    # so revised v10 detectors do not have to be forced through the v8 encoder.
     neural_detector = None
+    detector_labels = None
+    if args.detector_labels:
+        label_payload = torch.load(args.detector_labels, map_location='cpu', weights_only=False)
+        detector_labels = label_payload['labels'] if 'labels' in label_payload else label_payload
+        cfg = label_payload.get('config', {}) if isinstance(label_payload, dict) else {}
+        print(
+            f'Loaded exported detector labels from {args.detector_labels} '
+            f'for {len(detector_labels)} tiles'
+        )
+        if cfg:
+            print(
+                f'  label config: conf_threshold={cfg.get("conf_threshold", "?")}, '
+                f'n_tiles={cfg.get("n_tiles", "?")}'
+            )
     if args.detector_checkpoint:
-        from detection.centernet_detector import CenterNetDetector
-        from detection.detector import JAISPEncoderWrapper
-        from load_foundation import load_foundation
-        det_foundation = load_foundation(args.foundation_checkpoint, device=device, freeze=True)
-        det_encoder = JAISPEncoderWrapper(det_foundation, freeze=True).to(device)
-        neural_detector = CenterNetDetector.load(
-            args.detector_checkpoint, encoder=det_encoder, device=device,
-        ).eval()
-        print(f'Loaded CenterNet detector from {args.detector_checkpoint} '
-              f'(conf >= {args.detector_conf_threshold}); replacing classical VIS detection.')
+        det_foundation_ckpt = args.detector_foundation_checkpoint or args.foundation_checkpoint
+        neural_detector, detector_model_type = load_neural_detector(
+            args.detector_checkpoint,
+            det_foundation_ckpt,
+            device,
+        )
+        print(
+            f'Loaded {detector_model_type} detector from {args.detector_checkpoint} '
+            f'(conf >= {args.detector_conf_threshold}); replacing classical VIS detection.'
+        )
+        if det_foundation_ckpt != args.foundation_checkpoint:
+            print(f'  detector foundation: {det_foundation_ckpt}')
 
     pairs = discover_tile_pairs(args.rubin_dir, args.euclid_dir)
+    if args.max_tiles > 0:
+        pairs = pairs[:args.max_tiles]
     print(f'Evaluating on {len(pairs)} tiles')
 
     # Define all 9 non-VIS bands
@@ -230,15 +318,32 @@ def evaluate(args):
             rdata = np.load(rubin_path, allow_pickle=True)
             edata = np.load(euclid_path, allow_pickle=True)
             rubin_cube = rdata['img']
+            rubin_var = rdata['var'] if 'var' in rdata.files else None
             vis_img = np.nan_to_num(_to_float32(edata['img_VIS']), nan=0.0)
+            vis_var = _to_float32(edata['var_VIS']) if 'var_VIS' in edata.files else None
+            vis_rms = (
+                np.maximum(np.nan_to_num(np.sqrt(np.clip(vis_var, 0, None)), nan=1.0), 1e-10)
+                if vis_var is not None else None
+            )
             vhdr = safe_header_from_card_string(edata['wcs_VIS'].item())
             vwcs = WCS(vhdr)
             rwcs = WCS(rdata['wcs_hdr'].item())
         except Exception:
             continue
 
-        # Detect in VIS (classical or neural) and PSF-refine → these are the "true" positions
-        if neural_detector is not None:
+        # Detect in VIS (exported CenterNet labels, on-the-fly neural detector, or classical)
+        # and PSF-refine -> these are the "true" positions.
+        if detector_labels is not None and tile_id in detector_labels:
+            entry = detector_labels[tile_id]
+            xy_norm = entry[0] if isinstance(entry, tuple) else entry
+            xy_norm = np.asarray(xy_norm, dtype=np.float32)
+            H_vis, W_vis = vis_hw
+            det_px = np.stack([
+                xy_norm[:, 0] * max(W_vis - 1, 1),
+                xy_norm[:, 1] * max(H_vis - 1, 1),
+            ], axis=1).astype(np.float32)
+            vx, vy = det_px[:, 0], det_px[:, 1]
+        elif neural_detector is not None:
             from astrometry2.dataset import build_full_context_detector_inputs, detect_sources_neural
             rubin_var = rdata['var'] if 'var' in rdata.files else None
             tile_images, tile_rms, tile_hw = build_full_context_detector_inputs(
@@ -258,16 +363,38 @@ def evaluate(args):
         vis_keep = signal_mask_in_band(vis_img, vis_seed, radius=3)
         if vis_keep.sum() < 10:
             continue
-        vis_xy, vis_snr, _ = refine_centroids_psf_fit(
-            vis_img, vis_seed[vis_keep], radius=3, fwhm_guess=2.5,
-        )
-        vis_xy = vis_xy.astype(np.float32)
-        N = vis_xy.shape[0]
 
-        # Run frozen encoder (once per tile)
+        # Run frozen encoder once per tile.  The astrometry head always needs
+        # this, and ePSF centroiding also consumes these features.
         with torch.no_grad():
             enc_out = frozen_encoder.encode_tile(img_t, rms_t)
         del img_t, rms_t
+
+        if args.centroid_engine == 'epsf':
+            from psf.epsf_centroid_refinement import refine_centroids_foundation_epsf
+            vis_xy, vis_snr, _ = refine_centroids_foundation_epsf(
+                vis_img,
+                vis_seed[vis_keep],
+                epsf_head,
+                band_name='euclid_VIS',
+                tile_hw=vis_img.shape,
+                rms=vis_rms,
+                bottleneck=enc_out['bottleneck'],
+                vis_stem_features=enc_out['vis_stem'],
+                source_positions_vis=vis_seed[vis_keep],
+                fused_hw=enc_out['fused_hw'],
+                vis_hw=vis_hw,
+                stamp_size=args.epsf_centroid_stamp_size,
+                search_radius_px=args.epsf_centroid_search_px,
+                search_steps=args.epsf_centroid_search_steps,
+                flux_floor_sigma=1.0,
+            )
+        else:
+            vis_xy, vis_snr, _ = refine_centroids_psf_fit(
+                vis_img, vis_seed[vis_keep], radius=3, fwhm_guess=2.5,
+            )
+        vis_xy = vis_xy.astype(np.float32)
+        N = vis_xy.shape[0]
 
         # ---- Per-band evaluation ----
         for band_name in all_bands:
@@ -278,15 +405,28 @@ def evaluate(args):
                 if bidx >= rubin_cube.shape[0]:
                     continue
                 band_img = np.nan_to_num(_to_float32(rubin_cube[bidx]), nan=0.0)
+                band_rms = (
+                    np.maximum(
+                        np.nan_to_num(np.sqrt(np.clip(_to_float32(rubin_var[bidx]), 0, None)), nan=1.0),
+                        1e-10,
+                    )
+                    if rubin_var is not None else None
+                )
                 band_wcs = rwcs
                 fwhm = 3.0  # Rubin PSF ~3 px at 0.2"/px
             elif band_name.startswith('nisp_'):
                 short = band_name.split('_', 1)[1]
                 img_key = f'img_{short}'
+                var_key = f'var_{short}'
                 wcs_key = f'wcs_{short}'
                 if img_key not in edata or wcs_key not in edata:
                     continue
                 band_img = np.nan_to_num(_to_float32(edata[img_key]), nan=0.0)
+                band_var = _to_float32(edata[var_key]) if var_key in edata.files else None
+                band_rms = (
+                    np.maximum(np.nan_to_num(np.sqrt(np.clip(band_var, 0, None)), nan=1.0), 1e-10)
+                    if band_var is not None else None
+                )
                 try:
                     band_wcs = WCS(safe_header_from_card_string(edata[wcs_key].item()))
                 except Exception:
@@ -294,11 +434,27 @@ def evaluate(args):
                 fwhm = 2.5  # NISP PSF ~2.5 px at 0.1"/px
             else:
                 continue
+            epsf_band_name = (
+                f'euclid_{band_name.split("_", 1)[1]}'
+                if band_name.startswith('nisp_') else band_name
+            )
 
             # Centroid in this band, project to VIS frame
             band_xy_vis, offset_arcsec, valid, band_snr = centroid_in_band_and_project(
                 band_img, band_wcs, vis_xy, vwcs,
                 refine_radius=3, fwhm_guess=fwhm,
+                band_rms=band_rms,
+                epsf_head=epsf_head if args.centroid_engine == 'epsf' else None,
+                epsf_features={
+                    'bottleneck': enc_out['bottleneck'],
+                    'vis_stem': enc_out['vis_stem'],
+                    'fused_hw': enc_out['fused_hw'],
+                    'vis_hw': vis_hw,
+                },
+                epsf_stamp_size=args.epsf_centroid_stamp_size,
+                epsf_search_radius_px=args.epsf_centroid_search_px,
+                epsf_search_steps=args.epsf_centroid_search_steps,
+                band_name=epsf_band_name,
             )
             if valid.sum() < 3:
                 continue
@@ -343,7 +499,7 @@ def evaluate(args):
             residual = offset_valid - pred_offset
             head_radial = np.sqrt((residual ** 2).sum(axis=1))
 
-            # Optional: polish head's predicted position with PSFField
+            # Optional: polish head's predicted position with archived PSFField
             # template fit. The head's `band_pos_valid + pred_offset_in_px`
             # is our best VIS-frame estimate; PSFField refines sub-pixel
             # against the actual VIS image intensity.
@@ -475,8 +631,19 @@ def evaluate(args):
         'improvement_pct': float((1 - np.mean(all_hd) / np.mean(all_raw)) * 100),
     }
 
+    run_meta = {
+        'foundation_checkpoint': args.foundation_checkpoint,
+        'head_checkpoint': args.head_checkpoint,
+        'detector_labels': args.detector_labels,
+        'detector_checkpoint': args.detector_checkpoint,
+        'centroid_engine': args.centroid_engine,
+        'psf_checkpoint': args.psf_checkpoint,
+        'epsf_centroid_stamp_size': args.epsf_centroid_stamp_size,
+        'epsf_centroid_search_px': args.epsf_centroid_search_px,
+        'epsf_centroid_search_steps': args.epsf_centroid_search_steps,
+    }
     with open(out_dir / 'results.json', 'w') as f:
-        json.dump({'n_tiles': n_tiles, 'per_band': summary}, f, indent=2)
+        json.dump({'n_tiles': n_tiles, 'config': run_meta, 'per_band': summary}, f, indent=2)
     print(f'\nResults saved to {out_dir / "results.json"}')
 
     # Export per-source anchors for the field solver (PINN / NN / grid)
@@ -591,13 +758,23 @@ def main():
     p.add_argument('--rubin-dir', type=str, required=True)
     p.add_argument('--euclid-dir', type=str, required=True)
     p.add_argument('--foundation-checkpoint', type=str, required=True,
-                   help='Foundation model checkpoint (v7 or v8, auto-detected).')
+                   help='Foundation model checkpoint (v7/v8/v9/v10, auto-detected).')
     p.add_argument('--head-checkpoint', type=str, required=True,
                    help='Trained LatentPositionHead checkpoint.')
     p.add_argument('--psf-checkpoint', type=str, default=None,
-                   help='Optional: trained PSFField checkpoint. If given, '
-                        'also report the head prediction after PSFField '
-                        'sub-pixel refinement.')
+                   help='Optional PSF checkpoint. Supports current FoundationEPSFHead '
+                        'checkpoints for --centroid-engine epsf and archived PSFField '
+                        'checkpoints for post-head polish diagnostics.')
+    p.add_argument('--centroid-engine', choices=['gaussian', 'epsf'], default='gaussian',
+                   help='Centroid convention for VIS and per-band measurements. '
+                        'gaussian preserves the v8 baseline convention; epsf uses '
+                        'the FoundationEPSFHead supplied via --psf-checkpoint.')
+    p.add_argument('--epsf-centroid-stamp-size', type=int, default=21,
+                   help='Native-pixel stamp size for FoundationEPSF centroiding.')
+    p.add_argument('--epsf-centroid-search-px', type=float, default=0.5,
+                   help='Half-width of FoundationEPSF centroid search grid in native pixels.')
+    p.add_argument('--epsf-centroid-search-steps', type=int, default=7,
+                   help='Grid samples per axis for FoundationEPSF centroid search.')
     p.add_argument('--save-anchors', type=str, default=None,
                    help='Optional: save per-source anchors (ra, dec, raw & '
                         'head-corrected offsets, snr, tile_id) as .npz. '
@@ -614,12 +791,22 @@ def main():
                         'Low-SNR sources have unreliable centroids. Default 5.')
     p.add_argument('--detector-checkpoint', type=str, default=None,
                    help='Optional: replace the classical VIS peak finder with a trained '
-                        'CenterNet detector for the seed positions. The same v8 foundation '
-                        'is shared with the head. Recommended: '
-                        'checkpoints/centernet_v8_fine/centernet_best.pt')
+                        'CenterNet detector for the seed positions. Supports fused and '
+                        'stem CenterNet checkpoints.')
+    p.add_argument('--detector-labels', type=str, default=None,
+                   help='Optional exported CenterNet labels .pt from '
+                        'models/detection/run_centernet_detections.py. If set, these '
+                        'detections are used for VIS seed positions and no detector '
+                        'inference is required inside this evaluator.')
+    p.add_argument('--detector-foundation-checkpoint', type=str, default=None,
+                   help='Optional foundation checkpoint for the detector. Defaults to '
+                        '--foundation-checkpoint. Use this for v10/stem detectors while '
+                        'keeping the latent head on its own foundation checkpoint.')
     p.add_argument('--detector-conf-threshold', type=float, default=0.30,
                    help='Confidence threshold for the neural detector. '
                         'Only used with --detector-checkpoint. Default 0.30.')
+    p.add_argument('--max-tiles', type=int, default=0,
+                   help='Limit evaluated tile pairs for smoke tests. 0 = all tiles.')
     p.add_argument('--device', type=str, default='')
     args = p.parse_args()
     evaluate(args)

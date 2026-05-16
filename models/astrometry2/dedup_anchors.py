@@ -3,9 +3,10 @@
 CenterNet anchors are written per-tile by ``eval_latent_position.py
 --save-anchors``; the same physical source detected in two overlapping tiles
 appears once per tile in the saved npz. For density / number-count work we
-need a deduplicated catalogue. For PINN/HGP residual fits the duplicates are
-fine to keep (they carry independent per-tile WCS noise), so this is a
-post-processing step rather than a write-time forced dedup.
+need a deduplicated catalogue. For PINN/HGP residual fits, dedup is also the
+preferred QA default when overlap duplicates would otherwise overweight the
+same sky source; `fit_hierarchical_gp_concordance.py --dedup-radius-arcsec`
+can now apply the same operation in memory at solve time.
 
 Per-band greedy clustering:
   1. Sort entries by SNR descending.

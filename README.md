@@ -8,10 +8,11 @@ Self-supervised multi-instrument foundation model for precision cosmology with R
 
 | Component | Directory | Description |
 |-----------|-----------|-------------|
-| Foundation (V7) | `models/jaisp_foundation_v7.py` | Mixed-resolution masked autoencoder |
-| Detection | `models/detection/` | CenterNet heatmap source detector |
+| Foundation (V10) | `models/jaisp_foundation_v10.py` | Current production multi-instrument MAE backbone |
+| Detection | `models/detection/` | CenterNet and StemCenterNet source detectors |
 | Astrometry | `models/astrometry2/` | Per-object Rubin/Euclid alignment head + concordance QA fields |
-| Photometry | `models/photometry/` | PSFField forced photometry + scarlet-like residual scene fitting |
+| PSF | `models/psf/` | Foundation-conditioned ePSF head and centroid refiner |
+| Photometry | `models/photometry/` | Foundation photometry, rendered-stamp, and residual-scene experiments |
 
 ## Documentation
 
@@ -23,36 +24,42 @@ Self-supervised multi-instrument foundation model for precision cosmology with R
 ## Quick Start
 
 ```bash
-# Foundation training (790 tiles, multi-GPU)
-cd models && torchrun --nproc_per_node=2 train_jaisp_foundation_v7.py \
-    --rubin_dir ../data/rubin_tiles_all --euclid_dir ../data/euclid_tiles_all \
-    --output_dir ./checkpoints/jaisp_v7_concat --epochs 100 --lr 3e-4 \
-    --hidden_ch 256 --cross_instrument_prob 1.0
+# Export v10 CenterNet labels for astrometry anchors
+PYTHONPATH=models python models/detection/run_centernet_detections.py \
+    --encoder_ckpt      models/checkpoints/jaisp_v10_warmstart/checkpoint_best.pt \
+    --centernet_ckpt    checkpoints/centernet_v10_uncertain_synth_r2/centernet_best.pt \
+    --rubin_dir         data/rubin_tiles_all \
+    --euclid_dir        data/euclid_tiles_all \
+    --out               data/detection_labels/centernet_v10_790_thresh03.pt \
+    --conf_threshold    0.3 \
+    --spike_veto_radius 0 \
+    --spike_veto_width  0
 
-# Detection (CenterNet self-training, 200-tile subset)
-python models/detection/self_train.py \
-    --feature_dir  data/cached_features_v7_rms_aware \
-    --rubin_dir    data/rubin_tiles_200 \
-    --euclid_dir   data/euclid_tiles_200 \
-    --out_dir      checkpoints/centernet_v7_rms_aware \
-    --rounds 2 --epochs 100 --batch_size 4
+# Train the v10 Gaussian-centroid astrometry control
+CUDA_VISIBLE_DEVICES=0,1 PYTHONPATH=models python models/astrometry2/train_latent_position.py \
+    --rubin-dir data/rubin_tiles_all --euclid-dir data/euclid_tiles_all \
+    --foundation-checkpoint models/checkpoints/jaisp_v10_warmstart/checkpoint_best.pt \
+    --centernet-labels data/detection_labels/centernet_v10_790_thresh03.pt \
+    --output-dir models/checkpoints/latent_position_v10_no_psf \
+    --epochs 30 --bottleneck-window 5 --dual-gpu
 
-# Astrometry (current v8 latent head, per-object alignment)
+# Evaluate and export anchors for the v10 control
 PYTHONPATH=models python models/astrometry2/eval_latent_position.py \
     --rubin-dir data/rubin_tiles_all --euclid-dir data/euclid_tiles_all \
-    --foundation-checkpoint models/checkpoints/jaisp_v8_fine/checkpoint_best.pt \
-    --head-checkpoint models/checkpoints/latent_position_v8_no_psf/best.pt \
-    --save-anchors models/checkpoints/latent_position_v8_no_psf/anchors.npz \
-    --output-dir models/checkpoints/latent_position_v8_no_psf/eval
+    --foundation-checkpoint models/checkpoints/jaisp_v10_warmstart/checkpoint_best.pt \
+    --head-checkpoint models/checkpoints/latent_position_v10_no_psf/best.pt \
+    --detector-labels data/detection_labels/centernet_v10_790_thresh03.pt \
+    --save-anchors models/checkpoints/latent_position_v10_no_psf/anchors_centernet_v10.npz \
+    --output-dir models/checkpoints/latent_position_v10_no_psf/eval_centernet
 
-# Concordance QA/fallback field from exported anchors
-PYTHONPATH=models python models/astrometry2/fit_direct_pinn.py \
-    --cache models/checkpoints/latent_position_v8_no_psf/anchors.npz \
-    --use-head-resid \
-    --output models/checkpoints/latent_position_v8_no_psf/concordance_pinn_head_resid_fixed.fits \
-    --bands r i g z --include-nisp
+# Fit the residual-field QA product with overlap-anchor deduplication
+PYTHONPATH=models python models/astrometry2/fit_hierarchical_gp_concordance.py \
+    --anchors models/checkpoints/latent_position_v10_no_psf/anchors_centernet_v10.npz \
+    --output models/checkpoints/latent_position_v10_no_psf/concordance_hgp_head_resid_dedup.fits \
+    --offset-kind head_resid --pool all --length-scales 60,180,600 \
+    --dstep-arcsec 5 --dedup-radius-arcsec 0.05 --write-coverage
 ```
 
-Current astrometry finding: the large raw 40-120 mas offsets are dominated by source centering, not by a smooth WCS field. The v8 latent head reduces most bands to ~9-15 mas median residuals (Rubin u: ~30 mas); residual concordance fields after the head are ~1 mas and mainly serve as QA.
+Current astrometry finding: the completed v8 baseline showed that the large raw 40-120 mas offsets are dominated by source centering, not by a smooth WCS field. The current v10 rerun keeps the Gaussian-centroid control, then tests `FoundationEPSFHead` centroiding as a separate PSF ablation.
 
-Current photometry direction: use PSFField matched-filter photometry as the compact-source baseline, then train `models/photometry/foundation_head.py` on frozen V8 features. The training path is CenterNet detections -> latent astrometry correction -> V8 morphology head -> PSFField renderer -> residual chi-square. `models/photometry/scarlet_like.py` remains the per-scene optimizer baseline/refinement reference.
+Current photometry direction: port compact-source baselines from archived PSFField templates to the active `FoundationEPSFHead`; `models/photometry/scarlet_like.py` remains the per-scene optimizer baseline/refinement reference.

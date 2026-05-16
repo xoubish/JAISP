@@ -88,14 +88,20 @@ def detect_and_refine_vis(
     refine_radius: int = 3,
     flux_floor_sigma: float = 1.5,
     psf_field=None,
+    epsf_head=None,
+    vis_rms: np.ndarray = None,
+    epsf_features: Dict[str, object] = None,
+    epsf_stamp_size: int = 21,
+    epsf_search_radius_px: float = 0.5,
+    epsf_search_steps: int = 7,
     psf_device=None,
     detections_vis_px: np.ndarray = None,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Detect sources in VIS and refine centroids.
 
-    Uses PSFField-template centroiding if ``psf_field`` is provided (better
-    sub-pixel accuracy from learned, spatially-varying, chromatic PSF model),
-    otherwise falls back to the classical 2D-Gaussian ``refine_centroids_psf_fit``.
+    Uses FoundationEPSFHead or archived PSFField template centroiding when
+    provided; otherwise falls back to the classical 2D-Gaussian
+    ``refine_centroids_psf_fit``.
 
     If ``detections_vis_px`` is given, skip internal detection and use those
     positions as candidates (e.g. CenterNet pseudo-labels).
@@ -124,8 +130,28 @@ def detect_and_refine_vis(
         return np.zeros((0, 2), dtype=np.float32), np.zeros(0, dtype=np.float32)
     seed_xy = seed_xy[keep]
 
-    # PSFField centroiding (learned, chromatic, spatially-varying) or fallback
-    if psf_field is not None:
+    # Foundation ePSF centroiding, archived PSFField centroiding, or Gaussian fallback.
+    if epsf_head is not None:
+        from psf.epsf_centroid_refinement import refine_centroids_foundation_epsf
+        epsf_features = epsf_features or {}
+        vis_xy, vis_snr, _ = refine_centroids_foundation_epsf(
+            vis_img,
+            seed_xy,
+            epsf_head,
+            band_name='euclid_VIS',
+            tile_hw=vis_img.shape,
+            rms=vis_rms,
+            bottleneck=epsf_features.get('bottleneck'),
+            vis_stem_features=epsf_features.get('vis_stem'),
+            source_positions_vis=seed_xy,
+            fused_hw=epsf_features.get('fused_hw'),
+            vis_hw=epsf_features.get('vis_hw', vis_img.shape),
+            stamp_size=epsf_stamp_size,
+            search_radius_px=epsf_search_radius_px,
+            search_steps=epsf_search_steps,
+            flux_floor_sigma=flux_floor_sigma,
+        )
+    elif psf_field is not None:
         from psf.centroid_refinement import refine_centroids_psf_field
         vis_xy, vis_snr, _ = refine_centroids_psf_field(
             vis_img, seed_xy, psf_field,
@@ -294,6 +320,11 @@ def make_preview_figure(
 
         edata = np.load(euclid_path, allow_pickle=True)
         vis_img_np = np.nan_to_num(_to_float32(edata['img_VIS']), nan=0.0)
+        vis_var_np = _to_float32(edata['var_VIS']) if 'var_VIS' in edata.files else None
+        vis_rms_np = (
+            np.maximum(np.nan_to_num(np.sqrt(np.clip(vis_var_np, 0, None)), nan=1.0), 1e-10)
+            if vis_var_np is not None else None
+        )
 
         vis_xy, vis_snr = detect_and_refine_vis(
             vis_img_np, vis_wcs,
@@ -301,6 +332,17 @@ def make_preview_figure(
             min_dist=args.vis_min_dist, max_sources=args.max_sources_vis,
             refine_radius=args.refine_radius,
             flux_floor_sigma=args.refine_flux_floor_sigma,
+            epsf_head=getattr(args, '_epsf_head', None),
+            vis_rms=vis_rms_np,
+            epsf_features={
+                'bottleneck': enc_out['bottleneck'],
+                'vis_stem': enc_out['vis_stem'],
+                'fused_hw': enc_out['fused_hw'],
+                'vis_hw': vis_hw,
+            },
+            epsf_stamp_size=args.epsf_centroid_stamp_size,
+            epsf_search_radius_px=args.epsf_centroid_search_px,
+            epsf_search_steps=args.epsf_centroid_search_steps,
         )
         if vis_xy.shape[0] < 5:
             return None
@@ -442,6 +484,11 @@ def _prefetch_tile(
     try:
         edata = np.load(euclid_path, allow_pickle=True)
         vis_img_np_arr = np.nan_to_num(_to_float32(edata['img_VIS']), nan=0.0)
+        vis_var_np = _to_float32(edata['var_VIS']) if 'var_VIS' in edata.files else None
+        vis_rms_np_arr = (
+            np.maximum(np.nan_to_num(np.sqrt(np.clip(vis_var_np, 0, None)), nan=1.0), 1e-10)
+            if vis_var_np is not None else None
+        )
     except Exception:
         return None
 
@@ -452,7 +499,8 @@ def _prefetch_tile(
         xy_norm = entry[0] if isinstance(entry, tuple) else entry
         H_vis, W_vis = vis_hw
         det_px = np.stack([
-            xy_norm[:, 0] * W_vis, xy_norm[:, 1] * H_vis,
+            xy_norm[:, 0] * max(W_vis - 1, 1),
+            xy_norm[:, 1] * max(H_vis - 1, 1),
         ], axis=1).astype(np.float32)
 
     vis_xy, vis_snr = detect_and_refine_vis(
@@ -462,6 +510,17 @@ def _prefetch_tile(
         refine_radius=args.refine_radius,
         flux_floor_sigma=args.refine_flux_floor_sigma,
         psf_field=getattr(args, '_psf_field', None),
+        epsf_head=getattr(args, '_epsf_head', None),
+        vis_rms=vis_rms_np_arr,
+        epsf_features={
+            'bottleneck': bottleneck,
+            'vis_stem': vis_stem,
+            'fused_hw': fused_hw,
+            'vis_hw': vis_hw,
+        },
+        epsf_stamp_size=args.epsf_centroid_stamp_size,
+        epsf_search_radius_px=args.epsf_centroid_search_px,
+        epsf_search_steps=args.epsf_centroid_search_steps,
         psf_device=enc_device,
         detections_vis_px=det_px,
     )
@@ -537,6 +596,11 @@ def run_epoch(
                 edata = np.load(euclid_path, allow_pickle=True)
                 vis_img_np_arr = np.nan_to_num(
                     _to_float32(edata['img_VIS']), nan=0.0)
+                vis_var_np = _to_float32(edata['var_VIS']) if 'var_VIS' in edata.files else None
+                vis_rms_np_arr = (
+                    np.maximum(np.nan_to_num(np.sqrt(np.clip(vis_var_np, 0, None)), nan=1.0), 1e-10)
+                    if vis_var_np is not None else None
+                )
             except Exception:
                 return None
             det_px = None
@@ -546,7 +610,8 @@ def run_epoch(
                 xy_norm = entry[0] if isinstance(entry, tuple) else entry
                 H_vis, W_vis = vis_hw
                 det_px = np.stack([
-                    xy_norm[:, 0] * W_vis, xy_norm[:, 1] * H_vis,
+                    xy_norm[:, 0] * max(W_vis - 1, 1),
+                    xy_norm[:, 1] * max(H_vis - 1, 1),
                 ], axis=1).astype(np.float32)
             vis_xy, vis_snr = detect_and_refine_vis(
                 vis_img_np_arr, vis_wcs,
@@ -556,6 +621,17 @@ def run_epoch(
                 refine_radius=args.refine_radius,
                 flux_floor_sigma=args.refine_flux_floor_sigma,
                 psf_field=getattr(args, '_psf_field', None),
+                epsf_head=getattr(args, '_epsf_head', None),
+                vis_rms=vis_rms_np_arr,
+                epsf_features={
+                    'bottleneck': bottleneck,
+                    'vis_stem': vis_stem,
+                    'fused_hw': fused_hw,
+                    'vis_hw': vis_hw,
+                },
+                epsf_stamp_size=args.epsf_centroid_stamp_size,
+                epsf_search_radius_px=args.epsf_centroid_search_px,
+                epsf_search_steps=args.epsf_centroid_search_steps,
                 psf_device=device,
                 detections_vis_px=det_px,
             )
@@ -663,14 +739,21 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--rubin-dir', type=str, required=True)
     p.add_argument('--euclid-dir', type=str, required=True)
     p.add_argument('--foundation-checkpoint', type=str, required=True,
-                   help='Path to the frozen foundation model (v7 or v8, auto-detected).')
+                   help='Path to the frozen foundation model (v7/v8/v9/v10, auto-detected).')
     p.add_argument('--psf-checkpoint', type=str, default=None,
-                   help='Path to a trained PSFField checkpoint (e.g. psf_field_v3.pt). '
-                        'If provided, centroid labels use PSFField-template fitting '
-                        'instead of classical 2D Gaussian.')
+                   help='Path to a trained PSF checkpoint. Supports the current '
+                        'FoundationEPSFHead checkpoints and archived PSFField '
+                        'checkpoints. If provided, VIS centroid labels use PSF '
+                        'template fitting instead of classical 2D Gaussian.')
+    p.add_argument('--epsf-centroid-stamp-size', type=int, default=21,
+                   help='Native-pixel stamp size for FoundationEPSF centroiding.')
+    p.add_argument('--epsf-centroid-search-px', type=float, default=0.5,
+                   help='Half-width of FoundationEPSF centroid search grid in native pixels.')
+    p.add_argument('--epsf-centroid-search-steps', type=int, default=7,
+                   help='Grid samples per axis for FoundationEPSF centroid search.')
     p.add_argument('--centernet-labels', type=str, default=None,
                    help='Path to CenterNet pseudo_labels .pt (e.g. '
-                        'data/detection_labels/centernet_v8_r2_790.pt). '
+                        'data/detection_labels/centernet_v10_790_thresh03.pt). '
                         'If provided, VIS-normalised detections replace classical '
                         'peak-finding for source candidates.')
     p.add_argument('--output-dir', type=str,
@@ -727,6 +810,14 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def serializable_args(args) -> Dict[str, object]:
+    """Return CLI/config args without runtime model/cache objects."""
+    return {
+        k: v for k, v in vars(args).items()
+        if not k.startswith('_')
+    }
+
+
 def train(args):
     device = torch.device(
         args.device if args.device else ('cuda' if torch.cuda.is_available() else 'cpu'),
@@ -750,26 +841,33 @@ def train(args):
         stem_window=args.stem_window,
     )
 
-    # --- PSFField for centroid labels (optional) ---
+    # --- PSF-template centroid labels (optional) ---
+    args._epsf_head = None
     if args.psf_checkpoint:
         import torch as _t
-        from psf.psf_field import PSFField as _PSFField
         _ckpt = _t.load(args.psf_checkpoint, map_location='cpu', weights_only=False)
-        _cfg = _ckpt['config']
-        _psf = _PSFField(
-            sed_embed_dim=_cfg['sed_embed_dim'],
-            band_embed_dim=_cfg['band_embed_dim'],
-            tile_freqs=_cfg['tile_freqs'],
-            siren_hidden=_cfg['siren_hidden'],
-            siren_depth=_cfg['siren_depth'],
-            w0_first=_cfg['w0_first'],
-            envelope_r_rubin=_cfg.get('envelope_r_rubin', 0.0),
-            envelope_r_euclid=_cfg.get('envelope_r_euclid', 0.0),
-            envelope_power=_cfg.get('envelope_power', 4.0),
-        ).to(device).eval()
-        _psf.load_state_dict(_ckpt['psf_field_state'])
-        args._psf_field = _psf
-        print(f'Loaded PSFField from {args.psf_checkpoint}')
+        if 'psf_field_state' in _ckpt:
+            from psf.psf_field import PSFField as _PSFField
+            _cfg = _ckpt['config']
+            _psf = _PSFField(
+                sed_embed_dim=_cfg['sed_embed_dim'],
+                band_embed_dim=_cfg['band_embed_dim'],
+                tile_freqs=_cfg['tile_freqs'],
+                siren_hidden=_cfg['siren_hidden'],
+                siren_depth=_cfg['siren_depth'],
+                w0_first=_cfg['w0_first'],
+                envelope_r_rubin=_cfg.get('envelope_r_rubin', 0.0),
+                envelope_r_euclid=_cfg.get('envelope_r_euclid', 0.0),
+                envelope_power=_cfg.get('envelope_power', 4.0),
+            ).to(device).eval()
+            _psf.load_state_dict(_ckpt['psf_field_state'])
+            args._psf_field = _psf
+            print(f'Loaded archived PSFField from {args.psf_checkpoint}')
+        else:
+            from psf.foundation_epsf_head import load_foundation_epsf_head
+            args._epsf_head = load_foundation_epsf_head(args.psf_checkpoint, device=device)
+            args._psf_field = None
+            print(f'Loaded FoundationEPSFHead from {args.psf_checkpoint}')
     else:
         args._psf_field = None
 
@@ -797,7 +895,7 @@ def train(args):
             wandb_run = wandb.init(
                 project=args.wandb_project,
                 name=args.wandb_run_name or None,
-                config=vars(args),
+                config=serializable_args(args),
                 mode=args.wandb_mode,
                 dir=str(out_dir),
             )
@@ -871,7 +969,7 @@ def train(args):
             'optimizer_state_dict': optimizer.state_dict(),
             'train_metrics': train_metrics,
             'val_metrics': val_metrics,
-            'config': vars(args),
+            'config': serializable_args(args),
         }
         torch.save(ckpt, out_dir / 'latest.pt')
         if score < best_mae:

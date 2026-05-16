@@ -15,6 +15,7 @@ from .foundation_epsf_head import (
     load_foundation_epsf_head,
     load_base_epsf_bank,
 )
+from .epsf_centroid_refinement import refine_centroids_foundation_epsf
 
 __all__ = [
     'ALL_BANDS',
@@ -26,4 +27,5 @@ __all__ = [
     'gaussian_epsf_bank',
     'load_foundation_epsf_head',
     'load_base_epsf_bank',
+    'refine_centroids_foundation_epsf',
 ]

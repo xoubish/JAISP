@@ -1,9 +1,9 @@
 """Latent-space canonical position head for per-object multi-band alignment.
 
-Uses the frozen V7 foundation model encoder to extract multi-scale features
-at each source position, then predicts a refined canonical position offset.
+Uses a frozen JAISP foundation encoder to extract multi-scale features at each
+source position, then predicts a refined canonical position offset.
 
-The key insight: the V7 bottleneck (post-transformer, 0.8"/px) encodes
+The key insight: the foundation bottleneck encodes
 chromatically-informed cross-band structure from all 10 bands, while the
 VIS stem features (0.1"/px) provide high-resolution spatial detail.
 Combining both scales enables per-object alignment that accounts for
@@ -18,8 +18,8 @@ Architecture:
     Full tile (10 bands)
           │
     ┌─────▼──────┐
-    │ Frozen V7   │
-    │  Encoder    │──── bottleneck [1, 256, ~132, ~132]  @ 0.8"/px
+    │ Frozen JAISP│
+    │  Encoder    │──── bottleneck [1, 256, H, W]        @ fused scale
     │             │──── VIS stem   [1,  64, ~1084,~1084] @ 0.1"/px
     └─────────────┘
           │
@@ -140,10 +140,10 @@ def vis_px_to_bottleneck_px(
 # ============================================================
 
 class LatentPositionHead(nn.Module):
-    """Predict canonical per-object position from frozen V7 encoder features.
+    """Predict canonical per-object position from frozen foundation features.
 
     Combines:
-      1. Fused bottleneck features (0.8"/px, 256 ch) — cross-band context,
+      1. Fused bottleneck features (foundation scale, 256 ch) — cross-band context,
          capturing chromatic morphology from the full 10-band representation.
       2. VIS BandStem features (0.1"/px, 64 ch) — high-resolution spatial
          detail for precise centroiding.
@@ -318,14 +318,14 @@ def load_latent_position_head(
     bottleneck_window: int = 0,
     stem_window: int = 17,
 ) -> Tuple[FrozenEncoder, LatentPositionHead]:
-    """Load frozen encoder (v7 or v8) + fresh LatentPositionHead.
+    """Load frozen encoder (v7, v8, v9, or v10) + fresh LatentPositionHead.
 
     Parameters
     ----------
     foundation_checkpoint : path to any JAISP foundation checkpoint.
-        ``load_foundation()`` auto-detects v7 vs v8.
+        ``load_foundation()`` auto-detects v7/v8/v9/v10.
     bottleneck_window : 0 = auto-scale to ~4" physical coverage
-        (5 for v7 @ 0.8"/px, 11 for v8 @ 0.4"/px). Explicit values
+        (5 for v7 @ 0.8"/px, 11 for v8/v9/v10 @ 0.4"/px). Explicit values
         override the auto-scaling.
 
     Returns
@@ -372,9 +372,17 @@ def load_latent_position_head(
 
     n_frozen = sum(p.numel() for p in frozen_encoder.parameters())
     n_trainable = sum(p.numel() for p in head.parameters() if p.requires_grad)
+    if abs(fused_scale - 0.8) <= 0.01 and not cfg.get('rubin_concat', False):
+        version = 'v7'
+    elif cfg.get('loss_type', 'l1') == 'charbonnier' or cfg.get('core_l2_weight', 0.0):
+        version = 'v10'
+    elif cfg.get('rubin_concat', False):
+        version = 'v9'
+    else:
+        version = 'v8'
     print(f'LatentPositionHead: {n_trainable/1e6:.2f}M trainable, '
           f'{n_frozen/1e6:.1f}M frozen encoder  '
-          f'({"v8" if abs(fused_scale - 0.8) > 0.01 else "v7"} foundation)')
+          f'({version} foundation)')
 
     return frozen_encoder, head
 

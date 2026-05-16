@@ -1,4 +1,4 @@
-"""Run CenterNet inference on Rubin+Euclid tiles and save detection labels.
+"""Run CenterNet/StemCenterNet inference on Rubin+Euclid tiles and save labels.
 
 This is the active detection-package exporter for v8/v9/v10 foundation
 checkpoints loaded through ``load_foundation()``.
@@ -7,11 +7,13 @@ Usage
 -----
     python models/detection/run_centernet_detections.py \
         --encoder_ckpt   models/checkpoints/jaisp_v10_warmstart/checkpoint_best.pt \
-        --centernet_ckpt checkpoints/centernet_v10/centernet_best.pt \
+        --centernet_ckpt checkpoints/centernet_v10_uncertain_synth_r2/centernet_best.pt \
         --rubin_dir      data/rubin_tiles_all \
         --euclid_dir     data/euclid_tiles_all \
-        --out            data/detection_labels/centernet_v10.pt \
-        --conf_threshold 0.3
+        --out            data/detection_labels/centernet_v10_790_thresh03.pt \
+        --conf_threshold 0.3 \
+        --spike_veto_radius 0 \
+        --spike_veto_width 0
 
 Output format
 -------------
@@ -45,6 +47,7 @@ from detection.dataset import (                                           # noqa
     _vis_bright_extended_rescue_labels,
 )
 from detection.detector import JAISPEncoderWrapper                         # noqa: E402
+from detection.stem_centernet_detector import StemCenterNetDetector         # noqa: E402
 from jaisp_foundation_v10 import EUCLID_BANDS, RUBIN_BANDS                 # noqa: E402
 from load_foundation import load_foundation                                # noqa: E402
 
@@ -136,13 +139,23 @@ def main():
 
     print(f'Loading foundation encoder from {args.encoder_ckpt}')
     foundation = load_foundation(args.encoder_ckpt, device=torch.device('cpu'), freeze=True)
-    encoder = JAISPEncoderWrapper(foundation, freeze=True).to(device)
-    encoder.eval()
 
     print(f'Loading CenterNet from {args.centernet_ckpt}')
-    detector = CenterNetDetector.load(
-        args.centernet_ckpt, encoder=encoder, device=device
-    ).eval()
+    det_ckpt = torch.load(args.centernet_ckpt, map_location='cpu', weights_only=True)
+    model_type = det_ckpt.get('model_type', 'centernet')
+    if model_type == 'stem_centernet':
+        detector = StemCenterNetDetector.load(
+            args.centernet_ckpt, foundation=foundation, device=device,
+        ).eval()
+    elif model_type == 'centernet':
+        encoder = JAISPEncoderWrapper(foundation, freeze=True).to(device)
+        encoder.eval()
+        detector = CenterNetDetector.load(
+            args.centernet_ckpt, encoder=encoder, device=device
+        ).eval()
+    else:
+        raise ValueError(f'Unsupported detector model_type={model_type!r}')
+    print(f'  detector model_type={model_type}')
 
     rubin_dir = Path(args.rubin_dir)
     euclid_dir = Path(args.euclid_dir)
@@ -268,6 +281,7 @@ def main():
         'config': {
             'encoder_ckpt': str(args.encoder_ckpt),
             'centernet_ckpt': str(args.centernet_ckpt),
+            'model_type': model_type,
             'conf_threshold': args.conf_threshold,
             'nms_kernel': args.nms_kernel,
             'spike_veto_width': args.spike_veto_width,

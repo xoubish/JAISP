@@ -30,9 +30,11 @@ The smooth field solvers still matter as diagnostics. They answer: after the hea
 
 ## Current results
 
-### Latest v8 latent head on 790 ECDFS tiles (current)
+### Latest completed v8 latent head on 790 ECDFS tiles
 
-The current checkpoint is `models/checkpoints/latent_position_v8_no_psf/best.pt`, evaluated with `eval_latent_position.py` on all 790 ECDFS tiles. Sources require SNR >= 5 and raw offset < 200 mas.
+The completed baseline checkpoint is `models/checkpoints/latent_position_v8_no_psf/best.pt`, evaluated with `eval_latent_position.py` on all 790 ECDFS tiles. Sources require SNR >= 5 and raw offset < 200 mas.
+This is the completed baseline for the v10 rerun described below: same target
+convention first, then the new ePSF centroid engine as a separate ablation.
 
 | Band | N sources | Raw median | Head median | Head p68 |
 |------|-----------|-----------:|------------:|---------:|
@@ -93,9 +95,10 @@ Tiles on disk
     │
     ▼
 [train_latent_position.py / eval_latent_position.py]
-    classical source detection + Gaussian centroid targets
+    classical or exported CenterNet source detection
+    Gaussian targets, or FoundationEPSF targets for the PSF ablation
     WCS match each non-VIS band to VIS
-    frozen foundation encoder (v7 or v8)
+    frozen foundation encoder (v7/v8/v9/v10)
     local bottleneck window + VIS stem window per source
     LatentPositionHead -> (dx, dy, log_sigma) in VIS pixels
     local WCS Jacobian -> residual sky offset in arcsec
@@ -304,38 +307,85 @@ Do not interpret the ~1 mas post-head PINN field amplitude as the per-source res
 
 ## Training
 
-### Latent position head (current)
+### Latent position head (current v10 experiment)
 
-For current astrometry work, use the v8 no-PSF latent head path:
+For the v10 astrometry rerun, keep the Gaussian-photon-centroid convention as
+the control and run the new foundation ePSF centroider as an explicit ablation.
+Both runs use the same v10 detector-label cache, so anchor selection is not
+confused with centroid-definition changes.
 
 ```bash
-# Train
+# Export v10 CenterNet labels for all tiles at threshold 0.3
+PYTHONPATH=models python models/detection/run_centernet_detections.py \
+  --encoder_ckpt      models/checkpoints/jaisp_v10_warmstart/checkpoint_best.pt \
+  --centernet_ckpt    checkpoints/centernet_v10_uncertain_synth_r2/centernet_best.pt \
+  --rubin_dir         data/rubin_tiles_all \
+  --euclid_dir        data/euclid_tiles_all \
+  --out               data/detection_labels/centernet_v10_790_thresh03.pt \
+  --conf_threshold    0.3 \
+  --spike_veto_radius 0 \
+  --spike_veto_width  0
+
+# Train the v10 Gaussian-centroid control
 CUDA_VISIBLE_DEVICES=0,1 PYTHONPATH=models python models/astrometry2/train_latent_position.py \
   --rubin-dir        data/rubin_tiles_all \
   --euclid-dir       data/euclid_tiles_all \
-  --foundation-checkpoint models/checkpoints/jaisp_v8_fine/checkpoint_best.pt \
-  --output-dir       models/checkpoints/latent_position_v8_no_psf \
+  --foundation-checkpoint models/checkpoints/jaisp_v10_warmstart/checkpoint_best.pt \
+  --centernet-labels data/detection_labels/centernet_v10_790_thresh03.pt \
+  --output-dir       models/checkpoints/latent_position_v10_no_psf \
   --epochs 30 --bottleneck-window 5 --dual-gpu \
   --wandb-project JAISP-LatentPosition
 
-# Evaluate and export anchors for QA fields
+# Train the v10 ePSF-centroid ablation
+CUDA_VISIBLE_DEVICES=0,1 PYTHONPATH=models python models/astrometry2/train_latent_position.py \
+  --rubin-dir        data/rubin_tiles_all \
+  --euclid-dir       data/euclid_tiles_all \
+  --foundation-checkpoint models/checkpoints/jaisp_v10_warmstart/checkpoint_best.pt \
+  --centernet-labels data/detection_labels/centernet_v10_790_thresh03.pt \
+  --psf-checkpoint   models/checkpoints/foundation_epsf_head_gaia_pca_v10_pm_v5_snr_cap_window/checkpoint_best.pt \
+  --output-dir       models/checkpoints/latent_position_v10_epsf_centroid \
+  --epochs 30 --bottleneck-window 5 --dual-gpu \
+  --wandb-project JAISP-LatentPosition
+
+# Evaluate and export Gaussian-centroid anchors
 PYTHONPATH=models python models/astrometry2/eval_latent_position.py \
   --rubin-dir        data/rubin_tiles_all \
   --euclid-dir       data/euclid_tiles_all \
-  --foundation-checkpoint models/checkpoints/jaisp_v8_fine/checkpoint_best.pt \
-  --head-checkpoint  models/checkpoints/latent_position_v8_no_psf/best.pt \
-  --save-anchors     models/checkpoints/latent_position_v8_no_psf/anchors.npz \
-  --output-dir       models/checkpoints/latent_position_v8_no_psf/eval
+  --foundation-checkpoint models/checkpoints/jaisp_v10_warmstart/checkpoint_best.pt \
+  --head-checkpoint  models/checkpoints/latent_position_v10_no_psf/best.pt \
+  --detector-labels  data/detection_labels/centernet_v10_790_thresh03.pt \
+  --centroid-engine  gaussian \
+  --save-anchors     models/checkpoints/latent_position_v10_no_psf/anchors_centernet_v10.npz \
+  --output-dir       models/checkpoints/latent_position_v10_no_psf/eval_centernet
 
-# Fit the post-head residual field as a QA check
-PYTHONPATH=models python models/astrometry2/fit_direct_pinn.py \
-  --cache models/checkpoints/latent_position_v8_no_psf/anchors.npz \
-  --use-head-resid \
-  --output models/checkpoints/latent_position_v8_no_psf/concordance_pinn_head_resid_fixed.fits \
-  --bands r i g z --include-nisp
+# Evaluate and export ePSF-centroid anchors
+PYTHONPATH=models python models/astrometry2/eval_latent_position.py \
+  --rubin-dir        data/rubin_tiles_all \
+  --euclid-dir       data/euclid_tiles_all \
+  --foundation-checkpoint models/checkpoints/jaisp_v10_warmstart/checkpoint_best.pt \
+  --head-checkpoint  models/checkpoints/latent_position_v10_epsf_centroid/best.pt \
+  --detector-labels  data/detection_labels/centernet_v10_790_thresh03.pt \
+  --centroid-engine  epsf \
+  --psf-checkpoint   models/checkpoints/foundation_epsf_head_gaia_pca_v10_pm_v5_snr_cap_window/checkpoint_best.pt \
+  --save-anchors     models/checkpoints/latent_position_v10_epsf_centroid/anchors_centernet_v10_epsf.npz \
+  --output-dir       models/checkpoints/latent_position_v10_epsf_centroid/eval_centernet_epsf
+
+# Fit the post-head residual field, deduplicating overlap-region anchors in memory
+PYTHONPATH=models python models/astrometry2/fit_hierarchical_gp_concordance.py \
+  --anchors models/checkpoints/latent_position_v10_epsf_centroid/anchors_centernet_v10_epsf.npz \
+  --output  models/checkpoints/latent_position_v10_epsf_centroid/concordance_hgp_head_resid_dedup.fits \
+  --offset-kind head_resid \
+  --pool all \
+  --length-scales 60,180,600 \
+  --dstep-arcsec 5 \
+  --dedup-radius-arcsec 0.05 \
+  --write-coverage
 ```
 
-Do not pass `--psf-checkpoint` for the current headline astrometry run. The PSFField path is available for experiments, but PSFField-refined centroids were worse latent-head labels in the v8 migration ablation.
+The older PSFField-v3 centroid labels are still a negative-result baseline:
+they produced a target mismatch and a ~29-30 mas plateau. The `epsf` run above
+is a fresh test of the newer v10 `FoundationEPSFHead`, not a claim that PSF
+centroids are now the production astrometry convention.
 
 ### V7 matcher (historical / concordance experiments)
 

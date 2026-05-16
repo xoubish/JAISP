@@ -27,12 +27,13 @@ calibration are included so the uncertainty maps are not taken on faith.
 Example
 -------
     python models/astrometry2/fit_hierarchical_gp_concordance.py \\
-        --anchors models/checkpoints/latent_position_v8_no_psf/anchors_centernet.npz \\
-        --output  models/checkpoints/latent_position_v8_no_psf/concordance_hgp_head_resid.fits \\
+        --anchors models/checkpoints/latent_position_v10_epsf_centroid/anchors_centernet_v10_epsf.npz \\
+        --output  models/checkpoints/latent_position_v10_epsf_centroid/concordance_hgp_head_resid_dedup.fits \\
         --offset-kind head_resid \\
         --pool all \\
         --length-scales 60,180,600 \\
-        --dstep-arcsec 5
+        --dstep-arcsec 5 \\
+        --dedup-radius-arcsec 0.05
 """
 
 from __future__ import annotations
@@ -60,6 +61,7 @@ for _p in (_MODELS, _HERE):
         sys.path.insert(0, str(_p))
 
 from astrometry2.dataset import BAND_TO_IDX, NISP_BAND_ORDER
+from astrometry2.dedup_anchors import dedup_one_band
 from astrometry2.source_matching import RUBIN_BAND_ORDER
 
 
@@ -216,6 +218,7 @@ def load_anchor_cache(
     snr_weight_power: float,
     min_sigma_mas: float,
     max_sigma_mas: float,
+    dedup_radius_arcsec: float,
     max_anchors: int | None,
     seed: int,
 ) -> AnchorTable:
@@ -289,6 +292,22 @@ def load_anchor_cache(
         ra = ra[good]
         dec = dec[good]
         snr = snr[good]
+
+        if dedup_radius_arcsec > 0 and len(ra) > 1:
+            before_dedup = len(ra)
+            keep_dedup = dedup_one_band(ra, dec, snr, float(dedup_radius_arcsec))
+            offsets = offsets[keep_dedup]
+            ra = ra[keep_dedup]
+            dec = dec[keep_dedup]
+            snr = snr[keep_dedup]
+            print(
+                f"  {band:7s}: dedup {before_dedup:,d} -> {len(ra):,d} "
+                f"within {dedup_radius_arcsec * 1000.0:.0f} mas"
+            )
+
+        if len(offsets) < 10:
+            print(f"  {band:7s}: too few usable anchors after dedup ({len(offsets)}), skipping")
+            continue
 
         band_scatter_mas = madxy_mas(offsets)
         if not np.isfinite(band_scatter_mas) or band_scatter_mas <= 0:
@@ -1085,6 +1104,10 @@ def build_argparser() -> argparse.ArgumentParser:
     p.add_argument("--snr-weight-power", type=float, default=1.0, help="Relative SNR weight exponent; 2 is classical inverse variance.")
     p.add_argument("--min-sigma-mas", type=float, default=2.0)
     p.add_argument("--max-sigma-mas", type=float, default=80.0)
+    p.add_argument("--dedup-radius-arcsec", type=float, default=0.0,
+                   help="Deduplicate anchors per band before fitting by keeping the "
+                        "highest-SNR source within this sky radius. 0 disables. "
+                        "Use 0.05 to remove overlap-region tile duplicates.")
     p.add_argument("--length-scales", type=str, default=",".join(str(x) for x in DEFAULT_LENGTH_SCALES))
     p.add_argument("--spacing-factor", type=float, default=1.0)
     p.add_argument("--max-centers-per-scale", type=int, default=120)
@@ -1133,6 +1156,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         snr_weight_power=float(args.snr_weight_power),
         min_sigma_mas=float(args.min_sigma_mas),
         max_sigma_mas=float(args.max_sigma_mas),
+        dedup_radius_arcsec=float(args.dedup_radius_arcsec),
         max_anchors=max_anchors,
         seed=int(args.seed),
     )
