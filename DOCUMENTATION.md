@@ -22,7 +22,7 @@ When using this file operationally, prefer the checkpoints and commands marked a
 |-------|-----------------|-------|
 | Foundation | `models/checkpoints/jaisp_v10_warmstart/checkpoint_best.pt` (current production); `models/checkpoints/jaisp_v8_fine/checkpoint_best.pt` retained for completed downstream baselines | V10 is the current production backbone (defined in `models/jaisp_foundation_v10.py`): v9 concat fusion plus Charbonnier reconstruction loss and core-L2 weighting. The new detection, PSF, and astrometry rerun path use v10; older v8 heads remain valid baselines. |
 | Detection | Current v10 checkpoints: `checkpoints/centernet_v10_uncertain_synth_r2/centernet_best.pt` and `checkpoints/stem_centernet_v10_uncertain_synth_r2/stem_centernet_best.pt`; retained v8 cache: `data/detection_labels/centernet_v8_r2_790.pt` | Notebook 05 now treats the cleaner VIS-only classical reference as the decision baseline, not the SEP-assisted variant. Inference should run with spike veto off (`--spike_veto_radius 0 --spike_veto_width 0`): the veto was suppressing real bright/large objects. Current chosen operating points are CenterNet `conf=0.30` and StemCenterNet `conf=0.55`; `run_centernet_detections.py` auto-loads both fused and stem detector checkpoints. |
-| Astrometry | Completed baseline: `models/checkpoints/latent_position_v8_no_psf/best.pt`; current rerun targets: `models/checkpoints/latent_position_v10_no_psf/` and `models/checkpoints/latent_position_v10_epsf_centroid/` | V8 established the Gaussian-centroid baseline. The v10 rerun uses exported v10 CenterNet anchors at threshold 0.3, trains a Gaussian-centroid control, then tests FoundationEPSFHead centroiding as a separate ablation. |
+| Astrometry | Completed baseline: `models/checkpoints/latent_position_v8_no_psf/best.pt`; current rerun targets: `models/checkpoints/latent_position_v10_no_psf/` and `models/checkpoints/latent_position_v10_epsf_centroid/` | V8 established the Gaussian-centroid baseline. The v10 rerun uses exported v10 CenterNet anchors at threshold 0.3 plus the full `data/cached_features_v10_warmstart` bottleneck cache, trains a Gaussian-centroid control, then tests FoundationEPSFHead centroiding as a separate ablation. |
 | Smooth field QA | `models/astrometry2/fit_direct_pinn.py` | Fits raw or head-residual anchors from `anchors.npz` or `anchors_centernet.npz`; CenterNet post-head PINN fields are about 1 mas and do not improve anchor residuals. |
 | Concordance uncertainty / model check | `models/astrometry2/fit_hierarchical_gp_concordance.py` | Experimental hierarchical GP-style field with posterior std maps. Current CenterNet post-head HGP does not agree with PINN or beat the zero-field baseline, so it is QA/model-selection only, not a production correction. For v10 anchor caches, pass `--dedup-radius-arcsec 0.05` to remove overlap-region duplicates before solving. |
 | PSF | Astrometry ablation checkpoint: `models/checkpoints/foundation_epsf_head_gaia_pca_v10_pm_v5_snr_cap_window/checkpoint_best.pt`; earlier run: `models/checkpoints/foundation_epsf_head_gaia_gaussian_v10_pm/` | Active path: Gaia-selected stars with proper-motion correction (`--obs-epoch-year 2025.0`) and image-based centroid refinement, frozen V10 foundation features, low-rank residual ePSF head, W&B image diagnostics. The PCA/SNR-cap/window checkpoint is the current candidate for the v10 astrometry ePSF-centroid ablation. Older PSFField/PCA/V4 attempts are archived under `models/older_architectures/psf/`. |
@@ -664,7 +664,7 @@ Since there is no curated source catalog for this field, both neural detectors u
 
 Bright-star artifacts are handled by optional masks, not by removing large circular regions from the science image. The thin spike-ridge mask first identifies saturated bright cores, estimates dominant radial spike angles from high-flux pixels in an annulus, and masks only narrow ray segments with actual line evidence. It is not a generic Sobel/Laplacian or second-derivative edge detector, so galaxy rims, spiral arms, and blend edges are not removed merely for being sharp. However, the latest notebook diagnostics show that applying this veto at inference can suppress real bright/large objects. Current export settings therefore set spike radius/width to zero; keep the spike mask as a training/diagnostic control, not as the default inference gate. When VIS is unavailable, Rubin g+r+i coadd pseudo-labels are used as a fallback.
 
-**Precomputed features**: The fused-bottleneck CenterNet path can cache encoder outputs to disk. Historical production used `data/cached_features_v8_fine/`; the v10 runs use `data/cached_features_v10_warmstart_200`. Training then runs only the lightweight decoder neck + heads -- no encoder forward pass needed per step. This is the fastest neural detection path in the repo.
+**Precomputed features**: The fused-bottleneck CenterNet path can cache encoder outputs to disk. Historical production used `data/cached_features_v8_fine/`; v10 detector retraining can use the 200-tile subset `data/cached_features_v10_warmstart_200`, while full-tile astrometry/PSF runs should use the full cache `data/cached_features_v10_warmstart`. Cached mode skips the full foundation encoder forward pass for the bottleneck; astrometry still computes the VIS stem live.
 
 **Live stem training**: StemCenterNet does not use cached bottleneck features. It runs directly from the frozen foundation BandStems at native resolution, which is more expensive but preserves more local structure.
 
@@ -1221,26 +1221,31 @@ PYTHONPATH=models python models/detection/run_centernet_detections.py \
     --spike_veto_radius 0 \
     --spike_veto_width  0
 
-# 2a. Train the v10 Gaussian-centroid control.
-CUDA_VISIBLE_DEVICES=0,1 PYTHONPATH=models python models/astrometry2/train_latent_position.py \
+# 2a. Train the v10 Gaussian-centroid control on one GPU, using the full
+# cached v10 bottleneck directory. Run this in a screen/tmux session if needed.
+PYTHONUNBUFFERED=1 CUDA_VISIBLE_DEVICES=0 PYTHONPATH=models python -u models/astrometry2/train_latent_position.py \
     --rubin-dir        data/rubin_tiles_all \
     --euclid-dir       data/euclid_tiles_all \
     --foundation-checkpoint models/checkpoints/jaisp_v10_warmstart/checkpoint_best.pt \
+    --features-cache-dir data/cached_features_v10_warmstart \
     --centernet-labels data/detection_labels/centernet_v10_790_thresh03.pt \
     --output-dir       models/checkpoints/latent_position_v10_no_psf \
-    --epochs 30 --bottleneck-window 5 --dual-gpu \
-    --wandb-project JAISP-LatentPosition
+    --epochs 30 --bottleneck-window 5 \
+    --wandb-project JAISP-LatentPosition \
+    --wandb-run-name latent_position_v10_no_psf_thresh03_cached
 
-# 2b. Train the v10 ePSF-centroid ablation on the same detections.
-CUDA_VISIBLE_DEVICES=0,1 PYTHONPATH=models python models/astrometry2/train_latent_position.py \
+# 2b. Train the v10 ePSF-centroid ablation on another GPU, same detections/cache.
+PYTHONUNBUFFERED=1 CUDA_VISIBLE_DEVICES=1 PYTHONPATH=models python -u models/astrometry2/train_latent_position.py \
     --rubin-dir        data/rubin_tiles_all \
     --euclid-dir       data/euclid_tiles_all \
     --foundation-checkpoint models/checkpoints/jaisp_v10_warmstart/checkpoint_best.pt \
+    --features-cache-dir data/cached_features_v10_warmstart \
     --centernet-labels data/detection_labels/centernet_v10_790_thresh03.pt \
     --psf-checkpoint   models/checkpoints/foundation_epsf_head_gaia_pca_v10_pm_v5_snr_cap_window/checkpoint_best.pt \
     --output-dir       models/checkpoints/latent_position_v10_epsf_centroid \
-    --epochs 30 --bottleneck-window 5 --dual-gpu \
-    --wandb-project JAISP-LatentPosition
+    --epochs 30 --bottleneck-window 5 \
+    --wandb-project JAISP-LatentPosition \
+    --wandb-run-name latent_position_v10_epsf_centroid_thresh03_cached
 
 # 3a. Evaluate/export Gaussian-centroid anchors.
 PYTHONPATH=models python models/astrometry2/eval_latent_position.py \
@@ -1457,7 +1462,8 @@ JAISP/
 |   +-- rubin_tiles_tract5063/         Patch-organized tract5063 tiles (patches 14/15/24)
 |   +-- euclid_tiles_tract5063/        Patch-organized tract5063 Euclid tiles
 |   +-- cached_features_v8_fine/       Precomputed V8 encoder features for retained CenterNet cache
-|   +-- cached_features_v10_warmstart_200/ V10 cached features for CenterNet retraining
+|   +-- cached_features_v10_warmstart/ Full V10 cached bottlenecks for astrometry/PSF/full export work
+|   +-- cached_features_v10_warmstart_200/ V10 cached-feature subset for CenterNet retraining
 |   +-- detection_labels/              Detection label caches (v8 production; v10 export products)
 |   +-- download_tiles_product.sh      Helper for fetching/regenerating the tile product
 |
@@ -1773,25 +1779,29 @@ Key features:
 cd models
 
 # Train the v10 Gaussian-centroid control
-CUDA_VISIBLE_DEVICES=0,1 PYTHONPATH=. python astrometry2/train_latent_position.py \
+PYTHONUNBUFFERED=1 CUDA_VISIBLE_DEVICES=0 PYTHONPATH=. python -u astrometry2/train_latent_position.py \
     --rubin-dir        ../data/rubin_tiles_all \
     --euclid-dir       ../data/euclid_tiles_all \
     --foundation-checkpoint checkpoints/jaisp_v10_warmstart/checkpoint_best.pt \
+    --features-cache-dir ../data/cached_features_v10_warmstart \
     --centernet-labels ../data/detection_labels/centernet_v10_790_thresh03.pt \
     --output-dir       checkpoints/latent_position_v10_no_psf \
-    --epochs 30 --bottleneck-window 5 --dual-gpu \
-    --wandb-project JAISP-LatentPosition
+    --epochs 30 --bottleneck-window 5 \
+    --wandb-project JAISP-LatentPosition \
+    --wandb-run-name latent_position_v10_no_psf_thresh03_cached
 
 # Train the v10 ePSF-centroid ablation on the same detections
-CUDA_VISIBLE_DEVICES=0,1 PYTHONPATH=. python astrometry2/train_latent_position.py \
+PYTHONUNBUFFERED=1 CUDA_VISIBLE_DEVICES=1 PYTHONPATH=. python -u astrometry2/train_latent_position.py \
     --rubin-dir        ../data/rubin_tiles_all \
     --euclid-dir       ../data/euclid_tiles_all \
     --foundation-checkpoint checkpoints/jaisp_v10_warmstart/checkpoint_best.pt \
+    --features-cache-dir ../data/cached_features_v10_warmstart \
     --centernet-labels ../data/detection_labels/centernet_v10_790_thresh03.pt \
     --psf-checkpoint   checkpoints/foundation_epsf_head_gaia_pca_v10_pm_v5_snr_cap_window/checkpoint_best.pt \
     --output-dir       checkpoints/latent_position_v10_epsf_centroid \
-    --epochs 30 --bottleneck-window 5 --dual-gpu \
-    --wandb-project JAISP-LatentPosition
+    --epochs 30 --bottleneck-window 5 \
+    --wandb-project JAISP-LatentPosition \
+    --wandb-run-name latent_position_v10_epsf_centroid_thresh03_cached
 
 # Evaluate and export Gaussian-centroid anchors for concordance QA
 PYTHONPATH=. python astrometry2/eval_latent_position.py \
@@ -2027,9 +2037,9 @@ This section is intentionally redundant with earlier parts of the report. It is 
   - Archived attempts: PSFField/PCA/V4 code and small checkpoints live in `models/older_architectures/psf/`.
 
 **Astrometry -- completed v8 baseline and active v10 rerun**
-- Latent position head loads the foundation via `load_foundation()` auto-detection (which now routes v8/v9/v10 to `JAISPFoundationV10` and v7 to legacy v7 via checkpoint config markers). Dual-GPU prefetch wired (`--dual-gpu`: encoder on GPU 0, head on GPU 1).
+- Latent position head loads the foundation via `load_foundation()` auto-detection (which now routes v8/v9/v10 to `JAISPFoundationV10` and v7 to legacy v7 via checkpoint config markers). The current v10 rerun uses `--features-cache-dir data/cached_features_v10_warmstart` and one CUDA device per training job; `--dual-gpu` remains available for uncached single-run prefetching but is not the recommended path for running Gaussian and ePSF in parallel.
 - Completed checkpoint: `models/checkpoints/latent_position_v8_no_psf/best.pt`.
-- Active rerun: export `data/detection_labels/centernet_v10_790_thresh03.pt`, train `models/checkpoints/latent_position_v10_no_psf/` as the Gaussian-centroid control, then train `models/checkpoints/latent_position_v10_epsf_centroid/` using `FoundationEPSFHead` centroid labels. Both runs use the same detection cache so anchor selection and centroid-definition changes are not confounded.
+- Active rerun: export `data/detection_labels/centernet_v10_790_thresh03.pt`, train `models/checkpoints/latent_position_v10_no_psf/` as the Gaussian-centroid control, then train `models/checkpoints/latent_position_v10_epsf_centroid/` using `FoundationEPSFHead` centroid labels. Both runs use the same detection cache and full v10 bottleneck cache so anchor selection, encoder cost, and centroid-definition changes are not confounded.
 - Cross-instrument evaluation on 790 ECDFS tiles: raw medians of 41-62 mas for Rubin g/r/i/z/y and NISP Y/J/H are reduced to **9-15 mas** after the head; Rubin u is reduced from **119 mas** to **30.5 mas**. Improvement is **~74-79%** in the median radial residual.
 - CenterNet-anchor evaluation is now tracked separately from the classical-anchor result. `anchors_centernet.npz` contains **491,748** source-band anchors, with **34,510** at `SNR >= 30`; median raw/head residuals are **39.8 mas -> 8.5 mas**. `anchors.npz` contains **630,120** source-band anchors, with **36,574** at `SNR >= 30`; median raw/head residuals are **44.2 mas -> 10.2 mas**. The CenterNet cache is a different detector-selected catalogue, not just a denser version of the classical cache.
 - Notebook 06 diagnosis: the large raw residual is **centering / centroid-definition scatter**. Smooth per-tile bulk field is **5.4 mas**, post-bulk source residual is **47.5 mas**, and the measured offset changes by **54.0 mas** when recentered from detection to PSF-fit centroids.

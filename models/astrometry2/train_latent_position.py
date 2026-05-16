@@ -77,6 +77,52 @@ except ImportError:
 from foundation_utils import load_tile_data  # noqa: F401, E402
 
 
+def load_cached_bottleneck(
+    cache_dir: Optional[Path],
+    tile_id: str,
+    device: torch.device,
+) -> Optional[torch.Tensor]:
+    """Load a cached foundation bottleneck for ``tile_id`` if present."""
+    if cache_dir is None:
+        return None
+    for name in (f'{tile_id}_aug0.pt', f'{tile_id}.pt'):
+        path = cache_dir / name
+        if not path.exists():
+            continue
+        payload = torch.load(str(path), map_location=device, weights_only=False)
+        feat = payload['features'] if isinstance(payload, dict) and 'features' in payload else payload
+        feat = feat.float().to(device)
+        if feat.ndim == 3:
+            feat = feat.unsqueeze(0)
+        return feat
+    return None
+
+
+@torch.no_grad()
+def encode_tile_features(
+    frozen_encoder: FrozenEncoder,
+    tile_id: str,
+    img_t: Dict[str, torch.Tensor],
+    rms_t: Dict[str, torch.Tensor],
+    device: torch.device,
+    features_cache_dir: Optional[Path] = None,
+) -> Dict[str, object]:
+    """Return bottleneck + VIS stem, using cached bottleneck when available."""
+    cached = load_cached_bottleneck(features_cache_dir, tile_id, device)
+    if cached is None:
+        return frozen_encoder.encode_tile(img_t, rms_t)
+
+    vis_img = img_t['euclid_VIS']
+    vis_rms = rms_t['euclid_VIS']
+    vis_stem = frozen_encoder.vis_stem(vis_img, vis_rms)
+    return {
+        'bottleneck': cached,
+        'vis_stem': vis_stem,
+        'fused_hw': (cached.shape[-2], cached.shape[-1]),
+        'vis_hw': (vis_img.shape[-2], vis_img.shape[-1]),
+    }
+
+
 def detect_and_refine_vis(
     vis_img: np.ndarray,
     vis_wcs: WCS,
@@ -315,7 +361,14 @@ def make_preview_figure(
 
     try:
         img_t, rms_t, vis_hw, vis_wcs = load_tile_data(rubin_path, euclid_path, device)
-        enc_out = frozen_encoder.encode_tile(img_t, rms_t)
+        enc_out = encode_tile_features(
+            frozen_encoder,
+            tile_id,
+            img_t,
+            rms_t,
+            device,
+            features_cache_dir=getattr(args, '_features_cache_dir', None),
+        )
         del img_t, rms_t
 
         edata = np.load(euclid_path, allow_pickle=True)
@@ -472,7 +525,14 @@ def _prefetch_tile(
         return None
     vis_hw_out.append(vis_hw)
 
-    enc_out = frozen_encoder.encode_tile(img_t, rms_t)
+    enc_out = encode_tile_features(
+        frozen_encoder,
+        tile_id,
+        img_t,
+        rms_t,
+        enc_device,
+        features_cache_dir=getattr(args, '_features_cache_dir', None),
+    )
     del img_t, rms_t
 
     # Transfer features to the training device
@@ -587,7 +647,14 @@ def run_epoch(
                     rubin_path, euclid_path, device)
             except Exception:
                 return None
-            enc_out = frozen_encoder.encode_tile(img_t, rms_t)
+            enc_out = encode_tile_features(
+                frozen_encoder,
+                tile_id,
+                img_t,
+                rms_t,
+                device,
+                features_cache_dir=getattr(args, '_features_cache_dir', None),
+            )
             bottleneck = enc_out['bottleneck']
             vis_stem = enc_out['vis_stem']
             fused_hw = enc_out['fused_hw']
@@ -756,6 +823,10 @@ def build_parser() -> argparse.ArgumentParser:
                         'data/detection_labels/centernet_v10_790_thresh03.pt). '
                         'If provided, VIS-normalised detections replace classical '
                         'peak-finding for source candidates.')
+    p.add_argument('--features-cache-dir', type=str, default=None,
+                   help='Optional precomputed foundation bottleneck cache '
+                        '(e.g. data/cached_features_v10_warmstart). The VIS '
+                        'stem is still computed live.')
     p.add_argument('--output-dir', type=str,
                    default='models/checkpoints/latent_position_head')
 
@@ -829,6 +900,9 @@ def train(args):
     pairs = discover_tile_pairs(args.rubin_dir, args.euclid_dir)
     train_pairs, val_pairs = split_tile_pairs(pairs, args.val_frac, args.seed)
     print(f'Tiles: {len(train_pairs)} train, {len(val_pairs)} val')
+    args._features_cache_dir = Path(args.features_cache_dir) if args.features_cache_dir else None
+    if args._features_cache_dir is not None:
+        print(f'Using cached foundation bottlenecks from {args._features_cache_dir}')
 
     # --- Model ---
     frozen_encoder, head = load_latent_position_head(
