@@ -56,7 +56,7 @@ from astrometry2.latent_position_head import (
     FrozenEncoder,
     load_latent_position_head,
 )
-from astrometry2.train_latent_position import load_tile_data
+from astrometry2.train_latent_position import encode_tile_features, load_tile_data
 from source_matching import (
     RUBIN_BAND_ORDER,
     build_detection_image,
@@ -367,7 +367,14 @@ def evaluate(args):
         # Run frozen encoder once per tile.  The astrometry head always needs
         # this, and ePSF centroiding also consumes these features.
         with torch.no_grad():
-            enc_out = frozen_encoder.encode_tile(img_t, rms_t)
+            enc_out = encode_tile_features(
+                frozen_encoder,
+                tile_id,
+                img_t,
+                rms_t,
+                device,
+                features_cache_dir=Path(args.features_cache_dir) if args.features_cache_dir else None,
+            )
         del img_t, rms_t
 
         if args.centroid_engine == 'epsf':
@@ -636,6 +643,7 @@ def evaluate(args):
         'head_checkpoint': args.head_checkpoint,
         'detector_labels': args.detector_labels,
         'detector_checkpoint': args.detector_checkpoint,
+        'features_cache_dir': args.features_cache_dir,
         'centroid_engine': args.centroid_engine,
         'psf_checkpoint': args.psf_checkpoint,
         'epsf_centroid_stamp_size': args.epsf_centroid_stamp_size,
@@ -798,6 +806,10 @@ def main():
                         'models/detection/run_centernet_detections.py. If set, these '
                         'detections are used for VIS seed positions and no detector '
                         'inference is required inside this evaluator.')
+    p.add_argument('--features-cache-dir', type=str, default=None,
+                   help='Optional precomputed foundation bottleneck cache '
+                        '(e.g. data/cached_features_v10_warmstart). The VIS '
+                        'stem is still computed live.')
     p.add_argument('--detector-foundation-checkpoint', type=str, default=None,
                    help='Optional foundation checkpoint for the detector. Defaults to '
                         '--foundation-checkpoint. Use this for v10/stem detectors while '
