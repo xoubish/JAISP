@@ -479,6 +479,8 @@ def psf_residual_loss_with_centroid_nuisance(
     stamp_size: int,
     centroid_fit_max_px: float = 0.0,
     centroid_fit_steps: int = 1,
+    centroid_refine_steps: int = 0,
+    centroid_refine_lr: float = 0.01,
     loss_snr_cap: float = 0.0,
     loss_radius_px: float = 0.0,
     loss_taper_px: float = 0.0,
@@ -493,6 +495,13 @@ def psf_residual_loss_with_centroid_nuisance(
     The grid choice is a hard nuisance assignment: first choose the best shift
     with gradients disabled, then rerender only that selected shift so normal
     gradients still flow to the ePSF shape.
+
+    If ``centroid_refine_steps > 0``, run a few Adam steps on a per-star shift
+    initialised at the grid winner, with the ePSF detached. This gives
+    sub-grid-step resolution without losing the bootstrap of the discrete
+    search. Necessary for catching sub-pixel biases below the grid step (e.g.
+    Rubin per-band WCS offsets of 5-30 mas, which round to zero on a 0.10 px
+    grid).
     """
     shifts = centroid_shift_grid(
         centroid_fit_max_px,
@@ -501,7 +510,7 @@ def psf_residual_loss_with_centroid_nuisance(
         dtype=frac_xy.dtype,
     )
     rms_loss = effective_loss_rms(data, rms, loss_snr_cap=loss_snr_cap)
-    if shifts.shape[0] == 1:
+    if shifts.shape[0] == 1 and int(centroid_refine_steps) == 0:
         native = head.render_at_native(epsf, frac_xy, stamp_size=stamp_size)
         pixel_weight = radial_loss_weight(
             data,
@@ -582,6 +591,50 @@ def psf_residual_loss_with_centroid_nuisance(
             take = loss_star < best_loss
             best_loss = torch.where(take, loss_star, best_loss)
             best_shift = torch.where(take[:, None], shift.view(1, 2), best_shift)
+
+    if int(centroid_refine_steps) > 0:
+        # Continuous refinement: optimise per-star delta with Adam, keeping the
+        # ePSF detached so refinement gradients don't shape the bank. The final
+        # render below uses the refined shift with the bank still attached.
+        clamp_px = max(0.5, float(centroid_fit_max_px) * 2.0)
+        epsf_detached = epsf.detach()
+        delta = best_shift.detach().clone().requires_grad_(True)
+        refine_opt = torch.optim.Adam([delta], lr=float(centroid_refine_lr))
+        for _ in range(int(centroid_refine_steps)):
+            refine_opt.zero_grad(set_to_none=True)
+            frac_trial = frac_xy + delta
+            native_trial = head.render_at_native(
+                epsf_detached,
+                frac_trial,
+                stamp_size=stamp_size,
+            )
+            pixel_weight_trial = radial_loss_weight(
+                data,
+                frac_trial,
+                loss_radius_px=loss_radius_px,
+                loss_taper_px=loss_taper_px,
+            )
+            pixel_weight_trial = apply_core_loss_weight(
+                pixel_weight_trial,
+                data,
+                frac_trial,
+                core_radius_px=core_loss_radius_px,
+                core_weight=core_loss_weight,
+            )
+            loss_star, _flux, _bg, _model, _z = _psf_fit_per_star(
+                native_trial,
+                data,
+                rms_loss,
+                pixel_weight=pixel_weight_trial,
+                charbonnier_eps=charbonnier_eps,
+                fit_background=fit_background,
+                nonnegative_flux=nonnegative_flux,
+            )
+            loss_star.sum().backward()
+            refine_opt.step()
+            with torch.no_grad():
+                delta.clamp_(-clamp_px, clamp_px)
+        best_shift = delta.detach()
 
     native = head.render_at_native(epsf, frac_xy + best_shift, stamp_size=stamp_size)
     pixel_weight = radial_loss_weight(

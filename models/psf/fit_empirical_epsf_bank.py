@@ -196,6 +196,8 @@ def _evaluate(
             stamp_size=stamp.shape[-1],
             centroid_fit_max_px=args.centroid_fit_max_px,
             centroid_fit_steps=args.centroid_fit_steps,
+            centroid_refine_steps=args.centroid_refine_steps,
+            centroid_refine_lr=args.centroid_refine_lr,
             loss_snr_cap=args.loss_snr_cap,
             loss_radius_px=args.loss_radius_px,
             loss_taper_px=args.loss_taper_px,
@@ -274,6 +276,8 @@ def _fit_one_band(
                 stamp_size=stamp.shape[-1],
                 centroid_fit_max_px=args.centroid_fit_max_px,
                 centroid_fit_steps=args.centroid_fit_steps,
+                centroid_refine_steps=args.centroid_refine_steps,
+                centroid_refine_lr=args.centroid_refine_lr,
                 loss_snr_cap=args.loss_snr_cap,
                 loss_radius_px=args.loss_radius_px,
                 loss_taper_px=args.loss_taper_px,
@@ -445,8 +449,18 @@ def build_argparser() -> argparse.ArgumentParser:
     p.add_argument("--loss-taper-px", type=float, default=2.0)
     p.add_argument("--core-loss-radius-px", type=float, default=3.0)
     p.add_argument("--core-loss-weight", type=float, default=3.0)
-    p.add_argument("--centroid-fit-max-px", type=float, default=0.20)
-    p.add_argument("--centroid-fit-steps", type=int, default=5)
+    p.add_argument("--centroid-fit-max-px", type=float, default=0.30,
+                   help="Half-range of the discrete centroid-offset grid in native px. "
+                        "Was 0.20; widened to 0.30 (= 60 mas Rubin / 30 mas Euclid) to "
+                        "bracket measured per-band WCS biases.")
+    p.add_argument("--centroid-fit-steps", type=int, default=5,
+                   help="Grid resolution (5 -> 0.15 px step at max=0.30). Coarse grid is "
+                        "fine; sub-grid precision comes from --centroid-refine-steps.")
+    p.add_argument("--centroid-refine-steps", type=int, default=10,
+                   help="Adam refinement steps on per-star shift after grid winner. "
+                        "Set to 0 to disable. Necessary to catch sub-grid biases (<= 30 mas).")
+    p.add_argument("--centroid-refine-lr", type=float, default=0.02,
+                   help="Adam learning rate for the per-star centroid refinement.")
     p.add_argument("--no-fit-background", action="store_true")
     p.add_argument("--allow-negative-flux", action="store_true")
 
