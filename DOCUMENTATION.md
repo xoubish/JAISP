@@ -1415,6 +1415,72 @@ python -u models/psf/train_foundation_epsf_head.py \
     --device cuda:0
 ```
 
+#### Per-band WCS centroid bias and the gauge-freedom bug (2026-05-16)
+
+Notebook 08 sections 14 and 15 revealed that residual chi stacks against the production head + r15 empirical bank had a clean signed-dipole pattern at the source pixel for every Rubin band — the unmistakable signature of a sub-pixel centroid mis-registration between data and model. Per-star Adam fits jointly with analytic flux+bg (section 15) measured per-band median offsets of:
+
+- Rubin u: ~27 mas (worst — likely a mix of DCR and the low-SNR centroiding floor)
+- Rubin g/r/i/z: 10–15 mas, mixed directions per band
+- Rubin y: ~7 mas
+- Euclid VIS/Y/J/H: 1–3 mas (essentially zero; the Gaia anchoring is clean for Euclid)
+
+These directions vary per band, so this is per-band WCS / projection bias in the *labels* (the `frac_xy` derived from Gaia RA/Dec → pixel through each band's WCS), not a single empirical-bank build bug. After absorbing the bias as a per-star δ, Rubin r/i/z core |chi| drops from 2–5 to 0.7–1.7 (near the |N(0,1)| ≈ 0.674 noise floor), confirming the diagnosis. The Euclid wing-ring pattern in the same chi stack is a separate problem (model wing-flux deficit, not a centroid issue).
+
+##### Bank-fit changes
+
+`models/psf/fit_empirical_epsf_bank.py` and `psf_residual_loss_with_centroid_nuisance` in `train_foundation_epsf_head.py` were extended to support continuous per-star centroid refinement on top of the existing discrete grid:
+
+- New kwargs `centroid_refine_steps`, `centroid_refine_lr` in the loss function. When `centroid_refine_steps > 0`, after the grid winner is chosen, run Adam on per-star delta with the ePSF detached (the loss block is wrapped in `torch.enable_grad()` so this works inside `@torch.no_grad()` validation passes too).
+- New CLI flags `--centroid-refine-steps` (default 10) and `--centroid-refine-lr` (default 0.02) on `fit_empirical_epsf_bank.py`. Grid range widened from 0.20 → 0.30 native px to bracket the measured biases.
+
+##### Gauge-freedom bug in the bank fit
+
+The marginalised loss is invariant under `(bank ← shift by Δ) + (δ ← δ − Δ)` — there is no constraint anchoring the bank's *absolute* centroid. With Adam refinement enabled, the bank drifts during training to whatever Adam settles on, and per-star δ compensates. Measured: the recentred-v2 bank ended up at 5–17 mas offsets per band (worse than the original r15 bank's 4–10 mas drift). The dipole at delta=0 in notebook section 16 (bank-only chi stack) is partly this gauge drift plus the underlying WCS bias.
+
+**Workaround used 2026-05-16:** post-shift each band's bank to its weighted centroid (0, 0) via bilinear `F.grid_sample`, then re-normalise to unit flux. Saved as `empirical_epsf_bank_psf_training_gaia_pm_v2_r15_centroidv2_recentered.pt`. The notebook 08 cell that does this lives in cell 7 (`EMPIRICAL_BASE_CKPT_OVERRIDE` machinery).
+
+**Proper fix (TODO):** add a 1st-moment penalty to the bank fit loss (or hard-project the bank after each opt step), so future refits don't need the post-shift workaround.
+
+##### Head retrain on the recentred bank
+
+The OLD head was trained with `--centroid-fit-max-px 0.20`, which let per-star δ absorb the WCS bias inside the training loss. The head therefore had no gradient pressure to learn the bias via its residual basis — and at inference (δ=0) the dipole returns. This is why notebook 08 section 14 still showed the dipole even with the trained head.
+
+**The actual fix is to disable centroid marginalisation at head training time** so the head must learn the per-band shift via its rank-2 residual basis. Bank fit and head training have different roles here:
+
+- Bank fit: marginalise (otherwise the bank inherits the bias and gets smeared); accept gauge drift and post-shift.
+- Head training: do NOT marginalise; force the residual basis to encode the per-band shift.
+
+Production command (cuda:1 — astrometry holds cuda:0):
+
+```bash
+PYTHONUNBUFFERED=1 python -u models/psf/train_foundation_epsf_head.py \
+    --train-dir data/psf_training_gaia_pm_v2 \
+    --rubin-dir data/rubin_tiles_all \
+    --euclid-dir data/euclid_tiles_all \
+    --foundation-checkpoint models/checkpoints/jaisp_v10_warmstart/checkpoint_best.pt \
+    --features-cache-dir data/cached_features_v10_warmstart \
+    --output-dir models/checkpoints/foundation_epsf_head_empirical_r15_centroidv2_recentered_v1 \
+    --base-epsf-mode checkpoint \
+    --base-epsf-checkpoint models/checkpoints/empirical_epsf_bank_psf_training_gaia_pm_v2_r15_centroidv2_recentered.pt \
+    --epochs 40 \
+    --max-stars-per-tile 256 \
+    --min-snr 10 \
+    --val-frac 0.10 \
+    --loss-radius-px 15 \
+    --loss-taper-px 2 \
+    --core-loss-radius-px 3 \
+    --core-loss-weight 3 \
+    --centroid-fit-max-px 0 \
+    --device cuda:1 \
+    --wandb-project JAISP-Foundation-EPSF \
+    --wandb-name foundation_epsf_empirical_r15_centroidv2_recentered_v1 \
+    --wandb-image-every 5 \
+    --wandb-n-examples 6 \
+    --wandb-max-visual-tiles 2
+```
+
+If `val_corechi` plateaus at 1.5–2.5 instead of bottoming out near the noise floor, the rank-2 residual basis isn't enough capacity to represent the per-band shift cleanly — bump `--basis-rank 4` next round. If it bottoms out near 1 but shows real Gaia-noise overfit on the highest-SNR stars, re-introduce a *small* `--centroid-fit-max-px 0.03` (absorbs ~6 mas noise, leaves the ~20 mas bias for the head).
+
 #### Archived PSF attempts
 
 The older PSFField, PCA, V4 NN-ePSF, CenterNet-star-selection, and validation scripts moved to `models/older_architectures/psf/`. Small reference checkpoints moved with them under `models/older_architectures/psf/checkpoints/`.

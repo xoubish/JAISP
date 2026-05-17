@@ -596,44 +596,48 @@ def psf_residual_loss_with_centroid_nuisance(
         # Continuous refinement: optimise per-star delta with Adam, keeping the
         # ePSF detached so refinement gradients don't shape the bank. The final
         # render below uses the refined shift with the bank still attached.
+        # torch.enable_grad() overrides any outer torch.no_grad() (e.g. when
+        # this loss is called from an @torch.no_grad() validation pass) so that
+        # delta still gets gradients.
         clamp_px = max(0.5, float(centroid_fit_max_px) * 2.0)
-        epsf_detached = epsf.detach()
-        delta = best_shift.detach().clone().requires_grad_(True)
-        refine_opt = torch.optim.Adam([delta], lr=float(centroid_refine_lr))
-        for _ in range(int(centroid_refine_steps)):
-            refine_opt.zero_grad(set_to_none=True)
-            frac_trial = frac_xy + delta
-            native_trial = head.render_at_native(
-                epsf_detached,
-                frac_trial,
-                stamp_size=stamp_size,
-            )
-            pixel_weight_trial = radial_loss_weight(
-                data,
-                frac_trial,
-                loss_radius_px=loss_radius_px,
-                loss_taper_px=loss_taper_px,
-            )
-            pixel_weight_trial = apply_core_loss_weight(
-                pixel_weight_trial,
-                data,
-                frac_trial,
-                core_radius_px=core_loss_radius_px,
-                core_weight=core_loss_weight,
-            )
-            loss_star, _flux, _bg, _model, _z = _psf_fit_per_star(
-                native_trial,
-                data,
-                rms_loss,
-                pixel_weight=pixel_weight_trial,
-                charbonnier_eps=charbonnier_eps,
-                fit_background=fit_background,
-                nonnegative_flux=nonnegative_flux,
-            )
-            loss_star.sum().backward()
-            refine_opt.step()
-            with torch.no_grad():
-                delta.clamp_(-clamp_px, clamp_px)
+        with torch.enable_grad():
+            epsf_detached = epsf.detach()
+            delta = best_shift.detach().clone().requires_grad_(True)
+            refine_opt = torch.optim.Adam([delta], lr=float(centroid_refine_lr))
+            for _ in range(int(centroid_refine_steps)):
+                refine_opt.zero_grad(set_to_none=True)
+                frac_trial = frac_xy + delta
+                native_trial = head.render_at_native(
+                    epsf_detached,
+                    frac_trial,
+                    stamp_size=stamp_size,
+                )
+                pixel_weight_trial = radial_loss_weight(
+                    data,
+                    frac_trial,
+                    loss_radius_px=loss_radius_px,
+                    loss_taper_px=loss_taper_px,
+                )
+                pixel_weight_trial = apply_core_loss_weight(
+                    pixel_weight_trial,
+                    data,
+                    frac_trial,
+                    core_radius_px=core_loss_radius_px,
+                    core_weight=core_loss_weight,
+                )
+                loss_star, _flux, _bg, _model, _z = _psf_fit_per_star(
+                    native_trial,
+                    data,
+                    rms_loss,
+                    pixel_weight=pixel_weight_trial,
+                    charbonnier_eps=charbonnier_eps,
+                    fit_background=fit_background,
+                    nonnegative_flux=nonnegative_flux,
+                )
+                loss_star.sum().backward()
+                refine_opt.step()
+                with torch.no_grad():
+                    delta.clamp_(-clamp_px, clamp_px)
         best_shift = delta.detach()
 
     native = head.render_at_native(epsf, frac_xy + best_shift, stamp_size=stamp_size)
