@@ -2116,3 +2116,52 @@ This section is intentionally redundant with earlier parts of the report. It is 
 - **Downstream tasks beyond astrometry**: weak-lensing shape measurement, photo-z inputs, transient classification. Each new task that consumes frozen foundation features reduces the foundation's amortised cost and tests a different aspect of the learned representation.
 
 This is an active research codebase. Architecture and training defaults evolve with experiments.
+
+---
+
+## Building this Document as a PDF
+
+The PDF version of this file (`DOCUMENTATION.pdf`) is produced with pandoc + xelatex. Pandoc ships bundled inside the `pypandoc` Python package on this machine; texlive (xelatex, dvipdfmx) is installed under `~/.local/bin/`.
+
+First write a LaTeX header file that shrinks wide tables (without it, the multi-column Current Stack Snapshot table overflows the page because DejaVu Sans is wider than the LaTeX default Latin Modern):
+
+```bash
+cat > /tmp/pdf_header.tex << 'EOF'
+\usepackage{etoolbox}
+\usepackage{longtable}
+\AtBeginEnvironment{longtable}{\footnotesize}
+\setlength{\tabcolsep}{4pt}
+\renewcommand{\arraystretch}{1.15}
+EOF
+```
+
+Then build the PDF:
+
+```bash
+PANDOC=/home/shemmati/.local/lib/python3.9/site-packages/pypandoc/files/pandoc
+export PATH="$HOME/.local/bin:$PATH"
+
+$PANDOC DOCUMENTATION.md -o DOCUMENTATION.pdf \
+  --pdf-engine=xelatex \
+  --toc \
+  --columns=200 \
+  --include-in-header=/tmp/pdf_header.tex \
+  --metadata title="JAISP Documentation" \
+  --metadata subtitle="Joint AI Survey Processing — Rubin + Euclid Foundation Model" \
+  --metadata author="Shoubaneh Hemmati" \
+  -V geometry:margin=0.85in \
+  -V fontsize=10pt \
+  -V mainfont="DejaVu Sans" \
+  -V monofont="Source Code Pro" \
+  -V colorlinks=true \
+  -V linkcolor=blue \
+  -V urlcolor=blue
+```
+
+Notes:
+- `mainfont=DejaVu Sans` and `monofont=Source Code Pro` are used because the default Latin Modern fonts lack Greek letters (σ, δ) and math symbols (≈, ≤, ≥) that appear throughout this document. Both fonts are preinstalled in `/usr/share/fonts/`.
+- The header file shrinks longtable text to `\footnotesize` and tightens column padding. Without this, the wide Current Stack Snapshot table breaks horribly.
+- `--columns=200` prevents pandoc from prewrapping wide markdown table source. `geometry:margin=0.85in` and `fontsize=10pt` together compensate for DejaVu Sans being wider than Latin Modern, keeping the document near its previous compact length (~74 pages).
+- The `--toc` flag produces a clickable table of contents on page 2; `--metadata` populates the PDF title page and the PDF metadata dictionary.
+- Run from the project root so that relative figure paths (`docs/figures/...`, `models/detection/...`) resolve correctly.
+- Output is ~11 MB with all 18 embedded figures.
