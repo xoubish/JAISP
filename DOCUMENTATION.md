@@ -22,10 +22,10 @@ When using this file operationally, prefer the checkpoints and commands marked a
 |-------|-----------------|-------|
 | Foundation | `models/checkpoints/jaisp_v10_warmstart/checkpoint_best.pt` (current production); `models/checkpoints/jaisp_v8_fine/checkpoint_best.pt` retained for completed downstream baselines | V10 is the current production backbone (defined in `models/jaisp_foundation_v10.py`): v9 concat fusion plus Charbonnier reconstruction loss and core-L2 weighting. The new detection, PSF, and astrometry rerun path use v10; older v8 heads remain valid baselines. |
 | Detection | Current v10 checkpoints: `checkpoints/centernet_v10_uncertain_synth_r2/centernet_best.pt` and `checkpoints/stem_centernet_v10_uncertain_synth_r2/stem_centernet_best.pt`; retained v8 cache: `data/detection_labels/centernet_v8_r2_790.pt` | Notebook 06 now treats the cleaner VIS-only classical reference as the decision baseline, not the SEP-assisted variant. Inference should run with spike veto off (`--spike_veto_radius 0 --spike_veto_width 0`): the veto was suppressing real bright/large objects. Current chosen operating points are CenterNet `conf=0.30` and StemCenterNet `conf=0.55`; `run_centernet_detections.py` auto-loads both fused and stem detector checkpoints. |
-| Astrometry | Completed baseline: `models/checkpoints/latent_position_v8_no_psf/best.pt`; current rerun targets: `models/checkpoints/latent_position_v10_no_psf/` and `models/checkpoints/latent_position_v10_epsf_centroid/` | V8 established the Gaussian-centroid baseline. The v10 rerun uses exported v10 CenterNet anchors at threshold 0.3 plus the full `data/cached_features_v10_warmstart` bottleneck cache, trains a Gaussian-centroid control, then tests FoundationEPSFHead centroiding as a separate ablation. |
-| Smooth field QA | `models/astrometry2/fit_direct_pinn.py` | Fits raw or head-residual anchors from `anchors.npz` or `anchors_centernet.npz`; CenterNet post-head PINN fields are about 1 mas and do not improve anchor residuals. |
-| Concordance uncertainty / model check | `models/astrometry2/fit_hierarchical_gp_concordance.py` | Experimental hierarchical GP-style field with posterior std maps. Current CenterNet post-head HGP does not agree with PINN or beat the zero-field baseline, so it is QA/model-selection only, not a production correction. For v10 anchor caches, pass `--dedup-radius-arcsec 0.05` to remove overlap-region duplicates before solving. |
-| PSF | Astrometry ablation checkpoint: `models/checkpoints/foundation_epsf_head_gaia_pca_v10_pm_v5_snr_cap_window/checkpoint_best.pt`; earlier run: `models/checkpoints/foundation_epsf_head_gaia_gaussian_v10_pm/` | Active path: Gaia-selected stars with proper-motion correction (`--obs-epoch-year 2025.0`) and image-based centroid refinement, frozen V10 foundation features, low-rank residual ePSF head, W&B image diagnostics. The PCA/SNR-cap/window checkpoint is the current candidate for the v10 astrometry ePSF-centroid ablation. Older PSFField/PCA/V4 attempts are archived under `models/older_architectures/psf/`. |
+| Astrometry | Current default: `models/checkpoints/latent_position_v10_no_psf/best.pt`; ablation: `models/checkpoints/latent_position_v10_epsf_centroid/best.pt`; retained baseline: `models/checkpoints/latent_position_v8_no_psf/best.pt` | The v10 rerun used exported CenterNet anchors at threshold 0.3 plus the full `data/cached_features_v10_warmstart` bottleneck cache. The Gaussian-centroid control is the current winner: eval raw/head MAE **62.6 -> 25.4 mas** and median **48.5 -> 11.3 mas** on 693,564 source-band measurements. The FoundationEPSFHead centroid ablation produced more anchors but worse residuals (**76.0 -> 39.2 mas** MAE; median **70.7 -> 26.7 mas**), so it is not the default astrometry path. |
+| Smooth field QA | `models/astrometry2/fit_direct_pinn.py` | Fits raw or head-residual anchors from eval-exported caches after 50 mas dedup. In the current v10 Gaussian run, the deduped head residuals are already small (all-band median **13.2 mas**) and residual PINN fields do not materially improve per-source medians; they are QA products, not production corrections. |
+| Concordance uncertainty / model check | `models/astrometry2/fit_hierarchical_gp_concordance.py` | Experimental hierarchical GP-style field with posterior std maps. Current v10 HGP products exist for both Gaussian and ePSF head-residual caches, with dedup enabled. HGP remains QA/model-selection only until it beats the zero-field baseline and agrees with PINN on supported regions. |
+| PSF | Astrometry ablation checkpoint: `models/checkpoints/foundation_epsf_head_gaia_pca_v10_pm_v5_snr_cap_window/checkpoint_best.pt`; earlier run: `models/checkpoints/foundation_epsf_head_gaia_gaussian_v10_pm/` | Active path: Gaia-selected stars with proper-motion correction (`--obs-epoch-year 2025.0`) and image-based centroid refinement, frozen V10 foundation features, low-rank residual ePSF head, W&B image diagnostics. The PCA/SNR-cap/window checkpoint was tested as a v10 astrometry centroid ablation and did **not** improve astrometry versus Gaussian centroids. Older PSFField/PCA/V4 attempts are archived under `models/older_architectures/psf/`. |
 | Photometry | `models/checkpoints/photometry_foundation_200_fast/checkpoint_best.pt`; experiment: `models/checkpoints/rendered_stamp_v2_bigstamp/checkpoint_best.pt` | Current main learned v8 photometry head plus scarlet-like residual-scene and rendered-stamp experimental paths. PSFField-backed photometry is historical until the new ePSF head is wired into photometry. |
 
 Figure policy for this file: keep only figures that change the reader's understanding. Repetitive good/worst galleries, per-epoch W&B panels, and minor variants should stay in notebooks or checkpoint folders unless they support a new conclusion.
@@ -498,7 +498,7 @@ The minimum guard `remaining < 2 → skip drop` ensures the encoder always recei
 
 **Files**: `models/jaisp_foundation_v10.py` (standalone — does not inherit from v8), `models/jaisp_dataset_v10.py`, `models/train_jaisp_foundation_v10.py`. The v10 module defines the full architecture (`JAISPFoundationV10`, `JAISPMixedEncoderV10`, all building blocks and helpers); `JAISPTrainerV10` builds the v10 model directly without inheriting from earlier trainers.
 
-**Status**: trained via warm-start from v9. Current checkpoint: `models/checkpoints/jaisp_v10_warmstart/checkpoint_best.pt`. This is the frozen foundation used by the active Gaia Gaussian ePSF-head run (`models/checkpoints/foundation_epsf_head_gaia_gaussian_v10_pm/`).
+**Status**: trained via warm-start from v9. Current checkpoint: `models/checkpoints/jaisp_v10_warmstart/checkpoint_best.pt`. This is the frozen foundation used by the current v10 detection export, the v10 Gaussian/ePSF astrometry comparison, and the Gaia/V10 ePSF-head checkpoints.
 
 V10 addresses an issue that is independent of v9's cross-instrument question: **per-source PSF profile residuals**. v9's reconstruction diagnostics (and v8's, equally) show systematic donut/dipole patterns at source positions — the model's predicted PSF is slightly broader than the truth at sharp cores, and slightly narrower at the wings. Two diagnostic patterns:
 
@@ -787,7 +787,7 @@ The completed v8 pipeline and the active v10 rerun share the same stages. The he
 3. **Latent feature extraction**: run the frozen foundation encoder once per tile to get the fused 10-band bottleneck (0.4 arcsec/px for v8/v10, 256 channels) and the raw VIS BandStem feature map (0.1 arcsec/px, 64 channels).
 4. **Per-object offset prediction**: `latent_position_head.py` extracts local windows from both feature maps (5×5 bottleneck, 11×11 VIS-stem), processes them through a small ConvNeXt + Conv + MLP head (687K parameters), and outputs `(dx, dy, log σ)` in VIS pixel space, converted to sky arcsec via the local WCS Jacobian.
 5. **Evaluation**: `eval_latent_position.py` reports raw and head-corrected residuals per band and exports an `anchors.npz` cache for any downstream field fit. The cache contains one entry per detection per tile -- **including duplicates from overlap regions**, where the same physical source is detected in adjacent tiles and projected to identical RA/Dec via the shared patch-boundary WCS.
-6. **Anchor deduplication**: `dedup_anchors.py` greedy-clusters per-band entries within `--radius-arcsec 0.05` (50 mas) and keeps the highest-SNR rep of each cluster, writing `anchors_centernet_dedup.npz` next to the original. Empirically ~69% of v8 CenterNet anchors are tile-overlap duplicates; dedup is the *default* downstream input for both density / number-count work and the smooth-field fits (see "Why dedup matters for the smooth-field fits" below). The original `anchors_centernet.npz` is retained only as the raw archive.
+6. **Anchor deduplication**: `dedup_anchors.py` greedy-clusters per-band entries within `--radius-arcsec 0.05` (50 mas) and keeps the highest-SNR rep of each cluster, writing a `*_dedup.npz` cache next to the original. In the current v10 runs, Gaussian anchors reduce **693,564 -> 201,952** source-band entries and ePSF anchors reduce **1,136,535 -> 367,596**. Dedup is the *default* downstream input for both density / number-count work and the smooth-field fits (see "Why dedup matters for the smooth-field fits" below). The non-deduped cache is retained only as the raw archive.
 7. **Optional smooth residual field**: `fit_direct_pinn.py` (PINN/NN) or `fit_hierarchical_gp_concordance.py` (HGP) fit a smooth field to raw or head-residual anchors -- QA, not a correction unless it beats the zero-field baseline on held-out anchors.
 
 ##### The latent position head
@@ -796,7 +796,7 @@ The bottleneck path captures chromatic morphology from all 10 bands (star vs gal
 
 **Training** uses jitter-based self-supervision: VIS Gaussian-fit centroids are the targets, controlled Gaussian jitter (~30 mas) creates approximate input positions, and the head learns to recover the photon centroid that the local features encode. Training augments with random 90°/180°/270° rotations and horizontal/vertical flips (16 orientations per source) -- the pixel-to-sky Jacobian is correctly transformed for each augmentation so the sky-space loss stays valid. The Rayleigh NLL loss includes a per-source label-noise term `σ_eff = sqrt(σ_pred² + σ_label²)` with `σ_label = 5 mas` by default, capturing the SITCOMTN-159 WCS-solution systematic floor and preventing overfitting to noisy bright-source labels.
 
-**Why the old PSFField labels were not the default.** The head extracts features at the jittered position; in the v7/v8 runs those features encoded the Gaussian/photon centroid convention. The archived PSFField-refined centroids differed from photon centroids by ~16 mas because they incorporated a learned PSF model the astrometry head could not see. Training the head to match that target created an irreducible ~29–30 mas plateau in both v7 and v8 runs (table below). The current v10 plan therefore keeps Gaussian-fit photon centroids as the control and tests the newer FoundationEPSFHead centroider as an explicit ablation, using the same detector anchors.
+**Why Gaussian centroids remain the default.** The head extracts features at the jittered position; in the v7/v8 runs those features encoded the Gaussian/photon centroid convention. The archived PSFField-refined centroids differed from photon centroids by ~16 mas because they incorporated a learned PSF model the astrometry head could not see. Training the head to match that target created an irreducible ~29–30 mas plateau in both v7 and v8 runs (table below). The v10 rerun tested the newer FoundationEPSFHead centroider as an explicit ablation using the same v10 CenterNet detections and cached foundation features. It produced more anchors but worse alignment, so Gaussian-fit photon centroids remain the production convention for astrometry.
 
 | Run | Foundation | Centroid labels | Detection / anchor source | Outcome |
 |---|---|---|---|---|
@@ -805,28 +805,30 @@ The bottleneck path captures chromatic morphology from all 10 bands (star vs gal
 | v7 + PSFField (ablation) | v7 | PSFField v3 | CenterNet v8 | 29.9 mas |
 | **v8 no-PSF** | **v8** | **Gaussian fit** | **classical anchors** | **headline result; see below** |
 | **v8 no-PSF** | **v8** | **Gaussian fit** | **CenterNet anchors** | **high-density downstream pipeline; see below** |
+| **v10 Gaussian control** | **v10** | **Gaussian fit** | **CenterNet v10, conf=0.3** | **current default; eval median 48.5 -> 11.3 mas, MAE 62.6 -> 25.4 mas** |
+| v10 ePSF-centroid ablation | v10 | FoundationEPSFHead | CenterNet v10, conf=0.3 | not default; more anchors but worse residuals, median 70.7 -> 26.7 mas, MAE 76.0 -> 39.2 mas |
 
-The v7 and v8 PSFField runs converge to the *same* ~29 mas plateau, proving that the archived PSFField target convention was the bottleneck. The new ePSF run is a fresh test because the PSF model and v10 features are now wired into the centroiding path.
+The v7 and v8 PSFField runs converge to the *same* ~29 mas plateau, proving that the archived PSFField target convention was the bottleneck. The v10 ePSF test is better controlled because the PSF model and v10 features are wired into the centroiding path, but it still does not beat the Gaussian convention. This means the next PSF-related astrometry work should debug centroid-definition / ePSF-fitting behaviour before treating ePSF centroids as labels.
 
 A second v8-specific lesson: **`bottleneck_window=5` works best even though v8 runs at 0.4 arcsec/px.** The auto-scaling default of 11×11 (~4 arcsec coverage) is too large for the head's 3×3 ConvNeXt kernel to integrate effectively, and dilutes the signal.
 
-##### Source detection: classical vs CenterNet
+##### Current v10 anchor caches
 
-The first pipeline stage can use either:
+The current v10 astrometry comparison keeps detector selection fixed and varies only the centroid convention:
 
-- **Classical** (default): median-background subtraction, Gaussian smoothing, local-maximum detection above an N-sigma threshold in Rubin (`g+r+i+z` coadd) and VIS independently, then WCS-based cross-match. Simple, fast, well understood.
-- **CenterNet**: a trained 10-band-aware neural detector that produces source positions directly in the VIS frame -- no cross-matching step. Recovers sources that are ambiguous in a 3-band coadd and produces a cleaner anchor pool.
+- **Gaussian control**: v10 CenterNet detections at `conf=0.3`, Gaussian-fit photon centroids. This is the current default.
+- **ePSF ablation**: the same v10 CenterNet detections, but centroids refined by `FoundationEPSFHead`.
 
-The two caches are kept side-by-side as a first-class experimental variable:
+The eval products are kept in two forms: the raw per-tile archive from `eval_latent_position.py --save-anchors`, and a 50 mas sky-deduped cache for density diagnostics and smooth-field fits.
 
-| Cache | Detector | Total source-band anchors | SNR ≥ 30 anchors | Raw median | Head median |
-|---|---|---:|---:|---:|---:|
-| `anchors.npz` | classical VIS peak finder | 630,120 | 36,574 | 44.2 mas | 10.2 mas |
-| `anchors_centernet.npz` | CenterNet VIS seeds | 491,748 | 34,510 | 39.8 mas | 8.5 mas |
+| Cache | Centroid convention | Archive anchors | Dedup anchors | Dedup SNR >= 30 | Dedup raw median | Dedup head median |
+|---|---|---:|---:|---:|---:|---:|
+| `latent_position_v10_no_psf/anchors_centernet_v10*.npz` | Gaussian fit | 693,564 | 201,952 | 9,730 | 54.1 mas | 13.2 mas |
+| `latent_position_v10_epsf_centroid/anchors_centernet_v10_epsf*.npz` | FoundationEPSFHead | 1,136,535 | 367,596 | 76,598 | 74.5 mas | 34.4 mas |
 
-This is deliberately a *catalogue-level* comparison, not object-matched -- the two detectors select different source pools. CenterNet anchors have lower raw and post-head medians, but fewer of them. Notebook 08 defaults to `anchors_centernet_v10.npz` after eval export; "the head helps by X" claims should be read as conditional on the selected anchor pool unless the classical cache is explicitly chosen.
+The ePSF ablation yields many more deduped anchors and many more high-SNR anchors, but those anchors are less precise. The Gaussian control reduces all-SNR dedup medians **54.1 -> 13.2 mas**; the ePSF ablation reduces **74.5 -> 34.4 mas**. This is a centroid-definition result, not a detector result: both runs use the same exported v10 CenterNet labels.
 
-The two anchor counts above (630,120 and 491,748) are pre-dedup. After 50 mas dedup the per-band kept fraction is 30–35% across all bands -- i.e. roughly **two thirds of every per-tile anchor cache is overlap-region duplicate**. The deduped CenterNet cache is 153,068 entries.
+Historical v8 notebooks also compare classical peak-finder caches against CenterNet caches. Those are useful for understanding detector effects, but they are not the current v10 Gaussian-vs-ePSF comparison.
 
 ##### Why dedup matters for the smooth-field fits
 
@@ -836,7 +838,7 @@ Both PINN ([fit_direct_pinn.py](models/astrometry2/fit_direct_pinn.py)) and HGP 
 - **False posterior tightness**: inverse-variance weighting reports very high information content where duplicates concentrate, even though they're not statistically independent.
 - **No genuine noise reduction**: with identical RA/Dec there is no spatial averaging benefit; you just get the same input twice with two slightly different offset readings, which the fitter cannot disentangle from genuine close-source structure.
 
-For these reasons the pipeline runs `dedup_anchors.py` immediately after `eval_latent_position.py --save-anchors`, and downstream consumers (PINN, HGP, density / number-count work) point at `anchors_centernet_dedup.npz`. The non-deduped cache is kept as a forensic archive only.
+For these reasons the pipeline runs `dedup_anchors.py` immediately after `eval_latent_position.py --save-anchors`, and downstream consumers (PINN, HGP, density / number-count work) point at the matching `*_dedup.npz` cache. The non-deduped cache is kept as a forensic archive only.
 
 ##### The four smooth-field solvers
 
@@ -856,152 +858,119 @@ All four are diagnostic in the current workflow. The latent head is the correcti
 
 ---
 
-#### Tests on the latent head (notebook 08)
+#### Latest v10 latent-head results (notebook 08)
 
-Notebook 08 (`io/08_astrometry_before_after.ipynb`) is the head's evaluation chain. Seven tests, each answering a specific question.
+Notebook 08 (`io/08_astrometry_before_after.ipynb`) has been rerun on the v10 CenterNet-threshold-0.3 anchor cache after 50 mas deduplication. The current astrometry story is now the **v10 Gaussian-centroid control** versus the **v10 FoundationEPSFHead centroid ablation**, with detector selection held fixed.
 
-##### Test 1 -- Cross-instrument before/after (Part 1)
+##### Eval-export headline: Gaussian beats ePSF
 
-**Question**: how much does the head improve per-object alignment, per band?
+`eval_latent_position.py` was run on all 790 ECDFS tiles with the same v10 foundation checkpoint, same exported CenterNet detections, and same cached bottleneck features.
 
-The headline v8 no-PSF result on the **classical anchor cache** (790 tiles, SNR ≥ 5, raw offset < 200 mas, 630,120 source-band measurements):
+| Run | Archive anchors | Raw MAE | Head MAE | Raw median | Head median | Improvement |
+|---|---:|---:|---:|---:|---:|---:|
+| v10 Gaussian control | 693,564 | 62.6 mas | 25.4 mas | 48.5 mas | 11.3 mas | 59.5 % |
+| v10 ePSF-centroid ablation | 1,136,535 | 76.0 mas | 39.2 mas | 70.7 mas | 26.7 mas | 48.4 % |
 
-| Band | N sources | Raw median | Head median | Head p68 | Improvement |
-|------|-----------|-----------:|------------:|---------:|------------:|
-| rubin_u | 12,347 | 119.4 mas | 30.5 mas | 53.3 mas | 74.5 % |
-| rubin_g | 60,148 | 54.0 mas | 11.4 mas | 22.3 mas | 78.9 % |
-| rubin_r | 70,022 | 45.7 mas | 10.4 mas | 19.8 mas | 77.2 % |
-| rubin_i | 62,232 | 41.2 mas | 10.3 mas | 18.9 mas | 75.1 % |
-| rubin_z | 42,980 | 41.9 mas | 10.9 mas | 19.9 mas | 74.0 % |
-| rubin_y | 17,126 | 61.5 mas | 14.7 mas | 29.4 mas | 76.2 % |
-| nisp_Y | 116,572 | 41.3 mas | 9.4 mas | 17.0 mas | 77.2 % |
-| nisp_J | 126,352 | 41.9 mas | 9.4 mas | 17.0 mas | 77.5 % |
-| nisp_H | 122,341 | 42.2 mas | 9.5 mas | 17.0 mas | 77.6 % |
+The ePSF path produces more source-band measurements, but those measurements are less precise. The practical conclusion is that the improved PSF head is **not yet improving astrometry**; Gaussian-fit photon centroids remain the default target convention.
 
-Rubin g/r/i/z and NISP Y/J/H reach **9–11 mas median**; Rubin y is **14.7 mas**; Rubin u remains harder at **30.5 mas** (low SNR + larger raw offsets). On the **CenterNet anchor cache** the same head gives 491,748 source-band measurements with combined raw → head **39.8 → 8.5 mas** (Rubin g/r/i/z 8.6–9.5, NISP Y/J/H 7.8–7.9, y 12.5, u 23.4).
+##### Deduped anchor comparison
 
-![v8 cross-instrument eval](docs/figures/astrometry_v8_cross_instrument.png)
-*Headline v8 no-PSF classical-anchor result: raw (grey) vs head-corrected (blue) radial offset distributions per band, 630K source×band measurements across 790 tiles.*
+Notebook 08 defaults to the deduped v10 Gaussian cache: `models/checkpoints/latent_position_v10_no_psf/anchors_centernet_v10_dedup.npz`. The ePSF ablation is available via `JAISP_ASTROMETRY_RUN=epsf_centroid`.
+
+| Source | Pool | N | Median SNR | Raw median | Head median | Head gain | Raw MADxy | Head MADxy |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| v10 Gaussian | all SNR | 201,952 | 9.4 | 54.1 mas | 13.2 mas | 75.6 % | 43.3 mas | 10.8 mas |
+| v10 Gaussian | SNR >= 30 | 9,730 | 41.3 | 12.2 mas | 8.0 mas | 34.2 % | 9.3 mas | 6.7 mas |
+| v10 Gaussian | SNR < 30 | 192,222 | 9.1 | 56.9 mas | 13.7 mas | 75.9 % | 46.0 mas | 11.2 mas |
+| v10 ePSF | all SNR | 367,596 | 12.1 | 74.5 mas | 34.4 mas | 53.9 % | 74.1 mas | 28.7 mas |
+| v10 ePSF | SNR >= 30 | 76,598 | 57.1 | 47.1 mas | 23.9 mas | 49.2 % | 49.4 mas | 19.7 mas |
+| v10 ePSF | SNR < 30 | 290,998 | 9.7 | 100.0 mas | 37.3 mas | 62.7 % | 74.2 mas | 31.7 mas |
+
+The Gaussian run has fewer high-SNR anchors after dedup, but much better per-source precision. This is why anchor count alone is not the metric to optimize.
+
+##### Per-band before/after on the v10 Gaussian cache
+
+On the deduped Gaussian cache, the head reduces per-band medians to 11-16 mas for Rubin g/r/i/z and NISP Y/J/H, 27 mas for Rubin y, and 44 mas for Rubin u. Subtracting the fitted PINN field after the head changes medians by essentially zero, confirming that the residual is mainly source-level scatter, not a coherent WCS field.
+
+| Band | N | Raw median | Raw+PINN | Head median | Head+PINN | raw field | head field |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| u | 6,898 | 130.3 | 129.9 | 43.9 | 43.7 | 9.8 | 1.6 |
+| g | 19,686 | 63.2 | 63.0 | 15.0 | 15.0 | 4.7 | 0.7 |
+| r | 22,255 | 53.2 | 53.0 | 12.9 | 13.0 | 4.5 | 1.1 |
+| i | 20,270 | 50.6 | 50.3 | 13.4 | 13.4 | 5.4 | 0.9 |
+| z | 15,418 | 58.4 | 58.8 | 16.2 | 16.2 | 5.8 | 1.1 |
+| y | 7,694 | 96.5 | 96.2 | 27.1 | 27.1 | 6.4 | 1.7 |
+| NISP Y | 33,932 | 47.9 | 47.5 | 11.2 | 11.2 | 6.9 | 1.1 |
+| NISP J | 38,370 | 48.9 | 48.0 | 11.3 | 11.3 | 7.6 | 1.3 |
+| NISP H | 37,429 | 49.7 | 49.1 | 11.5 | 11.4 | 6.2 | 1.1 |
 
 ![Headline before/after per-band](docs/figures/astrometry_before_after.png)
-*Notebook 08 Part 1 -- CenterNet anchor cache, 491,748 source-band measurements. Raw / Raw+PINN / Head / Head+PINN medians per band. After the head, the residual PINN field changes medians by ≤0.2 mas on every band.*
+*Notebook 08 Part 1 -- v10 Gaussian deduped CenterNet cache. Raw / Raw+PINN / Head / Head+PINN medians per band. The fitted residual smooth field is small after the head.*
 
-##### Test 2 -- Detector vs head credit separation (Parts 1b, 4a)
+##### Anchor density and per-source precision
 
-**Question**: how much of the gain comes from CenterNet vs from the head?
+The v10 Gaussian head still turns faint/mid-SNR detections into useful astrometric anchors. On the i band, 51.9 % of anchors are SNR < 10, 39.0 % are 10 <= SNR < 30, and only 9.1 % are SNR >= 30. Median per-cell density at 60 arcsec resolution rises from a few bright anchors per arcmin^2 to tens of all-SNR anchors per arcmin^2.
 
-The two contributions are separable. Combined-pool field RMS goes from **5.72 mas (classical, raw)** to **1.00 mas (CenterNet, head_resid)** -- CenterNet alone knocks ~0.9 mas off the raw field, the head knocks another ~3–4 mas off. Combined-gain numbers: **80.8 % (all SNR)** and **35.4 % (SNR ≥ 30)**.
-
-![Anchor source comparison](docs/figures/anchor_source_comparison.png)
-*Part 1b -- classical vs CenterNet anchor pools, raw and head columns separated.*
-
-![Detector-source concordance comparison](docs/figures/anchor_source_concordance_comparison.png)
-*Part 4a -- field-RMS panel for the 2×2 of `(classical / CenterNet) × (raw / head_resid)`. The detector and head contributions are additive and must be reported separately.*
-
-##### Test 3 -- SNR-stratified PINN refits (Part 4)
-
-**Question**: does the smooth field amplitude depend on which anchors we feed in?
-
-Stratify the 9-band CenterNet anchor pool by per-band SNR terciles, refit PINN jointly across bands per slice, on raw and on head-residual offsets:
-
-| Slice | kind | N | raw med | resid med | field RMS | field p95 |
-|---|---|---:|---:|---:|---:|---:|
-| all | raw | 491,748 | 39.8 | 39.3 | 1.6 | 2.3 |
-| classical SNR≥30 | raw | 34,510 | 11.6 | 11.0 | **3.8** | 7.2 |
-| top tercile | raw | 163,903 | 22.4 | 21.3 | 8.4 | 14.7 |
-| middle tercile | raw | 163,943 | 42.2 | 41.8 | 2.8 | 3.8 |
-| bottom tercile | raw | 163,902 | 59.8 | 59.5 | 10.4 | 11.9 |
-| all | head_resid | 491,748 | 8.5 | 8.7 | **2.0** | 2.1 |
-| classical SNR≥30 | head_resid | 34,510 | 7.7 | 8.2 | 1.9 | 2.2 |
-| top tercile | head_resid | 163,903 | 7.6 | 7.9 | 1.2 | 1.6 |
-| middle tercile | head_resid | 163,943 | 8.8 | 9.2 | 3.4 | 3.8 |
-| bottom tercile | head_resid | 163,902 | 9.3 | 9.6 | 2.8 | 3.8 |
-
-**Bright-only raw recovers the ~5 mas reference** (classical SNR ≥ 30: 3.8 mas, brightest tercile: 8.4 mas -- the tercile is dominated by *brighter* faint stars and overshoots). **All head_resid slices sit near 1–2 mas**, regardless of where on the SNR ladder we sample -- the head has removed the coherent signal and the PINN has nothing left to fit.
-
-##### Test 4 -- Bootstrap and shuffled-null significance (Part 4b)
-
-**Question**: are the recovered field amplitudes statistically real?
-
-Bootstrap each slice five times for a 1σ_boot bar; permute anchor positions while keeping offsets to measure the noise floor (the "shuffled-null"). Real RMS / null RMS is the cleanest single-number significance.
-
-| Slice | raw signal/null | head_resid signal/null |
-|---|---:|---:|
-| all | 0.7× | 0.8× |
-| classical SNR ≥ 30 | 0.5× | 1.4× |
-| top tercile | 1.4× | 1.8× |
-| middle tercile | 1.4× | 1.7× |
-| bottom tercile | 0.6× | 1.2× |
-
-The all-anchor and bottom-tercile slices are noise-dominated. **The classical SNR ≥ 30 raw signal/null of 0.5× is the surprising result**: bright-only raw RMS is *not* statistically distinguishable from the shuffled-null on this anchor pool. Smooth-field detection on this geometry rests on the *structured* / physics-prior solvers (PINN, NN, super-tight HGP), not on raw bright-only RMS.
-
-![Field amplitude with bootstrap error bars vs shuffled-null floor](docs/figures/snr_field_amp_with_null.png)
-*Part 4b -- bootstrap field RMS with 1σ_boot bars (filled) vs shuffled-null floor (×) per SNR slice. Squares = head_resid, circles = raw. A real measurement sits well above its null cross with a small fractional bootstrap σ.*
-
-##### Test 5 -- Single-kernel GP cross-check (Part 4c) -- *negative result*
-
-**Question**: does an independent Gaussian Process with a calibrated kernel agree with PINN?
-
-On the i band, classical SNR ≥ 30, 1,200 anchors, with an RBF + white-noise kernel:
-
-- The kernel hits its **15 arcsec lower length-scale bound** (three sklearn `ConvergenceWarning`s on length scale, constant amplitude, and noise level -- the optimiser cannot find a data-preferred scale).
-- GP field RMS: **15.53 mas** vs PINN's **10.29 mas**.
-- Vector-difference RMS: **15.57 mas** (dRA 10.43, dDec 11.56) -- the methods disagree at the same scale as the GP signal itself.
-- Hold-out z-score std: **1.39** (target 1.0) -- the GP is under-calibrated.
-
-![GP vs PINN, i band classical SNR≥30](docs/figures/gp_vs_pinn_field.png)
-*Part 4c -- GP field, PINN field, GP–PINN difference, hold-out z-score histogram. The GP fails its own calibration and disagrees with PINN at ~5 mas. Read this as a model-mismatch warning, not as confirmation.*
-
-This is **why notebook 09 brings in HGP**. A single-kernel GP at one length scale cannot represent the actual field structure on this geometry; a hierarchical multi-scale Bayesian model can.
-
-##### Test 6 -- Anchor leverage and per-source precision (Part 3b)
-
-**Question**: how does the head change the anchor density available for a smooth-field fit, and how good is each anchor?
-
-Bin anchors on a 1 arcmin × 1 arcmin grid (the natural correlation-length scale for a smooth WCS distortion). Per-band median density and per-source MADxy improvement:
-
-| Band | bright (SNR≥30) per arcmin² | head-enabled (all SNR) | density gain | MADxy gain (raw → head) |
-|---|---:|---:|---:|---:|
-| rubin_u | 0 | 16 | ∞ | 5.3× |
-| rubin_g | 5 | 80 | 16× | 5.0× |
-| rubin_r | 8 | 95 | 11.9× | 4.5× |
-| rubin_i | 10 | 82 | 8.2× | 4.0× |
-| rubin_z | 7.5 | 57 | 7.6× | 3.8× |
-| rubin_y | 2 | 23 | 11.5× | 4.0× |
-| nisp_Y | 4 | 148 | 37× | 4.7× |
-| nisp_J | 4 | 164 | 41× | 4.6× |
-| nisp_H | 5 | 158 | 31.6× | 4.6× |
-
-For i band: faint:bright = 3.7× (faint <10 SNR: 23,964; mid: 18,502; bright ≥30: 6,526). The head turns **8–41× more anchors per arcmin²** into useful field constraints.
+| Band | bright anchors / arcmin^2 | all anchors / arcmin^2 | density gain | raw MADxy | head MADxy | scatter gain |
+|---|---:|---:|---:|---:|---:|---:|
+| u | 0 | 11 | effectively infinite | 105.5 | 32.4 | 3.3x |
+| g | 2 | 33 | 16.5x | 51.0 | 12.2 | 4.2x |
+| r | 3 | 37 | 12.3x | 42.3 | 10.7 | 3.9x |
+| i | 3 | 34 | 11.3x | 39.9 | 10.9 | 3.7x |
+| z | 2 | 25 | 12.5x | 45.4 | 12.9 | 3.5x |
+| y | 1 | 13 | 13.0x | 71.3 | 20.2 | 3.5x |
+| NISP Y | 1 | 54 | 54.0x | 38.9 | 9.3 | 4.2x |
+| NISP J | 1 | 62 | 62.0x | 39.5 | 9.5 | 4.2x |
+| NISP H | 2 | 60 | 30.0x | 40.0 | 9.5 | 4.2x |
 
 ![Anchor leverage gain](docs/figures/anchor_leverage_gain.png)
-*Part 3b -- per-band anchor density at SNR ≥ 30 vs all-SNR (left); cell-coverage curve for i band (right). The classical curve falls off rapidly; the head-enabled curve maintains tens of anchors per cell across 95 % of the field.*
+*Part 3b -- per-band anchor density at SNR >= 30 versus all-SNR anchors on 60 arcsec cells.*
 
 ![Per-source precision vs SNR](docs/figures/per_source_precision.png)
-*Per-source precision floor (Part 3b). Left: median MADxy per band, raw vs head -- improvement factors 3.8–5.3×. Right: median MADxy vs SNR for raw anchors, with the King 1983 floor `FWHM/(2.35·SNR)` overlaid. The head reaches a flat ~8 mas regime well below the SNR-dependent classical floor for all but the brightest anchors.*
+*Part 3b -- raw-to-head MADxy improvement. The v10 Gaussian head reduces per-source scatter by roughly 3.3-4.2x depending on band.*
 
-##### Test 7 -- Sparse-field recovery, source-disjointly (Part 5)
+##### SNR-stratified smooth-field refits and null tests
 
-**Question**: in a sparse field with too few bright anchors for a classical concordance fit, can the head's predictions on faint sources stand in?
+The main QA result is that the remaining smooth fields after the head are small and usually close to the shuffled-null floor. This weakens the old claim that the head can robustly stand in as a concordance-grade smooth-field measurement on faint sources. It still provides strong per-source alignment, but the field-level signal after the head is marginal.
 
-Fit the head-implied non-classical field -- `raw − head_resid` smoothed via PINN, only on `SNR < 30` anchors (457,238 sources) -- and compare it to the classical bright-only field (`SNR ≥ 30`) which uses *disjoint* anchors. Results:
+| Slice | kind | N used | N full | field RMS | null RMS | signal/null |
+|---|---|---:|---:|---:|---:|---:|
+| all | raw | 60,000 | 201,952 | 5.63 +/- 2.03 mas | 5.08 mas | 1.1x |
+| all | head_resid | 60,000 | 201,952 | 3.43 +/- 2.36 mas | 2.42 mas | 1.4x |
+| classical SNR >= 30 | raw | 9,730 | 9,730 | 10.79 +/- 8.72 mas | 29.28 mas | 0.4x |
+| classical SNR >= 30 | head_resid | 9,730 | 9,730 | 2.47 +/- 1.11 mas | 1.72 mas | 1.4x |
+| top tercile | raw | 60,000 | 67,313 | 7.10 +/- 2.52 mas | 4.47 mas | 1.6x |
+| top tercile | head_resid | 60,000 | 67,313 | 2.40 +/- 0.98 mas | 2.18 mas | 1.1x |
+| middle tercile | raw | 60,000 | 67,326 | 6.41 +/- 3.96 mas | 4.96 mas | 1.3x |
+| middle tercile | head_resid | 60,000 | 67,326 | 2.87 +/- 1.19 mas | 3.05 mas | 0.9x |
+| bottom tercile | raw | 60,000 | 67,313 | 3.75 +/- 0.94 mas | 2.98 mas | 1.3x |
+| bottom tercile | head_resid | 60,000 | 67,313 | 3.92 +/- 1.46 mas | 2.41 mas | 1.6x |
 
-- Head-implied non-classical field RMS: **2.4 mas**.
-- Vector RMS vs classical bright-only: **4.79 mas**.
-- Median vector disagreement: **4.20 mas**.
+![Field amplitude with bootstrap error bars vs shuffled-null floor](docs/figures/snr_field_amp_with_null.png)
+*Part 4b -- bootstrap field RMS with 1-sigma bars compared with a shuffled-position null. Most head-residual fields are only marginally above null.*
 
-The two fields use disjoint anchor sets, so this is not the trivial "head_pred resembles raw because head_pred is defined from raw and head_resid". It is direct evidence that head predictions on faint sources reconstruct the same smooth concordance field that bright stars recover classically.
+##### Independent GP and sparse-field tests are negative on v10
+
+The band-matched GP check on i-band SNR >= 30 raw anchors does **not** confirm the PINN field: GP field RMS is **20.99 mas**, PINN field RMS is **9.39 mas**, vector-difference RMS is **20.24 mas**, and the GP hits its 15 arcsec lower length-scale bound with z-score std **1.71**. Treat this as a model-mismatch warning.
+
+![GP vs PINN, i band classical SNR>=30](docs/figures/gp_vs_pinn_field.png)
+*Part 4c -- GP and PINN disagree at roughly the GP signal scale on the v10 Gaussian deduped cache.*
+
+The source-disjoint sparse-field recovery test is also negative in the latest v10 run. Fitting the head-implied field from non-classical anchors (`SNR < 30`) gives field RMS **4.8 mas**, but its vector RMS relative to the classical raw field is **23.98 mas** with median disagreement **17.84 mas**. This replaces the earlier v8-positive sparse-field claim: the current v10 Gaussian head is excellent as a per-object alignment correction, but it should not yet be advertised as a standalone faint-source concordance-field proxy.
 
 ![Sparse-field recovery: head-implied vs classical](docs/figures/head_implied_vs_classical_field.png)
-*Part 5 source-disjoint sparse-field test. The head-implied non-classical field reproduces the classical bright-only field within ~5 mas vector RMS, on completely disjoint anchor pools.*
-
-The takeaway: in a sparse field where bright stars are too few to fit a smooth WCS distortion directly, the head can stand in. It converts faint sources into effective anchors, and its averaged predictions are a usable proxy for the classical concordance measurement. This generalises the head's role from *per-object correction for forced photometry* to *concordance-grade WCS measurement in fields without enough bright stars*.
+*Part 5 -- latest v10 run. The head-implied non-classical field does not reproduce the classical raw field closely enough to support the old sparse-field recovery claim.*
 
 ---
 
-#### Tests on the smooth field (notebook 09)
+#### Historical smooth-field tests (notebook 09)
 
-Notebook 09 (`io/09_astrometry_hgp_vs_pinn.ipynb`) brings in HGP as the proper Bayesian cross-validator that the single-kernel GP could not be. It compares HGP and PINN on the same CenterNet anchor cache, on raw and head-residual offsets, in nine sections.
+Notebook 09 (`io/09_astrometry_hgp_vs_pinn.ipynb`) brings in HGP as the proper Bayesian cross-validator that the single-kernel GP could not be. The detailed numbers below are retained from the previous CenterNet/HGP analysis and should be treated as historical until Notebook 09 is rerun and summarized on the new v10 Gaussian/ePSF products. The current v10 products already exist at:
+
+- `models/checkpoints/latent_position_v10_no_psf/concordance_hgp_head_resid_dedup.fits`
+- `models/checkpoints/latent_position_v10_epsf_centroid/concordance_hgp_head_resid_dedup.fits`
+
+Use the current Notebook 08 conclusion as the astrometry headline: per-source v10 Gaussian correction is strong, while residual smooth-field detection after the head is weak and close to null.
 
 ##### Test 1 -- Loose-prior holdout calibration (§1)
 
@@ -1156,22 +1125,20 @@ The original 9-band × 4-column concordance comparison shows the role each solve
 
 #### Conclusions
 
-**The headline numbers.** The v8 latent position head reduces the median radial Rubin–VIS source offset by **74–79 %** across all bands. Rubin g/r/i/z and NISP Y/J/H reach **9–11 mas median** on the classical anchor cache; **8–9 mas** on the CenterNet cache. Rubin y is **14.7 mas / 12.5 mas** (classical / CenterNet), Rubin u is **30.5 mas / 23.4 mas**.
+**The headline numbers.** The current v10 Gaussian-centroid head is the production astrometry default. On the 790-tile CenterNet v10 eval cache it improves raw/head **62.6 -> 25.4 mas MAE** and **48.5 -> 11.3 mas median**. On the 50 mas deduped cache used by Notebook 08, the all-band median is **54.1 -> 13.2 mas**. Rubin g/r/i/z and NISP Y/J/H land at about **11-16 mas median**, Rubin y at **27 mas**, and Rubin u at **44 mas**.
 
-**The head is the correction, the smooth field is QA.** After the head, the residual smooth field is **~1 mas** (PINN head_resid), the anchor-level improvement is **0.011–0.027 mas**, and applying the smooth field changes per-source medians by ≤0.2 mas on every band. The smooth field is a diagnostic and a fallback for sparse fields, not a production correction layer.
+**The ePSF centroid ablation is negative.** FoundationEPSFHead centroiding produces more anchors (**1,136,535** archive anchors; **367,596** after dedup) but worsens astrometric quality relative to the Gaussian control: archive eval **76.0 -> 39.2 mas MAE**, median **70.7 -> 26.7 mas**; dedup Notebook 08 median **74.5 -> 34.4 mas**. The PSF head remains valuable as an instrument model, but it should not currently provide astrometry labels.
 
-**The raw smooth field is real at ~5σ per pixel and detected by three converging structured methods.** PINN, NN, and super-tight HGP agree on the raw smooth field amplitude within ~1.5 mas RMS and on the anchor-level improvement within 0.03 mas. Super-tight HGP gives a calibrated posterior std of **1.0–1.1 mas** median over a **~5 mas** field -- a ~5σ per-pixel detection. The single-kernel GP from notebook 08 is *not* in this convergence list: it failed its own calibration (std(z) = 1.39, kernel hits 15 arcsec bound, RMS disagrees with PINN by ~5 mas). The bright-only raw signal/null of 0.5× shows that smooth-field detection rests on the structured priors, not on bright-only RMS.
+**The head is the correction, the smooth field is QA.** After the v10 Gaussian head, residual smooth fields are small and often close to shuffled-null amplitudes. The all-anchor bootstrap/null result is **3.43 +/- 2.36 mas** for head residuals versus **2.42 mas** shuffled null; applying PINN to the head residuals changes per-source medians essentially not at all. Smooth fields are diagnostics and consistency checks, not an extra production correction layer.
 
-**HGP is a QA / model-selection layer, not a correction product.** HGP delivers per-pixel posterior uncertainty, spatial-holdout calibration, instrument/band attribution, and an overfitting check -- none of which PINN provides. But HGP is prior-sensitive: the published loose-prior product (`concordance_hgp_head_resid_richer.fits`) fails its own holdout calibration (calibration factor 1.67, train ≪ holdout) and overshoots PINN by 4–5 mas in the worst bands. **Cross-validation requires super-tight priors** (length scales 300/900 arcsec, hierarchy 4/2/1 mas). Even at super-tight, ~1.5 mas of residual HGP–PINN disagreement is genuine prior difference (only ~0.3 mas is the basis-function lattice), so HGP and PINN should be reported as two complementary models, not a single agreed-upon field. HGP graduates to a correction product only if it beats the zero-field baseline on held-out post-head anchors -- currently it does not.
+**The sparse-field proxy claim is not supported by the latest v10 run.** The old v8-positive statement that head-implied faint-source fields could stand in for bright-star concordance should be withdrawn for now. In v10 Notebook 08, the non-classical head-implied field has RMS **4.8 mas**, but disagrees with the classical raw field by **23.98 mas vector RMS** and **17.84 mas median** on disjoint anchors.
 
-**The head also enables sparse-field WCS measurement.** The head-implied non-classical field (smoothed `raw − head_resid` on `SNR < 30` anchors only) reproduces the classical bright-only field within **~5 mas vector RMS** on disjoint anchor pools. In a field with too few bright stars to fit a classical concordance, the head's predictions on faint sources stand in. Density gain at 1 arcmin²: **8–41× more anchors** in the head-enabled pool than in the bright-only pool.
-
-**Detector and head credit must be reported separately.** The CenterNet anchor pool (491,748 source-band measurements) is a different, better-selected source pool than the classical pool (630,120 source-band measurements) -- not a superset. CenterNet alone reduces the field RMS by ~0.9 mas; the head reduces it by another ~3–4 mas. Combined-pool field RMS goes from **5.72 mas (classical, raw)** to **1.00 mas (CenterNet, head_resid)**. Headline phrasing should always specify which anchor cache is used.
+**HGP is a QA / model-selection layer, not a correction product.** HGP delivers per-pixel posterior uncertainty, spatial-holdout calibration, instrument/band attribution, and an overfitting check -- none of which PINN provides. Current v10 HGP products exist for Gaussian and ePSF head-residual caches, but they should be read as diagnostics until Notebook 09 confirms support-masked agreement with PINN and improvement over the zero-field baseline.
 
 **Operational rules-of-thumb.**
 - Train and evaluate the control head with **Gaussian-fit photon centroids**. Treat PSF centroids as an ablation unless they beat this control; the archived PSFField target created a 16 mas mismatch and a 29 mas plateau.
 - Use **`bottleneck_window=5`** for the v8 baseline and current v10 rerun -- the auto-scaling 11×11 default diluted the signal in the migration tests.
-- Use **PINN/NN/control-grid** for the smooth-field diagnostic and **super-tight HGP** for the calibrated cross-check; do not use loose-prior HGP for cross-validation.
+- Use **PINN/NN/control-grid** for smooth-field diagnostics and **HGP** for calibrated uncertainty/model-selection checks. Do not promote any smooth field to a correction product unless it beats the zero-field baseline on held-out/source-disjoint anchors and agrees with another solver on supported regions.
 - The **`SNR ≥ 30`** classical-anchor cut is calibrated to the King 1983 floor at 0.7 arcsec FWHM (~10 mas centroid precision). If a result depends strongly on it, rerun with `SNR ≥ 50` and `SNR ≥ 100`.
 
 ---
@@ -1272,7 +1239,49 @@ PYTHONPATH=models python models/astrometry2/eval_latent_position.py \
     --save-anchors     models/checkpoints/latent_position_v10_epsf_centroid/anchors_centernet_v10_epsf.npz \
     --output-dir       models/checkpoints/latent_position_v10_epsf_centroid/eval_centernet_epsf
 
-# 4. Experimental HGP concordance with overlap-anchor deduplication.
+# 4. Deduplicate overlap-region anchors before density or field work.
+PYTHONPATH=models python models/astrometry2/dedup_anchors.py \
+    --anchors models/checkpoints/latent_position_v10_no_psf/anchors_centernet_v10.npz \
+    --output  models/checkpoints/latent_position_v10_no_psf/anchors_centernet_v10_dedup.npz \
+    --radius-arcsec 0.05
+
+PYTHONPATH=models python models/astrometry2/dedup_anchors.py \
+    --anchors models/checkpoints/latent_position_v10_epsf_centroid/anchors_centernet_v10_epsf.npz \
+    --output  models/checkpoints/latent_position_v10_epsf_centroid/anchors_centernet_v10_epsf_dedup.npz \
+    --radius-arcsec 0.05
+
+# 5a. PINN raw/head-residual QA fields for the Gaussian default.
+PYTHONPATH=models python models/astrometry2/fit_direct_pinn.py \
+    --cache  models/checkpoints/latent_position_v10_no_psf/anchors_centernet_v10_dedup.npz \
+    --output models/checkpoints/latent_position_v10_no_psf/concordance_pinn_centernet_v10_raw.fits
+
+PYTHONPATH=models python models/astrometry2/fit_direct_pinn.py \
+    --cache  models/checkpoints/latent_position_v10_no_psf/anchors_centernet_v10_dedup.npz \
+    --use-head-resid \
+    --output models/checkpoints/latent_position_v10_no_psf/concordance_pinn_centernet_v10_head_resid.fits
+
+# 5b. PINN raw/head-residual QA fields for the ePSF ablation.
+PYTHONPATH=models python models/astrometry2/fit_direct_pinn.py \
+    --cache  models/checkpoints/latent_position_v10_epsf_centroid/anchors_centernet_v10_epsf_dedup.npz \
+    --output models/checkpoints/latent_position_v10_epsf_centroid/concordance_pinn_centernet_v10_raw.fits
+
+PYTHONPATH=models python models/astrometry2/fit_direct_pinn.py \
+    --cache  models/checkpoints/latent_position_v10_epsf_centroid/anchors_centernet_v10_epsf_dedup.npz \
+    --use-head-resid \
+    --output models/checkpoints/latent_position_v10_epsf_centroid/concordance_pinn_centernet_v10_head_resid.fits
+
+# 6a. Experimental HGP concordance for the Gaussian default.
+PYTHONPATH=models python models/astrometry2/fit_hierarchical_gp_concordance.py \
+    --anchors models/checkpoints/latent_position_v10_no_psf/anchors_centernet_v10.npz \
+    --output  models/checkpoints/latent_position_v10_no_psf/concordance_hgp_head_resid_dedup.fits \
+    --offset-kind head_resid \
+    --pool all \
+    --length-scales 60,180,600 \
+    --dstep-arcsec 5 \
+    --dedup-radius-arcsec 0.05 \
+    --write-coverage
+
+# 6b. Experimental HGP concordance for the ePSF ablation.
 PYTHONPATH=models python models/astrometry2/fit_hierarchical_gp_concordance.py \
     --anchors models/checkpoints/latent_position_v10_epsf_centroid/anchors_centernet_v10_epsf.npz \
     --output  models/checkpoints/latent_position_v10_epsf_centroid/concordance_hgp_head_resid_dedup.fits \
@@ -1286,7 +1295,7 @@ PYTHONPATH=models python models/astrometry2/fit_hierarchical_gp_concordance.py \
 
 ##### Optional diagnostics not embedded above
 
-The chromatic and morphology diagnostics are kept in `docs/figures/` but not embedded in this section: `astrometry_chromatic_diagnostic.png` (per-band colour-dependent centroid trends), `astrometry_snr_diagnostic.png` (SNR-tail), `astrometry_morphology_diagnostic.png` (galaxy-vs-star centroid scatter). The centring and v8 cross-instrument figures already carry the main story.
+The chromatic and SNR diagnostics are kept in `docs/figures/` but not embedded in this section: `astrometry_chromatic_diagnostic.png` (per-band colour-dependent centroid trends) and `astrometry_snr_diagnostic.png` (SNR-tail). The centring diagnostic plus the v10 Notebook 08 figures carry the main astrometry story.
 ### 3. PSF Modelling and Photometry
 
 **Directory**: `models/psf/`
@@ -1624,8 +1633,8 @@ JAISP/
 |   |   +-- jaisp_v9/                  V9 concat-fusion + adversarial-mask checkpoint (warm-start source for v10)
 |   |   +-- jaisp_v8_fine/             V8 fine-scale checkpoint; retained for completed downstream baselines
 |   |   +-- latent_position_v8_no_psf/ V8 latent astrometry baseline + anchors
-|   |   +-- latent_position_v10_no_psf/ Planned v10 Gaussian-centroid astrometry control
-|   |   +-- latent_position_v10_epsf_centroid/ Planned v10 FoundationEPSF centroid ablation
+|   |   +-- latent_position_v10_no_psf/ Current v10 Gaussian-centroid astrometry default
+|   |   +-- latent_position_v10_epsf_centroid/ Completed v10 FoundationEPSF centroid ablation
 |   |   +-- foundation_epsf_head_gaia_pca_v10_pm_v5_snr_cap_window/ Current Gaia/V10 ePSF-head candidate
 |   |   +-- foundation_epsf_head_gaia_gaussian_v10_pm/ Earlier Gaia/V10 ePSF-head baseline
 |   |   +-- photometry_foundation_200_fast/ Current learned photometry-head run
@@ -1832,16 +1841,19 @@ python models/detection/run_centernet_detections.py \
 
 ### 3. Astrometry
 
-The current astrometry correction is the latent position head: it predicts a per-object offset from frozen foundation features and reduces the dominant centering scatter. The older patch matcher and concordance field solvers are still available, but they are now best treated as smooth-field QA/fallback tools because ECDFS has only a few mas of coherent WCS residual. The completed v8 checkpoint is the reference baseline; the active rerun below switches to v10, threshold-0.3 CenterNet anchors, and an explicit ePSF-centroid ablation.
+The current astrometry correction is the v10 Gaussian-centroid latent position head: it predicts a per-object offset from frozen foundation features and reduces the dominant centering scatter. The older patch matcher and concordance field solvers are still available, but they are now best treated as smooth-field QA/fallback tools because ECDFS has only a few mas of coherent WCS residual. The completed v8 checkpoint is retained as the reference baseline; the v10 ePSF-centroid run is a completed negative ablation, not the default.
 
 Key features:
-- **Latent head correction**: completed v8 no-PSF checkpoint reduces raw 41-62 mas optical/NISP medians to ~9-15 mas, with Rubin u at ~30 mas.
-- **Current v10 rerun**: export v10 CenterNet labels at threshold 0.3, train the Gaussian-centroid control, then train the FoundationEPSFHead centroid ablation on the same anchor cache.
+- **Current v10 default**: Gaussian-centroid control on CenterNet threshold-0.3 labels improves archive eval medians **48.5 -> 11.3 mas** and deduped Notebook 08 medians **54.1 -> 13.2 mas**.
+- **ePSF ablation**: the FoundationEPSFHead-centroid run produces more anchors but worse residuals (**70.7 -> 26.7 mas** archive median; **74.5 -> 34.4 mas** deduped median), so Gaussian-fit photon centroids remain the astrometry convention.
+- **Retained v8 baseline**: completed v8 no-PSF checkpoint reduces raw 41-62 mas optical/NISP medians to ~9-15 mas, with Rubin u at ~30 mas.
 - **Centering diagnosis**: notebook 07 shows the large raw offsets are source-level centering scatter; the smooth field is only ~5 mas.
-- **Anchor-source comparison**: notebook 08 now compares classical and CenterNet anchor caches so detector/catalog gain is not confused with latent-head gain.
-- **Residual field QA**: PINN/NN fields fitted to head residuals have ~1 mas amplitude and do not materially change the median residuals.
-- **HGP concordance QA**: the hierarchical GP-style solver writes mean/std FITS maps and holdout calibration, but the current CenterNet post-head HGP does not agree with PINN or improve anchors relative to zero. Treat it as a model-selection diagnostic, not a correction product.
+- **Anchor comparison**: notebook 08 now fixes the detector cache and compares v10 Gaussian versus v10 ePSF centroid conventions, after 50 mas overlap deduplication.
+- **Residual field QA**: PINN/NN fields fitted to head residuals are small and do not materially change median residuals; the latest bootstrap/null result is marginal rather than a production correction.
+- **HGP concordance QA**: the hierarchical GP-style solver writes mean/std FITS maps and holdout calibration. Current v10 HGP products exist for both Gaussian and ePSF caches, but HGP remains a model-selection diagnostic until it beats zero and agrees with PINN on supported regions.
 - **Historical matcher path**: `train_astro_v7.py` remains available for per-patch matcher experiments and concordance exports.
+
+The complete root-level command chain is listed in "End-to-end v10 rerun pipeline" above; the short examples below are the same commands expressed from inside `models/`.
 
 ```bash
 cd models
@@ -1902,59 +1914,32 @@ PYTHONPATH=. python astrometry2/eval_latent_position.py \
 ```bash
 cd models
 
-# Current v10 HGP QA field from exported anchors. Deduplicate overlap-region
-# anchors in memory before solving.
+# Deduplicate the current v10 Gaussian archive before density/PINN work.
+PYTHONPATH=. python astrometry2/dedup_anchors.py \
+    --anchors checkpoints/latent_position_v10_no_psf/anchors_centernet_v10.npz \
+    --output  checkpoints/latent_position_v10_no_psf/anchors_centernet_v10_dedup.npz \
+    --radius-arcsec 0.05
+
+# Fit raw and head-residual PINN QA fields for the current Gaussian default.
+PYTHONPATH=. python astrometry2/fit_direct_pinn.py \
+    --cache  checkpoints/latent_position_v10_no_psf/anchors_centernet_v10_dedup.npz \
+    --output checkpoints/latent_position_v10_no_psf/concordance_pinn_centernet_v10_raw.fits
+
+PYTHONPATH=. python astrometry2/fit_direct_pinn.py \
+    --cache  checkpoints/latent_position_v10_no_psf/anchors_centernet_v10_dedup.npz \
+    --use-head-resid \
+    --output checkpoints/latent_position_v10_no_psf/concordance_pinn_centernet_v10_head_resid.fits
+
+# Fit experimental HGP uncertainty maps. QA only unless the field beats zero
+# on held-out anchors and agrees with PINN on supported pixels.
 PYTHONPATH=. python astrometry2/fit_hierarchical_gp_concordance.py \
-    --anchors checkpoints/latent_position_v10_epsf_centroid/anchors_centernet_v10_epsf.npz \
-    --output  checkpoints/latent_position_v10_epsf_centroid/concordance_hgp_head_resid_dedup.fits \
+    --anchors checkpoints/latent_position_v10_no_psf/anchors_centernet_v10.npz \
+    --output  checkpoints/latent_position_v10_no_psf/concordance_hgp_head_resid_dedup.fits \
     --offset-kind head_resid \
     --pool all \
     --length-scales 60,180,600 \
     --dstep-arcsec 5 \
     --dedup-radius-arcsec 0.05 \
-    --write-coverage
-
-# Historical v8 PINN examples used for the completed baseline:
-# Fit raw-anchor smooth field for QA/fallback
-PYTHONPATH=. python astrometry2/fit_direct_pinn.py \
-    --cache  checkpoints/latent_position_v8_no_psf/anchors.npz \
-    --output checkpoints/latent_position_v8_no_psf/concordance_pinn_raw_fixed.fits \
-    --bands r i g z --include-nisp
-
-# Fit head-residual smooth field; expected amplitude is ~1 mas
-PYTHONPATH=. python astrometry2/fit_direct_pinn.py \
-    --cache checkpoints/latent_position_v8_no_psf/anchors.npz \
-    --use-head-resid \
-    --output checkpoints/latent_position_v8_no_psf/concordance_pinn_head_resid_fixed.fits \
-    --bands r i g z --include-nisp
-
-# Fit the CenterNet head-residual PINN used for apples-to-apples HGP comparison
-PYTHONPATH=. python astrometry2/fit_direct_pinn.py \
-    --cache checkpoints/latent_position_v8_no_psf/anchors_centernet.npz \
-    --use-head-resid \
-    --output checkpoints/latent_position_v8_no_psf/concordance_pinn_centernet_head_resid.fits \
-    --n-steps 4000 --n-collocation 8000 --dstep-arcsec 5 --device cuda
-
-PYTHONPATH=. python astrometry2/fit_direct_pinn.py \
-    --cache checkpoints/latent_position_v8_no_psf/anchors_centernet.npz \
-    --output checkpoints/latent_position_v8_no_psf/concordance_pinn_centernet_raw.fits \
-    --n-steps 4000 --n-collocation 8000 --dstep-arcsec 5 --device cuda
-
-# Fit experimental CenterNet + head-residual HGP with uncertainty maps.
-# QA only unless the field beats zero on held-out anchors.
-PYTHONPATH=. python astrometry2/fit_hierarchical_gp_concordance.py \
-    --anchors checkpoints/latent_position_v8_no_psf/anchors_centernet.npz \
-    --output  checkpoints/latent_position_v8_no_psf/concordance_hgp_head_resid.fits \
-    --offset-kind head_resid \
-    --pool all \
-    --length-scales 60,180,600 \
-    --max-centers-per-scale 80 \
-    --dstep-arcsec 5 \
-    --holdout-frac 0.10 \
-    --holdout-mode spatial \
-    --holdout-block-arcsec 300 \
-    --robust-iters 3 \
-    --save-components \
     --write-coverage
 ```
 
@@ -2054,7 +2039,9 @@ python models/photometry/train_rendered_stamp_head.py \
 | **StemCenterNet teacher-guided experiment** | `checkpoints/stem_centernet_v10_teacher_guided/` | Older native-resolution stem detector intended as high-resolution refinement around fused CenterNet proposals. Uses teacher labels, bright-star halo ignore masks, and thin-spike hard negatives. |
 | **StemCenterNet v7 baseline** | `checkpoints/stem_centernet_v7_rms_aware_200/stem_centernet_best.pt` | Historical native-resolution stem detector on top of `jaisp_v7_concat`; kept as a baseline. |
 | **Foundation ePSF head (Gaia/V10/PM/refined)** | `models/checkpoints/foundation_epsf_head_gaia_pca_v10_pm_v5_snr_cap_window/checkpoint_best.pt` | Current PSF-head candidate for astrometry ablation. Gaia-selected stars with PM correction to the image epoch and image-based centroid refinement, PCA base ePSF bank, frozen V10 features, low-rank residual ePSF head, SNR-capped/windowed loss. Earlier `..._gaia_gaussian_v10_pm/` is retained as a comparison baseline. |
-| **Latent position head (completed baseline)** | `models/checkpoints/latent_position_v8_no_psf/best.pt` | Completed per-object astrometry correction. Loads v8 foundation, Gaussian centroid targets, no PSFField labels. Current v10 rerun targets are `latent_position_v10_no_psf/` and `latent_position_v10_epsf_centroid/`. |
+| **Latent position head v10 Gaussian default** | `models/checkpoints/latent_position_v10_no_psf/best.pt` | Current per-object astrometry correction. Uses v10 foundation features, CenterNet `conf=0.3` labels, Gaussian-fit photon centroids, and `bottleneck_window=5`; eval median **48.5 -> 11.3 mas** before dedup and **54.1 -> 13.2 mas** on the deduped Notebook 08 cache. |
+| **Latent position head v10 ePSF ablation** | `models/checkpoints/latent_position_v10_epsf_centroid/best.pt` | Completed negative centroid-label ablation using `FoundationEPSFHead`; kept for comparison because it produces more anchors but worse residuals (**70.7 -> 26.7 mas** archive median; **74.5 -> 34.4 mas** deduped median). |
+| **Latent position head v8 baseline** | `models/checkpoints/latent_position_v8_no_psf/best.pt` | Retained per-object astrometry baseline. Loads v8 foundation, Gaussian centroid targets, no PSFField labels. |
 | **Foundation photometry head** | `models/checkpoints/photometry_foundation_200_fast/checkpoint_best.pt` | Existing learned photometry-head run on frozen v8 features; Euclid-native VIS/Y/J/H first. Still tied to the older PSFField/template path until ported to the new ePSF head. |
 | **RenderedStampHead experiment** | `models/checkpoints/rendered_stamp_v2_bigstamp/checkpoint_best.pt` | End-to-end photometry experiment that predicts rendered per-band stamps directly from v8 features; useful for ablation against explicit PSF/template paths. |
 | **Astrometry V7 matcher** | `models/checkpoints/astro_v7_psffit/checkpoint_best.pt` | Historical V7 multiband matcher with PSF-fit centroids, trained on 200 tiles. Use for matcher experiments, not the current headline correction. |
@@ -2084,7 +2071,7 @@ These checkpoint names are historical references from earlier runs; most are not
 This section is intentionally redundant with earlier parts of the report. It is the quick operational summary: which checkpoints to use, which results are current, which components are diagnostic only, and which experiments are still open. When the project changes, this section should be updated first, and the longer method sections should then be revised to preserve the reasoning behind the change.
 
 **Foundation models**
-- **V10 warm-start (current production)**: `models/checkpoints/jaisp_v10_warmstart/checkpoint_best.pt` -- v9 concat fusion with Charbonnier/core-L2 reconstruction loss. Used by the active detection, PSF, and astrometry rerun path. Standalone module: `models/jaisp_foundation_v10.py`.
+- **V10 warm-start (current production)**: `models/checkpoints/jaisp_v10_warmstart/checkpoint_best.pt` -- v9 concat fusion with Charbonnier/core-L2 reconstruction loss. Used by the current detection export, PSF-head checkpoints, and v10 astrometry products. Standalone module: `models/jaisp_foundation_v10.py`.
 - **V8 (retained for completed baselines)**: `models/checkpoints/jaisp_v8_fine/checkpoint_best.pt` -- fine-scale 0.4"/px fused, 256×256 random-crop training. Existing v8 astrometry and photometry checkpoints remain reference baselines.
 - **V7 (prior production)**: `models/checkpoints/jaisp_v7_concat/checkpoint_best.pt` (epoch 92), RMS-aware loss, 790 tiles, correct NISP MER pixel scales. Retained as a comparison baseline; the v7 CenterNet and v7 latent-position checkpoints are still valid for ablations but are no longer the recommended starting point.
 
@@ -2097,7 +2084,7 @@ This section is intentionally redundant with earlier parts of the report. It is 
 - Classical VIS detection remains a fast baseline.
 
 **PSF modelling**
-- **Foundation ePSF head (current astrometry candidate)**: `models/checkpoints/foundation_epsf_head_gaia_pca_v10_pm_v5_snr_cap_window/checkpoint_best.pt`.
+- **Foundation ePSF head (tested astrometry ablation; not current astrometry default)**: `models/checkpoints/foundation_epsf_head_gaia_pca_v10_pm_v5_snr_cap_window/checkpoint_best.pt`.
   - Architecture: PCA/checkpoint per-band base ePSF + constrained low-rank residual, coefficients predicted from frozen V10 bottleneck/VIS-stem features, tile position, and band id.
   - Training: Gaia-selected stars in `data/psf_training_gaia_pm/` with proper-motion correction to the image epoch and image-based centroid refinement (see "Training data: Gaia stars" for why), 10 native bands, analytic flux/background solve, robust residual loss plus residual smoothness/size regularization.
   - Foundation: `models/checkpoints/jaisp_v10_warmstart/checkpoint_best.pt`.
@@ -2106,19 +2093,19 @@ This section is intentionally redundant with earlier parts of the report. It is 
   - Comparison baselines: `..._gaia_gaussian_v10_pm/`, `..._v10/` (no PM), `..._v10_pm_no_centroid_refine/` (PM but raw WCS centroids, produced clean dipole residuals at high SNR, kept to quantify the centroid-refinement gain).
   - Archived attempts: PSFField/PCA/V4 code and small checkpoints live in `models/older_architectures/psf/`.
 
-**Astrometry -- completed v8 baseline and active v10 rerun**
+**Astrometry -- current v10 default and retained v8 baseline**
 - Latent position head loads the foundation via `load_foundation()` auto-detection (which now routes v8/v9/v10 to `JAISPFoundationV10` and v7 to legacy v7 via checkpoint config markers). The current v10 rerun uses `--features-cache-dir data/cached_features_v10_warmstart` and one CUDA device per training job; `--dual-gpu` remains available for uncached single-run prefetching but is not the recommended path for running Gaussian and ePSF in parallel.
-- Completed checkpoint: `models/checkpoints/latent_position_v8_no_psf/best.pt`.
-- Active rerun: export `data/detection_labels/centernet_v10_790_thresh03.pt`, train `models/checkpoints/latent_position_v10_no_psf/` as the Gaussian-centroid control, then train `models/checkpoints/latent_position_v10_epsf_centroid/` using `FoundationEPSFHead` centroid labels. Both runs use the same detection cache and full v10 bottleneck cache so anchor selection, encoder cost, and centroid-definition changes are not confounded.
-- Cross-instrument evaluation on 790 ECDFS tiles: raw medians of 41-62 mas for Rubin g/r/i/z/y and NISP Y/J/H are reduced to **9-15 mas** after the head; Rubin u is reduced from **119 mas** to **30.5 mas**. Improvement is **~74-79%** in the median radial residual.
-- CenterNet-anchor evaluation is now tracked separately from the classical-anchor result. `anchors_centernet.npz` contains **491,748** source-band anchors, with **34,510** at `SNR >= 30`; median raw/head residuals are **39.8 mas -> 8.5 mas**. `anchors.npz` contains **630,120** source-band anchors, with **36,574** at `SNR >= 30`; median raw/head residuals are **44.2 mas -> 10.2 mas**. The CenterNet cache is a different detector-selected catalogue, not just a denser version of the classical cache.
+- Current default checkpoint: `models/checkpoints/latent_position_v10_no_psf/best.pt`; retained v8 baseline: `models/checkpoints/latent_position_v8_no_psf/best.pt`.
+- Completed v10 rerun: export `data/detection_labels/centernet_v10_790_thresh03.pt`, train `models/checkpoints/latent_position_v10_no_psf/` as the Gaussian-centroid control, then train `models/checkpoints/latent_position_v10_epsf_centroid/` using `FoundationEPSFHead` centroid labels. Both runs use the same detection cache and full v10 bottleneck cache so anchor selection, encoder cost, and centroid-definition changes are not confounded.
+- Cross-instrument eval on 790 ECDFS tiles: Gaussian control gives **693,564** archive source-band measurements and improves raw/head **62.6 -> 25.4 mas MAE** and **48.5 -> 11.3 mas median**. The ePSF ablation gives **1,136,535** measurements but worse residuals: **76.0 -> 39.2 mas MAE** and **70.7 -> 26.7 mas median**.
+- Deduped Notebook 08 result: Gaussian anchors reduce **693,564 -> 201,952** entries and have all-SNR median **54.1 -> 13.2 mas**. ePSF anchors reduce **1,136,535 -> 367,596** entries and have all-SNR median **74.5 -> 34.4 mas**. The ePSF path increases anchor count but decreases per-anchor astrometric quality.
 - Notebook 07 diagnosis: the large raw residual is **centering / centroid-definition scatter**. Smooth per-tile bulk field is **5.4 mas**, post-bulk source residual is **47.5 mas**, and the measured offset changes by **54.0 mas** when recentered from detection to PSF-fit centroids.
 - External NIR DR1 caveat: upstream persistence masking can locally worsen NISP astrometric calibration by removing Gaia matches, with the draft NIR paper noting rare regions degraded to >=50 mas RMS rather than the usual ~10 mas. Because JAISP starts from MER mosaics, treat this as a possible explanation for localized NISP/VIS residual outliers, not as a directly available correction flag.
-- Notebook 08 now tests before/after residuals, anchor-source effects, SNR-stratified refits, bootstrap/shuffled-null significance, a band-matched GP cross-check and sparse-field recovery. The `classical` slice means `SNR >= 30`; when the active cache is CenterNet, this is an SNR cut inside the CenterNet catalogue, not a classical-detector baseline.
-- Residual PINN/concordance after the head is a QA/fallback product. Its field amplitude is ~1 mas and changes the head residual medians by only ~0.0-0.2 mas. `Head`, `Head+PINN` and `|Fhead|` should be read separately: per-object residual, residual after subtracting the fitted smooth field, and fitted smooth-field amplitude.
-- Notebook 09 (`io/09_astrometry_hgp_vs_pinn.ipynb`) compares CenterNet post-head HGP against CenterNet post-head PINN. HGP edge structure tracks high posterior std and large nearest-anchor distance; after support masking it remains larger than PINN and does not improve actual anchor residuals relative to zero. The current conclusion is **no robust post-head smooth field detection**.
+- Notebook 08 now tests before/after residuals, v10 Gaussian-vs-ePSF anchor quality, SNR-stratified refits, bootstrap/shuffled-null significance, a band-matched GP cross-check and sparse-field recovery. The current conclusion is **strong per-object correction, weak residual smooth-field detection**. The old v8-positive sparse-field recovery claim no longer holds on the v10 Gaussian cache: head-implied non-classical field vs classical raw gives **23.98 mas vector RMS** and **17.84 mas median disagreement**.
+- Residual PINN/concordance after the head is a QA/fallback product. On the v10 Gaussian cache, full-fit PINN head-residual field RMS is ~1.5 mas and changes medians essentially not at all; bootstrap/null tests put all/head_resid at **3.43 +/- 2.36 mas** versus **2.42 mas** shuffled null. `Head`, `Head+PINN` and `|Fhead|` should be read separately: per-object residual, residual after subtracting the fitted smooth field, and fitted smooth-field amplitude.
+- Notebook 09 (`io/09_astrometry_hgp_vs_pinn.ipynb`) should be read after rerunning on the v10 products. The current on-disk HGP products exist for both v10 Gaussian and ePSF head-residual caches, but HGP remains a QA/model-selection product rather than a correction until it beats zero and agrees with PINN on supported regions.
 - `models/astrometry2/fit_hierarchical_gp_concordance.py` is currently an experimental QA/model-selection solver. It fits CenterNet + head-residual anchors with a hierarchical common/group/band decomposition and writes `{BAND}.DRA`, `{BAND}.DDE`, `{BAND}.DRA_STD`, `{BAND}.DDE_STD`, optional `COVERAGE`, optional `COMP_*` diagnostics and a JSON holdout-calibration summary. For overlap-region v10 anchor caches, use `--dedup-radius-arcsec 0.05` before solving. Do not use it as a correction product until it beats the zero-field baseline on held-out anchors and agrees with PINN/GP on supported regions.
-- **Key lesson**: archived PSFField-refined centroids introduced a ~16 mas target mismatch when used as training labels; v7/v8 PSFField-label runs plateaued at **29-30 mas**. Gaussian-fit photon centroids remain the control convention; the new ePSF run is explicitly an ablation of the v10 `FoundationEPSFHead`, not yet a production claim.
+- **Key lesson**: archived PSFField-refined centroids introduced a ~16 mas target mismatch when used as training labels; v7/v8 PSFField-label runs plateaued at **29-30 mas**. The v10 `FoundationEPSFHead` ablation is better controlled but still worse than Gaussian centroids. Gaussian-fit photon centroids remain the control convention.
 - Field solvers (PINN / NN / control-grid / HGP) are foundation-agnostic. `eval_latent_position.py` exports per-source anchors via `--save-anchors` directly consumable by `fit_direct_pinn.py --cache` and `fit_hierarchical_gp_concordance.py --anchors`; use `--use-head-resid` or `--offset-kind head_resid` to fit the post-head residual field.
 
 **Photometry**

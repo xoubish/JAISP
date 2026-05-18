@@ -312,7 +312,9 @@ def evaluate(args):
     }
     n_tiles = 0
 
-    for tile_id, rubin_path, euclid_path in pairs:
+    for pair_idx, (tile_id, rubin_path, euclid_path) in enumerate(pairs, start=1):
+        if pair_idx == 1 or pair_idx % 25 == 0 or pair_idx == len(pairs):
+            print(f'  tile {pair_idx}/{len(pairs)}: {tile_id}', flush=True)
         try:
             img_t, rms_t, vis_hw, vis_wcs = load_tile_data(rubin_path, euclid_path, device)
             rdata = np.load(rubin_path, allow_pickle=True)
