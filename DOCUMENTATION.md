@@ -2123,15 +2123,100 @@ This is an active research codebase. Architecture and training defaults evolve w
 
 The PDF version of this file (`DOCUMENTATION.pdf`) is produced with pandoc + xelatex. Pandoc ships bundled inside the `pypandoc` Python package on this machine; texlive (xelatex, dvipdfmx) is installed under `~/.local/bin/`.
 
-First write a LaTeX header file that shrinks wide tables (without it, the multi-column Current Stack Snapshot table overflows the page because DejaVu Sans is wider than the LaTeX default Latin Modern):
+The build needs two helper files: a Lua filter that forces every Pandoc table to fit the text width (without it, multi-column markdown tables with uneven dashes overflow into the margin) and a LaTeX header that adds `xurl` (so long URLs wrap mid-string), `titlesec`/`fancyhdr` (accent-colored section rules and a running header), and tight `longtable` settings.
+
+First the Lua filter that fixes column widths:
+
+```bash
+cat > /tmp/fit_tables.lua << 'EOF'
+local function block_text_len(block)
+  local s = pandoc.utils.stringify(block) or ""
+  return #s
+end
+
+local function cell_text_len(cell)
+  local total = 0
+  for _, block in ipairs(cell.contents) do
+    total = total + block_text_len(block)
+  end
+  return total
+end
+
+local function row_text_lens(row, n)
+  local out = {}
+  for i = 1, n do out[i] = 0 end
+  local i = 1
+  for _, cell in ipairs(row.cells) do
+    if i <= n then out[i] = cell_text_len(cell) end
+    i = i + 1
+  end
+  return out
+end
+
+function Table(tbl)
+  local n = #tbl.colspecs
+  if n <= 1 then return tbl end
+  local col_total = {}
+  for i = 1, n do col_total[i] = 0 end
+  for _, body in ipairs(tbl.bodies) do
+    for _, row in ipairs(body.body) do
+      local lens = row_text_lens(row, n)
+      for i = 1, n do col_total[i] = col_total[i] + lens[i] end
+    end
+  end
+  local grand = 0
+  for i = 1, n do grand = grand + col_total[i] end
+  if grand == 0 then return tbl end
+  local floor_w = 0.08
+  local remaining = 0.98 - n * floor_w
+  if remaining < 0 then remaining = 0 end
+  for i, cs in ipairs(tbl.colspecs) do
+    local w = floor_w + remaining * (col_total[i] / grand)
+    tbl.colspecs[i] = {cs[1], w}
+  end
+  return tbl
+end
+EOF
+```
+
+Then the LaTeX header:
 
 ```bash
 cat > /tmp/pdf_header.tex << 'EOF'
 \usepackage{etoolbox}
 \usepackage{longtable}
+\usepackage{booktabs}
 \AtBeginEnvironment{longtable}{\footnotesize}
 \setlength{\tabcolsep}{4pt}
-\renewcommand{\arraystretch}{1.15}
+\renewcommand{\arraystretch}{1.18}
+
+\usepackage{xurl}
+\urlstyle{same}
+
+\usepackage{xcolor}
+\definecolor{accent}{HTML}{1F4E79}
+\definecolor{accent2}{HTML}{6E6E6E}
+\usepackage{titlesec}
+\titleformat{\section}
+  {\Large\bfseries\color{accent}}
+  {\thesection}{0.6em}{}[{\titlerule[0.6pt]}]
+\titleformat{\subsection}
+  {\large\bfseries\color{accent}}{\thesubsection}{0.5em}{}
+\titleformat{\subsubsection}
+  {\normalsize\bfseries\color{accent2}}{\thesubsubsection}{0.4em}{}
+\titlespacing*{\section}{0pt}{1.4ex plus .5ex minus .2ex}{0.8ex}
+\titlespacing*{\subsection}{0pt}{1.2ex plus .4ex minus .2ex}{0.6ex}
+
+\usepackage{fancyhdr}
+\pagestyle{fancy}
+\fancyhf{}
+\renewcommand{\headrulewidth}{0.4pt}
+\fancyhead[L]{\small\color{accent2}\itshape JAISP Documentation}
+\fancyhead[R]{\small\color{accent2}\nouppercase\leftmark}
+\fancyfoot[C]{\small\color{accent2}\thepage}
+
+\sloppy
+\setlength{\emergencystretch}{3em}
 EOF
 ```
 
@@ -2145,23 +2230,24 @@ $PANDOC DOCUMENTATION.md -o DOCUMENTATION.pdf \
   --pdf-engine=xelatex \
   --toc \
   --columns=200 \
+  --lua-filter=/tmp/fit_tables.lua \
   --include-in-header=/tmp/pdf_header.tex \
   --metadata title="JAISP Documentation" \
   --metadata subtitle="Joint AI Survey Processing — Rubin + Euclid Foundation Model" \
-  --metadata author="Shoubaneh Hemmati" \
   -V geometry:margin=0.85in \
   -V fontsize=10pt \
   -V mainfont="DejaVu Sans" \
   -V monofont="Source Code Pro" \
   -V colorlinks=true \
-  -V linkcolor=blue \
-  -V urlcolor=blue
+  -V linkcolor=accent \
+  -V urlcolor=accent
 ```
 
 Notes:
-- `mainfont=DejaVu Sans` and `monofont=Source Code Pro` are used because the default Latin Modern fonts lack Greek letters (σ, δ) and math symbols (≈, ≤, ≥) that appear throughout this document. Both fonts are preinstalled in `/usr/share/fonts/`.
-- The header file shrinks longtable text to `\footnotesize` and tightens column padding. Without this, the wide Current Stack Snapshot table breaks horribly.
-- `--columns=200` prevents pandoc from prewrapping wide markdown table source. `geometry:margin=0.85in` and `fontsize=10pt` together compensate for DejaVu Sans being wider than Latin Modern, keeping the document near its previous compact length (~74 pages).
-- The `--toc` flag produces a clickable table of contents on page 2; `--metadata` populates the PDF title page and the PDF metadata dictionary.
+- `mainfont=DejaVu Sans` and `monofont=Source Code Pro` are used because the default Latin Modern fonts lack Greek letters (σ, δ) and math symbols (≈, ≤, ≥) that appear throughout this document.
+- The Lua filter is the key fix for wide tables: it ignores Pandoc's column widths (which come from dash counts in the markdown separator row and rarely match content) and instead measures the actual character length in each column, then assigns width proportionally with an 8% per-column floor so short labels stay readable.
+- `xurl` allows hyperlink text to break at any character, so long internal links and references (e.g. checkpoint paths in `models/checkpoints/...`) no longer push into the right margin.
+- `\sloppy` plus `emergencystretch` let inline paragraph text relax glue rather than overflow.
+- `--columns=200` prevents pandoc from prewrapping wide markdown table source. `geometry:margin=0.85in` and `fontsize=10pt` keep the document compact (~75 pages with all 18 figures).
 - Run from the project root so that relative figure paths (`docs/figures/...`, `models/detection/...`) resolve correctly.
-- Output is ~11 MB with all 18 embedded figures.
+- Required TeX Live packages: `xurl`, `fancyhdr`, `tcolorbox`, `enumitem`, `sectsty`, `titlesec`, `booktabs` — install with `tlmgr install <pkg>` if missing.
