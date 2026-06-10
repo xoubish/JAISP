@@ -59,7 +59,7 @@ if str(_HERE) not in sys.path:
 
 import models.older_architectures.jaisp_foundation_v8 as _v8
 from models.older_architectures.jaisp_dataset_v8 import random_crop_sample
-from models.older_architectures.jaisp_dataset_v9hitectures.jaisp_dataset_v9 import adversarial_drop
+from models.jaisp_dataset_v10 import adversarial_drop
 from models.older_architectures.jaisp_dataset_v7 import sample_context_target_phaseB_mixed
 from models.older_architectures.jaisp_dataset_v6 import sample_context_target
 from models.older_architectures.train_jaisp_foundation_v8 import JAISPTrainerV8
