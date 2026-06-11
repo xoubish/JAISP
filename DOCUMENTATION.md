@@ -235,7 +235,7 @@ Each band has its own `BandStem` -- a small per-band CNN that handles noise norm
 
 The foundation model went through ten major iterations over the course of this project. This history is retained as experimental evidence, not nostalgia. Each failed or superseded version revealed a specific constraint on self-supervised astronomical representations: sources are sparse, sky background dominates the pixels, instruments have incompatible native resolutions, and precision cosmology depends on sub-pixel spatial fidelity rather than only semantic similarity. The overall arc is a progression from **latent-space alignment** (v1-v5) to **pixel-space reconstruction** (v6-v10), driven by the realization that contrastive and JEPA-style objectives can learn useful similarity metrics while still discarding the exact spatial information needed by astrometry, detection, deblending, and photometry.
 
-> *If you only need the current architecture, skip to [v10 — PSF-aware Loss (Current Production)](#v10--psf-aware-loss-current-production). V7 is described first because v8 inherits the v7 architecture, and v10 inherits the v9 (= v8 + concat fusion) lineage.*
+> *If you only need the current architecture, skip to [v10 — PSF-aware Loss (Current Production)](#v10-psf-aware-loss-current-production). V7 is described first because v8 inherits the v7 architecture, and v10 inherits the v9 (= v8 + concat fusion) lineage.*
 
 #### v1: Patch-Level Contrastive Learning
 
