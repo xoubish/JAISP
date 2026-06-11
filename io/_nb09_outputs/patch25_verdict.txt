@@ -1,0 +1,21 @@
+band     Nmatch | prod head med | patchval head med | raw med (check)
+u          2229 |     39.9      |     36.7          |  131.1 vs  131.4
+g          7989 |     12.7      |     12.3          |   63.6 vs   63.7
+r          9096 |     11.4      |     10.8          |   51.2 vs   50.8
+i          8329 |     11.8      |     11.2          |   48.2 vs   48.0
+z          6038 |     13.0      |     12.6          |   53.4 vs   53.4
+y          2784 |     22.3      |     20.5          |   92.0 vs   91.3
+nisp_Y    16167 |      9.5      |      9.3          |   44.8 vs   44.9
+nisp_J    18190 |      9.7      |      9.5          |   46.8 vs   46.9
+nisp_H    17985 |     10.0      |      9.6          |   47.3 vs   47.4
+
+pooled matched border-excluded N=88807
+  production head: MAE  25.6  median  11.0 mas
+  patchval  head: MAE  24.7  median  10.7 mas
+
+  SNR bin       N | raw med | prod head med | patchval head med
+      5-7   26042 |   71.9  |     13.6      |     12.9
+     7-10   21759 |   57.9  |     12.6      |     12.0
+    10-15   19408 |   45.5  |     11.3      |     10.8
+    15-30   17555 |   28.8  |      8.1      |      7.9
+   30-inf    4043 |   13.2  |      8.2      |      8.4
