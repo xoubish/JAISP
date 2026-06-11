@@ -215,6 +215,24 @@ def detect_and_refine_vis(
     return vis_xy.astype(np.float32), vis_snr.astype(np.float32)
 
 
+def canonical_from_labels(args, tile_id):
+    """Return precomputed canonical (vis_xy, vis_snr) for a tile, or None.
+
+    Loaded from --canonical-labels (joint multi-band centroid positions,
+    see precompute_joint_canonical_labels.py). When present, this replaces
+    detect_and_refine_vis entirely: the stored positions already encode the
+    CenterNet seeding, VIS signal gating, and joint/VIS-fallback refinement.
+    """
+    d = getattr(args, '_canonical_labels_dict', None)
+    if d is None or tile_id not in d:
+        return None
+    entry = d[tile_id]
+    return (
+        np.asarray(entry['xy'], dtype=np.float32).copy(),
+        np.asarray(entry['snr'], dtype=np.float32).copy(),
+    )
+
+
 def build_tile_batch(
     vis_xy: np.ndarray,
     vis_wcs: WCS,
@@ -379,7 +397,11 @@ def make_preview_figure(
             if vis_var_np is not None else None
         )
 
-        vis_xy, vis_snr = detect_and_refine_vis(
+        _pre = canonical_from_labels(args, tile_id)
+        if _pre is not None:
+            vis_xy, vis_snr = _pre
+        else:
+            vis_xy, vis_snr = detect_and_refine_vis(
             vis_img_np, vis_wcs,
             nsig=args.vis_nsig, smooth=args.vis_smooth,
             min_dist=args.vis_min_dist, max_sources=args.max_sources_vis,
@@ -563,7 +585,11 @@ def _prefetch_tile(
             xy_norm[:, 1] * max(H_vis - 1, 1),
         ], axis=1).astype(np.float32)
 
-    vis_xy, vis_snr = detect_and_refine_vis(
+    _pre = canonical_from_labels(args, tile_id)
+    if _pre is not None:
+        vis_xy, vis_snr = _pre
+    else:
+        vis_xy, vis_snr = detect_and_refine_vis(
         vis_img_np_arr, vis_wcs,
         nsig=args.vis_nsig, smooth=args.vis_smooth,
         min_dist=args.vis_min_dist, max_sources=args.max_sources_vis,
@@ -680,7 +706,11 @@ def run_epoch(
                     xy_norm[:, 0] * max(W_vis - 1, 1),
                     xy_norm[:, 1] * max(H_vis - 1, 1),
                 ], axis=1).astype(np.float32)
-            vis_xy, vis_snr = detect_and_refine_vis(
+            _pre = canonical_from_labels(args, tile_id)
+            if _pre is not None:
+                vis_xy, vis_snr = _pre
+            else:
+                vis_xy, vis_snr = detect_and_refine_vis(
                 vis_img_np_arr, vis_wcs,
                 nsig=args.vis_nsig, smooth=args.vis_smooth,
                 min_dist=args.vis_min_dist,
@@ -823,6 +853,13 @@ def build_parser() -> argparse.ArgumentParser:
                         'data/detection_labels/centernet_v10_790_thresh03.pt). '
                         'If provided, VIS-normalised detections replace classical '
                         'peak-finding for source candidates.')
+    p.add_argument('--canonical-labels', type=str, default=None,
+                   help='Path to precomputed canonical-position labels .pt '
+                        '(precompute_joint_canonical_labels.py). When a tile is '
+                        'present in this file, its stored positions replace '
+                        'detect_and_refine_vis entirely (joint multi-band '
+                        'canonical targets; injection-validated 2.4x better '
+                        'than VIS-only at all SNR).')
     p.add_argument('--features-cache-dir', type=str, default=None,
                    help='Optional precomputed foundation bottleneck cache '
                         '(e.g. data/cached_features_v10_warmstart). The VIS '
@@ -970,6 +1007,18 @@ def train(args):
               f'{len(args._centernet_labels_dict)} tiles')
     else:
         args._centernet_labels_dict = None
+
+    # --- Precomputed canonical positions (optional, joint multi-band) ---
+    if getattr(args, 'canonical_labels', None):
+        import torch as _t
+        _cl = _t.load(args.canonical_labels, map_location='cpu', weights_only=False)
+        args._canonical_labels_dict = _cl['labels'] if 'labels' in _cl else _cl
+        _njoint = sum(int(np.asarray(v['joint_ok']).sum()) for v in args._canonical_labels_dict.values())
+        _ntot = sum(len(np.asarray(v['joint_ok'])) for v in args._canonical_labels_dict.values())
+        print(f'Loaded canonical labels for {len(args._canonical_labels_dict)} tiles '
+              f'({_njoint}/{_ntot} sources joint-fit, rest VIS-fallback)')
+    else:
+        args._canonical_labels_dict = None
 
     optimizer = torch.optim.AdamW(
         head.parameters(), lr=args.lr, weight_decay=args.weight_decay,

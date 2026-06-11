@@ -1,19 +1,23 @@
-"""Joint multi-band canonical centroiding.
+"""Joint multi-band canonical centroiding (fast profile-likelihood version).
 
-Fits ONE sky position per source across all available bands simultaneously
-(shared (dRA, dDec); per-band amplitude >= 0 and background; per-pixel
-inverse-variance weights; band pixel grids linked through local WCS affines).
-Validated against injected truth on 2026-06-11: 2.4-2.5x better than the
-VIS-only Gaussian canonical target at all SNR levels
+Fits ONE sky position per source across all available bands simultaneously.
+For a trial position offset (du, dv) arcsec, each band's amplitude and
+background are LINEAR parameters with a closed-form weighted least-squares
+solution, so the outer optimization is only 2-dimensional. Band pixel grids
+are linked through per-band tile-level affine WCS Jacobians (distortion
+variation across a 102" tile is negligible for a <1" fit region).
+
+Validated against injected truth on 2026-06-11: joint fitting beats the
+VIS-only Gaussian canonical target 2.4-2.5x at all SNR levels
 (io/_nb09_outputs/joint_centroid_truth_results.json).
 
 Two-pass strategy for real (SED-diverse) sources: fit all bands, drop bands
-whose fitted amplitude is insignificant, refit on the survivors. Falls back to
-the VIS-only solution when the joint fit fails or wanders.
+with insignificant fitted amplitude, refit on the survivors. Sources where
+the joint fit fails keep their classical VIS position (caller's fallback).
 
 Intended use: precompute canonical labels once per tile
-(scripts: precompute_joint_canonical_labels.py) and feed them to
-train_latent_position.py via --canonical-labels.
+(precompute_joint_canonical_labels.py) and feed train_latent_position.py
+via --canonical-labels.
 """
 from __future__ import annotations
 
@@ -21,10 +25,8 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 from astropy.wcs import WCS
-from scipy.optimize import least_squares
+from scipy.optimize import minimize
 
-# Gaussian sigma (px) assumed per band family, matched to the classical
-# centroid fitter's FWHM guesses used across train/eval.
 SIGMA_PX_VIS = 2.5 / 2.355
 SIGMA_PX_NISP = 2.5 / 2.355
 SIGMA_PX_RUBIN = 3.0 / 2.355
@@ -70,39 +72,38 @@ def _cutout(img, rms, x, y, r):
     return img[sl].astype(np.float64), rms[sl].astype(np.float64), xx.astype(np.float64), yy.astype(np.float64)
 
 
-def _fit(stamps) -> Optional[Tuple[float, float, np.ndarray]]:
-    """Shared (du, dv) in arcsec + per-band (amp, bg). Returns (du, dv, amps)."""
-    p0 = [0.0, 0.0]
-    lo = [-0.6, -0.6]
-    hi = [0.6, 0.6]
-    for s in stamps:
-        bg0 = float(np.median(s["img"]))
-        amp0 = max(float(s["img"].max() - bg0), 1e-3)
-        p0 += [amp0, bg0]
-        lo += [0.0, -np.inf]
-        hi += [np.inf, np.inf]
+def _band_chi2_and_amp(s, du, dv):
+    """Profile chi2 of one band stamp at sky offset (du, dv); linear (amp, bg)."""
+    cx = s["cx"][0] + s["J"][0, 0] * du + s["J"][0, 1] * dv
+    cy = s["cx"][1] + s["J"][1, 0] * du + s["J"][1, 1] * dv
+    g = np.exp(-0.5 * (((s["xx"] - cx) / s["sigma"]) ** 2 + ((s["yy"] - cy) / s["sigma"]) ** 2))
+    w = s["w"]  # 1/rms^2
+    # weighted LSQ for d = amp*g + bg*1
+    Sgg = float(np.sum(w * g * g)); Sg1 = float(np.sum(w * g)); S11 = s["S11"]
+    Sgd = float(np.sum(w * g * s["img"])); S1d = s["S1d"]
+    det = Sgg * S11 - Sg1 * Sg1
+    if det <= 1e-12:
+        return s["chi2_0"], 0.0
+    amp = (Sgd * S11 - Sg1 * S1d) / det
+    if amp < 0.0:  # non-negativity: clamp to bg-only model
+        return s["chi2_0"], 0.0
+    bg = (S1d - Sg1 * amp) / S11
+    chi2 = s["Sdd"] - amp * Sgd - bg * S1d  # = sum w (d - model)^2 for linear LSQ
+    return float(chi2), float(amp)
 
-    def resid(p):
-        du, dv = p[0], p[1]
-        out = []
-        for i, s in enumerate(stamps):
-            amp, bg = p[2 + 2 * i], p[3 + 2 * i]
-            cx = s["cx"][0] + s["J"][0, 0] * du + s["J"][0, 1] * dv
-            cy = s["cx"][1] + s["J"][1, 0] * du + s["J"][1, 1] * dv
-            model = amp * np.exp(
-                -0.5 * (((s["xx"] - cx) / s["sigma"]) ** 2 + ((s["yy"] - cy) / s["sigma"]) ** 2)
-            ) + bg
-            out.append(((s["img"] - model) / s["rms"]).ravel())
-        return np.concatenate(out)
 
-    try:
-        res = least_squares(resid, np.asarray(p0), bounds=(lo, hi), method="trf", max_nfev=300)
-    except Exception:
-        return None
+def _fit_duv(stamps) -> Optional[Tuple[float, float, np.ndarray]]:
+    """Minimize total profile chi2 over (du, dv) arcsec. Returns (du, dv, amps)."""
+
+    def total(p):
+        return sum(_band_chi2_and_amp(s, p[0], p[1])[0] for s in stamps)
+
+    res = minimize(total, np.zeros(2), method="Nelder-Mead",
+                   options=dict(xatol=1e-4, fatol=1e-3, maxiter=200))
     du, dv = float(res.x[0]), float(res.x[1])
     if not (np.isfinite(du) and np.isfinite(dv)) or np.hypot(du, dv) > 0.55:
         return None
-    amps = res.x[2::2]
+    amps = np.array([_band_chi2_and_amp(s, du, dv)[1] for s in stamps])
     return du, dv, amps
 
 
@@ -117,49 +118,60 @@ def joint_refine_positions(
     """Joint-refine canonical positions for VIS-frame seeds.
 
     Returns (xy [N,2] VIS px, ok [N] bool, n_bands_used [N]).
-    Sources where the joint fit fails keep their input seed and ok=False
-    (caller decides the fallback, e.g. classical VIS refine).
     """
     N = vis_seed_xy.shape[0]
     out_xy = vis_seed_xy.astype(np.float64).copy()
     ok = np.zeros(N, dtype=bool)
     nbu = np.zeros(N, dtype=np.int16)
+    if N == 0:
+        return out_xy.astype(np.float32), ok, nbu
 
-    ra0s, dec0s = vis_wcs.pixel_to_world_values(vis_seed_xy[:, 0], vis_seed_xy[:, 1])
-    cosd = np.cos(np.deg2rad(np.median(dec0s)))
+    # vectorized: sky positions of all seeds, per-band pixel positions,
+    # ONE tile-level affine Jacobian per band (evaluated at the tile center).
+    ras, decs = vis_wcs.pixel_to_world_values(vis_seed_xy[:, 0], vis_seed_xy[:, 1])
+    ras = np.atleast_1d(ras); decs = np.atleast_1d(decs)
+    cosd = np.cos(np.deg2rad(np.median(decs)))
+    ra_c, dec_c = float(np.median(ras)), float(np.median(decs))
     e = 0.1 / 3600.0
 
+    per_band = []
+    for bd in bands:
+        bx, by = bd["wcs"].world_to_pixel_values(ras, decs)
+        px0, py0 = bd["wcs"].world_to_pixel_values(ra_c, dec_c)
+        pxa, pya = bd["wcs"].world_to_pixel_values(ra_c + e / cosd, dec_c)
+        pxb, pyb = bd["wcs"].world_to_pixel_values(ra_c, dec_c + e)
+        J = np.array([[(pxa - px0) / 0.1, (pxb - px0) / 0.1],
+                      [(pya - py0) / 0.1, (pyb - py0) / 0.1]], dtype=np.float64)
+        per_band.append(dict(bd, bx=np.atleast_1d(bx), by=np.atleast_1d(by), J=J))
+
     for k in range(N):
-        ra0, dec0 = float(ra0s[k]), float(dec0s[k])
         stamps = []
-        for bd in bands:
-            px0, py0 = bd["wcs"].world_to_pixel_values(ra0, dec0)
-            c = _cutout(bd["img"], bd["rms"], float(px0), float(py0), stamp_r)
+        for bd in per_band:
+            c = _cutout(bd["img"], bd["rms"], float(bd["bx"][k]), float(bd["by"][k]), stamp_r)
             if c is None:
                 continue
             img_s, rms_s, xx, yy = c
-            if not np.all(np.isfinite(rms_s)) or float(np.nanmax(rms_s)) <= 0:
+            if not np.all(np.isfinite(rms_s)):
                 continue
-            pxa, pya = bd["wcs"].world_to_pixel_values(ra0 + e / cosd, dec0)
-            pxb, pyb = bd["wcs"].world_to_pixel_values(ra0, dec0 + e)
-            J = np.array([[(pxa - px0) / 0.1, (pxb - px0) / 0.1],
-                          [(pya - py0) / 0.1, (pyb - py0) / 0.1]], dtype=np.float64)
-            stamps.append(dict(img=img_s, rms=rms_s, xx=xx, yy=yy,
-                               cx=(float(px0), float(py0)), J=J, sigma=bd["sigma"],
+            w = 1.0 / np.clip(rms_s, 1e-9, None) ** 2
+            S11 = float(np.sum(w)); S1d = float(np.sum(w * img_s)); Sdd = float(np.sum(w * img_s * img_s))
+            chi2_0 = Sdd - S1d * S1d / max(S11, 1e-12)  # bg-only chi2
+            stamps.append(dict(img=img_s, w=w, xx=xx, yy=yy,
+                               cx=(float(bd["bx"][k]), float(bd["by"][k])), J=bd["J"],
+                               sigma=bd["sigma"], S11=S11, S1d=S1d, Sdd=Sdd, chi2_0=chi2_0,
                                noise=float(np.median(rms_s))))
         if len(stamps) < min_bands:
             continue
 
-        fit = _fit(stamps)
+        fit = _fit_duv(stamps)
         if fit is None:
             continue
         du, dv, amps = fit
 
-        # pass 2: keep bands with significant amplitude, refit
         sig = np.array([amps[i] / max(stamps[i]["noise"], 1e-9) for i in range(len(stamps))])
         keep = sig >= amp_sig_floor
         if keep.sum() >= min_bands and keep.sum() < len(stamps):
-            fit2 = _fit([s for s, kp in zip(stamps, keep) if kp])
+            fit2 = _fit_duv([s for s, kp in zip(stamps, keep) if kp])
             if fit2 is not None:
                 du, dv, _ = fit2
                 nbu[k] = int(keep.sum())
@@ -168,10 +180,10 @@ def joint_refine_positions(
         else:
             nbu[k] = len(stamps)
 
-        ra_f = ra0 + du / 3600.0 / cosd
-        dec_f = dec0 + dv / 3600.0
-        fx, fy = vis_wcs.world_to_pixel_values(ra_f, dec_f)
-        # sanity: stay within 0.6" of the seed
+        # back to VIS px via the VIS-band affine (first entry is VIS)
+        Jv = per_band[0]["J"]
+        fx = vis_seed_xy[k, 0] + Jv[0, 0] * du + Jv[0, 1] * dv
+        fy = vis_seed_xy[k, 1] + Jv[1, 0] * du + Jv[1, 1] * dv
         if np.hypot(fx - vis_seed_xy[k, 0], fy - vis_seed_xy[k, 1]) * 0.1 > 0.6:
             continue
         out_xy[k] = (float(fx), float(fy))
