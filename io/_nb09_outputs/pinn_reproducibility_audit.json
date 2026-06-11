@@ -1,0 +1,136 @@
+{
+  "date": "2026-06-10",
+  "purpose": "Controlled-refit audit resolving the HGP-vs-PINN era disagreement and quantifying PINN reproducibility. Backs the 2026-06-10 audit notes in DOCUMENTATION.md and notebooks 05/08/09.",
+  "protocol": {
+    "pinn_fits": "fit_direct_pinn.load_anchors_from_cache(bands=ugrizy, include_nisp) + sigma_clip(0.3 arcsec, 4 sigma) + fit_and_export(dstep=5\", n_steps=8000, hidden=128, layers=5, lambda_curl=1.0, lambda_lapl=0.1, lambda_band=0.1, n_collocation=15000, solver=pinn)",
+    "hgp_fit": "fit_hierarchical_gp_concordance --offset-kind raw --length-scales 300,900 --prior 4/2/1 mas (super-tight) on non-dedup anchors",
+    "comparison": "fields sampled on common 5\"/px grid, support mask = coverage<30\", vector RMS diff + pooled component Pearson r; pooled = quadrature over g,r,i,z,NISP_YJH",
+    "matched_anchors": "v10 anchors restricted to sources matched to the v8 archive (<10 mas, same tile)"
+  },
+  "unsmoothed_pooled": {
+    "run_to_run_same_anchors_same_settings": {
+      "diff_rms_mas": 5.24,
+      "r": 0.688
+    },
+    "dedup_vs_nodedup": {
+      "diff_rms_mas": 4.8,
+      "r": 0.621
+    },
+    "nodedup_vs_v8matched_subset": {
+      "diff_rms_mas": 4.03,
+      "r": 0.673
+    },
+    "production_v8_vs_v10": {
+      "diff_rms_mas": 5.42,
+      "r": 0.484
+    },
+    "nodedup_refit_vs_v8era_production": {
+      "diff_rms_mas": 3.85,
+      "r": 0.593
+    }
+  },
+  "smoothed_150arcsec": {
+    "note": "per-band diffs (R / Z / NISP_J), mas and r",
+    "run_to_run": {
+      "R": [
+        1.92,
+        0.884
+      ],
+      "Z": [
+        2.78,
+        0.729
+      ],
+      "NISP_J": [
+        1.89,
+        0.904
+      ]
+    },
+    "dedup_effect": {
+      "R": [
+        1.32,
+        0.85
+      ],
+      "Z": [
+        2.26,
+        0.75
+      ],
+      "NISP_J": [
+        0.97,
+        0.965
+      ]
+    },
+    "seed_catalog": {
+      "R": [
+        1.3,
+        0.888
+      ],
+      "Z": [
+        1.96,
+        0.792
+      ],
+      "NISP_J": [
+        1.17,
+        0.95
+      ]
+    },
+    "v10refit_vs_v8era": {
+      "R": [
+        1.48,
+        0.811
+      ],
+      "Z": [
+        1.76,
+        0.694
+      ],
+      "NISP_J": [
+        1.38,
+        0.922
+      ]
+    }
+  },
+  "z_band_dedup_instability": {
+    "z_anchors_nodedup": 49567,
+    "z_anchors_dedup": 15418,
+    "pinn_z_rms_nodedup_mas": 5.37,
+    "pinn_z_rms_dedup_mas": [
+      9.19,
+      10.77
+    ],
+    "production_v10_pinn_z_rms_mas": 9.76,
+    "production_v8_pinn_z_rms_mas": 4.64
+  },
+  "hgp_checks": {
+    "hgp_nodedup_vs_hgp_dedup_supertight": {
+      "diff_mas_range": [
+        0.79,
+        1.01
+      ],
+      "r_range": [
+        0.924,
+        0.976
+      ]
+    },
+    "hgp_supertight_vs_pinn_nodedup_v10_z": {
+      "diff_mas": 3.28,
+      "r": 0.631
+    },
+    "v8_era_hgp_supertight_vs_pinn_reference": {
+      "diff_mas_range": [
+        1.62,
+        2.29
+      ],
+      "r_range": [
+        0.62,
+        0.932
+      ]
+    }
+  },
+  "fit_artifacts_tmp_only": [
+    "/tmp/pinn_v10_dedup_refit.fits",
+    "/tmp/pinn_v10_dedup_refit2.fits",
+    "/tmp/pinn_v10_nodedup.fits",
+    "/tmp/pinn_v10_matched_v8.fits",
+    "/tmp/hgp_v10_nodedup_supertight.fits",
+    "/tmp/anchors_v10_matched_v8.npz"
+  ]
+}
