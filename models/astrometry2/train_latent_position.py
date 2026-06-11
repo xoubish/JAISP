@@ -861,6 +861,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--label-noise-floor', type=float, default=0.005,
                    help='Label noise floor in arcsec (default: 5 mas).')
     p.add_argument('--val-frac', type=float, default=0.15)
+    p.add_argument('--val-patches', type=str, default=None,
+                   help='Comma-separated patch ids (e.g. "25") to hold out as a '
+                        'spatially disjoint val set. Overrides the --val-frac '
+                        'random tile split, which leaks through the 50%% tile '
+                        'overlap (overlapping tiles are crops of the same '
+                        'mosaic, so duplicated sources carry identical labels).')
     p.add_argument('--seed', type=int, default=42)
     p.add_argument('--device', type=str, default='')
     p.add_argument('--dual-gpu', action='store_true',
@@ -898,7 +904,17 @@ def train(args):
 
     # --- Data ---
     pairs = discover_tile_pairs(args.rubin_dir, args.euclid_dir)
-    train_pairs, val_pairs = split_tile_pairs(pairs, args.val_frac, args.seed)
+    if args.val_patches:
+        val_patch_ids = {s.strip() for s in args.val_patches.split(',') if s.strip()}
+        def _patch_id(pair):
+            return pair[0].rsplit('_patch_', 1)[-1]
+        train_pairs = [p for p in pairs if _patch_id(p) not in val_patch_ids]
+        val_pairs = [p for p in pairs if _patch_id(p) in val_patch_ids]
+        if not val_pairs:
+            raise SystemExit(f'--val-patches {sorted(val_patch_ids)} matched no tiles')
+        print(f'Patch-disjoint split: val patches {sorted(val_patch_ids)}')
+    else:
+        train_pairs, val_pairs = split_tile_pairs(pairs, args.val_frac, args.seed)
     print(f'Tiles: {len(train_pairs)} train, {len(val_pairs)} val')
     args._features_cache_dir = Path(args.features_cache_dir) if args.features_cache_dir else None
     if args._features_cache_dir is not None:
