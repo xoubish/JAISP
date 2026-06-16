@@ -44,6 +44,7 @@ FOUNDATION = ROOT / "models/checkpoints/jaisp_v10_warmstart/checkpoint_best.pt"
 HEADS = {
     "prod": ROOT / "models/checkpoints/latent_position_v10_no_psf/best.pt",
     "patchval": ROOT / "models/checkpoints/latent_position_v10_patchval25/best.pt",
+    "joint": ROOT / "models/checkpoints/latent_position_v10_patchval25_joint/best.pt",
 }
 LABELS = torch.load(ROOT / "data/detection_labels/centernet_v10_790_thresh03.pt",
                     map_location="cpu", weights_only=False)
@@ -221,27 +222,29 @@ for stem in stems:
                 errs_head[tag] = np.hypot(*(head_xy - pts[vi]).T) * 0.1
 
             for i, k in enumerate(vi):
-                records.append(dict(
+                rec = dict(
                     tile=stem, band=band_name, snr=snr,
                     err_vis=float(err_vis[k]), err_band=float(err_band[i]),
-                    err_head_prod=float(errs_head["prod"][i]),
-                    err_head_patchval=float(errs_head["patchval"][i]),
                     band_snr_meas=float(band_snr[vi[i]] if hasattr(band_snr, "__len__") else band_snr),
-                ))
+                )
+                for tag in errs_head:
+                    rec[f"err_head_{tag}"] = float(errs_head[tag][i])
+                records.append(rec)
         print(f"  {stem} snr={snr}: {len(records)} records total", flush=True)
 
 # ---- aggregate ----
 import collections
 out = {"records": records}
 print("\n==== medians vs TRUTH (mas) ====")
-print(f"{'SNR':>4s} {'group':6s} {'N':>5s} | {'VIS cls':>8s} {'band cls':>8s} {'head prod':>9s} {'head pval':>9s}")
+head_cols = sorted(k for k in records[0] if k.startswith("err_head_"))
+print(f"{'SNR':>4s} {'group':6s} {'N':>5s} | {'VIS cls':>8s} {'band cls':>8s} " + " ".join(f"{c[9:]:>10s}" for c in head_cols))
 for snr in SNR_LEVELS:
     for grp, sel in [("rubin", lambda b: b.startswith("rubin")), ("nisp", lambda b: b.startswith("nisp"))]:
         rs = [r for r in records if r["snr"] == snr and sel(r["band"])]
         if not rs:
             continue
         med = lambda k: 1000 * float(np.median([r[k] for r in rs]))
-        print(f"{snr:4d} {grp:6s} {len(rs):5d} | {med('err_vis'):8.1f} {med('err_band'):8.1f} "
-              f"{med('err_head_prod'):9.1f} {med('err_head_patchval'):9.1f}")
+        print(f"{snr:4d} {grp:6s} {len(rs):5d} | {med('err_vis'):8.1f} {med('err_band'):8.1f} " +
+              " ".join(f"{med(c):10.1f}" for c in head_cols))
 json.dump(out, open(ROOT / "io/_nb09_outputs/injection_truth_results.json", "w"))
 print("\nsaved io/_nb09_outputs/injection_truth_results.json")

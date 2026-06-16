@@ -107,6 +107,33 @@ def _fit_duv(stamps) -> Optional[Tuple[float, float, np.ndarray]]:
     return du, dv, amps
 
 
+def _position_sigma(stamps, du, dv, step=0.003):
+    """Per-axis 1-sigma of (du, dv) in arcsec from the chi2 curvature.
+
+    For chi2(theta), cov = 2 * H^{-1} with H the Hessian; estimated by
+    central finite differences at the optimum.
+    """
+    def c(a, b):
+        return sum(_band_chi2_and_amp(s, a, b)[0] for s in stamps)
+
+    c0 = c(du, dv)
+    h = np.zeros((2, 2))
+    h[0, 0] = (c(du + step, dv) - 2 * c0 + c(du - step, dv)) / step ** 2
+    h[1, 1] = (c(du, dv + step) - 2 * c0 + c(du, dv - step)) / step ** 2
+    h[0, 1] = h[1, 0] = (
+        c(du + step, dv + step) - c(du + step, dv - step)
+        - c(du - step, dv + step) + c(du - step, dv - step)
+    ) / (4 * step ** 2)
+    try:
+        cov = 2.0 * np.linalg.inv(h)
+        var = np.diag(cov)
+        if np.any(var <= 0):
+            return np.nan, np.nan
+        return float(np.sqrt(var[0])), float(np.sqrt(var[1]))
+    except np.linalg.LinAlgError:
+        return np.nan, np.nan
+
+
 def joint_refine_positions(
     bands: List[Dict],
     vis_seed_xy: np.ndarray,
@@ -114,16 +141,22 @@ def joint_refine_positions(
     stamp_r: int = 5,
     min_bands: int = 3,
     amp_sig_floor: float = 1.5,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    return_sigma: bool = False,
+):
     """Joint-refine canonical positions for VIS-frame seeds.
 
-    Returns (xy [N,2] VIS px, ok [N] bool, n_bands_used [N]).
+    Returns (xy [N,2] VIS px, ok [N] bool, n_bands_used [N]) and, when
+    return_sigma=True, additionally sigma [N,2] per-axis 1-sigma in arcsec
+    (NaN where unavailable).
     """
     N = vis_seed_xy.shape[0]
     out_xy = vis_seed_xy.astype(np.float64).copy()
     ok = np.zeros(N, dtype=bool)
     nbu = np.zeros(N, dtype=np.int16)
+    pos_sig = np.full((N, 2), np.nan, dtype=np.float32)
     if N == 0:
+        if return_sigma:
+            return out_xy.astype(np.float32), ok, nbu, pos_sig
         return out_xy.astype(np.float32), ok, nbu
 
     # vectorized: sky positions of all seeds, per-band pixel positions,
@@ -188,5 +221,11 @@ def joint_refine_positions(
             continue
         out_xy[k] = (float(fx), float(fy))
         ok[k] = True
+        if return_sigma:
+            final_stamps = [s for s, kp in zip(stamps, keep) if kp] if (
+                keep.sum() >= min_bands and keep.sum() < len(stamps)) else stamps
+            pos_sig[k] = _position_sigma(final_stamps, du, dv)
 
+    if return_sigma:
+        return out_xy.astype(np.float32), ok, nbu, pos_sig
     return out_xy.astype(np.float32), ok, nbu

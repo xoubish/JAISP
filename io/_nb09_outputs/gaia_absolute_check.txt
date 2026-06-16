@@ -1,0 +1,14 @@
+Gaia stars: 543; matched to canonical sources within 0.3": 293
+
+bulk (canonical frame vs Gaia ICRS 2025.0): (+3.7, +1.9) mas
+per-star scatter after bulk removal: radial median 5.4 mas
+G 14.0-17.0: N=  43 bulk (  +3.8,  +2.8) scatter   4.8 mas
+G 17.0-18.5: N=  72 bulk (  +4.2,  +2.4) scatter   4.4 mas
+G 18.5-20.0: N= 122 bulk (  +3.5,  +1.4) scatter   5.7 mas
+G 20.0-21.0: N=  56 bulk (  +3.1,  +0.3) scatter   9.2 mas
+
+bulk offset per sky quadrant (common/absolute component spatial structure):
+( +2.7, +1.8)N= 22  ( +2.3, +2.2)N= 16  ( +3.9, +1.0)N= 18  ( +2.9, +4.4)N= 17
+( +5.7, +2.3)N= 20  ( +3.6, +2.7)N= 11  ( +2.9, +1.0)N= 18  ( +1.9, +6.0)N= 24
+( +4.6, -0.4)N= 18  ( +3.9, +3.0)N= 24  ( +3.1, +3.3)N= 17  ( +2.6, +2.1)N= 14
+( +4.3, +1.6)N= 13  ( +4.7, +2.8)N= 22  ( +4.3, -1.5)N= 20  ( +3.8, +0.5)N= 19
