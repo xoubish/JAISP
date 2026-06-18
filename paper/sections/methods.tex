@@ -1,0 +1,63 @@
+\section{Methods}
+\label{sec:methods}
+
+\subsection{The \jaisp{} foundation model}
+\label{sec:methods:foundation}
+
+% --- architecture ---
+\jaisp{} encodes each band with a per-band convolutional stem, resamples the
+per-instrument streams to a common fused pixel scale of $0.4\arcsecpx$, and
+fuses them into a shared bottleneck representation. \todo{Architecture detail:
+per-band stems, mixed-resolution stream depths from $\log_2$(scale ratio),
+ConvNeXt/transformer blocks, FiLM band conditioning, concat fusion (v9/v10).}
+The per-band stem normalizes its input by the per-pixel noise,
+$x = \mathrm{image}/\mathrm{rms}$, and clamps the result to a fixed
+signal-to-noise range before feature extraction; this choice is revisited in
+\S\ref{sec:results} as the origin of bright-star detection suppression.
+
+% --- training ---
+The model is trained by masked reconstruction \todo{(MAE objective, masking
+fraction, cross-instrument masking, Charbonnier$+$core-L2 loss for v10), epochs,
+optimizer, hardware}. All downstream heads operate on \emph{frozen} features.
+
+% --- versions / equivalence note ---
+\todo{Briefly: several architecture variants (v8 fine-scale, v9 concat fusion,
+v10 loss-shaped) were trained; in-distribution probes and downstream metrics
+find them statistically equivalent (see \S\ref{sec:discussion}). Report the
+production checkpoint used here (v10 warm-start).}
+
+\subsection{Detection head}
+\label{sec:methods:detection}
+
+% --- centernet ---
+We detect sources with a center-prediction (CenterNet-style) head on the frozen
+fused features, producing a normalized centroid and score per source.
+\todo{Head architecture, self-training/pseudo-label procedure, operating point
+(conf threshold), NMS.} Detections are gated on the \textit{Euclid} VIS signal
+and serve as seeds for astrometry.
+
+\subsection{Multi-band joint-centroid astrometry}
+\label{sec:methods:astrometry}
+
+% --- the instrument ---
+Given a detection seed, we (i) refine the centroid classically on
+\textit{Euclid} VIS, (ii) solve for a single \emph{joint canonical} sky
+position by simultaneously fitting the source across all bands, weighting each
+band by its noise and accounting for its PSF, and (iii) measure each band's
+classical centroid and record its offset from the joint canonical position.
+The joint canonical position is the cross-instrument estimate; the per-band
+offset is the astrometric residual we report.
+
+% --- why this beats single-band ---
+Because the fit is dominated by the band with the sharpest, highest-SNR
+localization (typically \textit{Euclid} VIS), the joint position transfers that
+localization to bands in which the source is faint or unresolved
+(\S\ref{sec:results}). Per-source uncertainties follow from the $\chi^2$
+curvature of the joint fit and a per-band $\mathrm{FWHM}/(2.355\,\mathrm{SNR})$
+centroid-noise model.
+
+% --- foundation-agnostic note ---
+We emphasize that step (i)--(iii) are classical given the detection seeds; the
+foundation's role in astrometry is to supply the cross-instrument detections.
+A learned per-object position head was also trained and is discussed as an
+ablation in \S\ref{sec:discussion}.

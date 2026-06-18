@@ -1,0 +1,40 @@
+\section{Out-of-Distribution Transfer: EDF-S}
+\label{sec:ood}
+
+% --- motivation ---
+The value proposition of a foundation model is transfer without retraining. All
+results above are in the ECDFS field on which the downstream heads were tuned.
+Here we apply the frozen \jaisp{} stack --- foundation, detector, and
+joint-centroid astrometry --- to 72 paired tiles in the independent EDF-S field
+(tract 2394) with no retraining or refitting.
+
+% --- caveat on this pass ---
+\todo{State the final data condition. The first pass used \textit{Euclid} tiles
+without variance maps, requiring a median-absolute-deviation RMS fallback for
+VIS/NISP (Rubin variance was present and used directly). Results below are
+either (a) to be reported on real-variance tiles, or (b) reported with the
+fallback and the real-variance rerun as a robustness check.}
+
+% --- what transfers ---
+Detection transfers cleanly (456 sources per tile versus 413 on ECDFS; no
+processing errors), and \textit{Euclid} NISP astrometry matches the
+in-distribution residual ($35$--$41\mas$ versus $40\mas$). The signal-to-noise
+scaling of the residual is reproduced. \todo{Final Rubin optical
+($g\,r\,i\,z$) transfer result: the first (fallback) pass showed a
+$\sim$1.5$\times$ larger matched-SNR residual whose origin --- the RMS fallback
+perturbing the joint-fit weighting versus genuine field differences --- is
+resolved by the real-variance rerun. Report the resolved outcome here.}
+
+\begin{figure}
+  \centering
+  % \includegraphics[width=\linewidth]{ood_astrometry_compare.png}
+  \caption{Per-band and SNR-binned astrometric residual, EDF-S (OOD) versus
+    ECDFS. \todo{final figure from notebook 15.}}
+  \label{fig:ood}
+\end{figure}
+
+% --- detection completeness OOD ---
+The bright-star detection suppression (\S\ref{sec:results:detection})
+reproduces and is somewhat stronger in EDF-S ($\mathrm{corr}=-0.71$),
+consistent with its origin in the input normalization rather than the field.
+\todo{MER-catalog completeness in EDF-S.}

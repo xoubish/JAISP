@@ -1,0 +1,58 @@
+% ====================================================================
+% JAISP paper -- target: The Astrophysical Journal (ApJ)
+% AASTeX v6.3.1.  Get the class from https://journals.aas.org/aastex-package-for-manuscripts/
+% Build:  latexmk -pdf main.tex   (or pdflatex x3 + bibtex)
+% ====================================================================
+\documentclass[twocolumn]{aastex701}
+
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\graphicspath{{figures/}}
+
+% --- convenience macros ---
+\newcommand{\jaisp}{\textsc{Jaisp}}
+\newcommand{\mas}{\,\mathrm{mas}}
+\newcommand{\arcsecpx}{\arcsec\,\mathrm{px}^{-1}}
+\newcommand{\todo}[1]{\textcolor{red}{[TODO: #1]}}
+\usepackage{xcolor}
+
+\shorttitle{A Joint Rubin--Euclid Foundation Model for Astrometry}
+\shortauthors{Hemmati et al.}
+
+\begin{document}
+
+\title{Cross-Instrument Source Detection and Astrometry with a Joint Rubin--Euclid Foundation Model}
+
+% ---- author block (placeholder) ----
+\author{Shoubaneh Hemmati}
+\affiliation{IPAC, California Institute of Technology, Pasadena, CA, USA}
+\email{shemmati@ipac.caltech.edu}
+% \author{...}\affiliation{...}
+% \collaboration{...}
+
+\begin{abstract}
+\input{sections/abstract}
+\end{abstract}
+
+\keywords{Astrometry --- Surveys --- Convolutional neural networks --- Sky surveys
+  --- Astronomy data analysis}
+
+\input{sections/intro}
+\input{sections/data}
+\input{sections/methods}
+\input{sections/results}
+\input{sections/ood}
+\input{sections/discussion}
+\input{sections/summary}
+
+\begin{acknowledgments}
+\todo{acknowledgments, facilities, software}
+\end{acknowledgments}
+
+\facilities{Rubin Observatory, Euclid}
+\software{Astropy \citep{astropy2022}, NumPy, SciPy, PyTorch, SEP \citep{barbary2016}}
+
+\bibliographystyle{aasjournalv7}
+\bibliography{refs}
+
+\end{document}

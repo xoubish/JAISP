@@ -1,0 +1,31 @@
+\section{Data}
+\label{sec:data}
+
+% --- fields ---
+Our primary field is ECDFS (Rubin tract 5063), where we assemble
+$\sim$790 paired Rubin$+$\textit{Euclid} tiles. \todo{exact tile count,
+sky area, depth, epoch.} For the out-of-distribution test
+(\S\ref{sec:ood}) we use 72 paired tiles in the EDF-S field
+(tract 2394).
+
+% --- bands and resolution ---
+Each tile carries six Rubin bands ($ugrizy$) and four \textit{Euclid} bands
+(VIS, NISP $Y$, $J$, $H$). \textit{Euclid} imagery is taken from the MER
+mosaics; VIS and NISP are sampled at $0.1\arcsecpx$ ($\sim$1084$\times$1084
+per tile), and Rubin at \todo{Rubin pixel scale / tile shape (6$\times$512$\times$512)}.
+The native pixel scales and per-band World Coordinate Systems are retained;
+the foundation model resamples internally to a common fused scale of
+$0.4\arcsecpx$ (\S\ref{sec:methods}).
+
+% --- variance / masks ---
+Per-pixel variance maps accompany the Rubin imagery and, in the primary field,
+the \textit{Euclid} imagery. \todo{Note: the EDF-S \textit{Euclid} tiles used
+for the first OOD pass lacked variance maps; see \S\ref{sec:ood}. State final
+data state after real-variance tiles are obtained.}
+
+% --- truth / external catalogs ---
+For astrometric validation we use \textit{Gaia} \todo{DR} as an absolute
+reference, and \todo{the \textit{Euclid} MER catalog for detection
+completeness/purity}. We additionally construct a controlled
+source-injection set (\S\ref{sec:results}) to measure positional error against
+known truth.
