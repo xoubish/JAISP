@@ -4,6 +4,29 @@
 \subsection{The \jaisp{} foundation model}
 \label{sec:methods:foundation}
 
+% --- design path: what we tried and abandoned ---
+The current design follows from a sequence of approaches we tried and
+discarded, and the path is itself one of the paper's lessons. We first pursued
+\emph{latent-space alignment} objectives that pull co-located Rubin and
+\textit{Euclid} features together: patch-level contrastive learning, an
+object-centric DETR-style variant with learned object queries, and
+JEPA-style student--teacher matching at the token level, including a
+strict-position variant. Each failed for precision work, for a common reason.
+Contrastive patch embeddings collapsed onto the sky background that dominates
+$\sim$95\% of the pixels; the object-centric matching was unstable in crowded
+deep fields; and the token-level objectives, even with exact positional
+matching, rewarded feature \emph{similarity} without requiring the encoder to
+preserve where flux sits to sub-pixel accuracy --- the coarse ($\sim$3\arcsec)
+patch tokenization compounded this. The decisive evidence was that a simple
+supervised cost-volume CNN reached $\sim$38$\mas$ on the astrometry task while
+the best JEPA features gave only $\sim$47$\mas$: the expensive self-supervised
+representation was worse than a small supervised baseline. We concluded that
+latent-similarity objectives do not retain the spatial information precision
+cosmology needs, and moved to \emph{pixel-space masked reconstruction}, where
+holding out a band and reconstructing its pixels forces the encoder to encode
+exact positions. A fuller account of the abandoned variants is given in the
+project documentation.
+
 % --- architecture ---
 \jaisp{} encodes each band with a per-band convolutional stem, resamples the
 per-instrument streams to a common fused pixel scale of $0.4\arcsecpx$, and
@@ -21,10 +44,19 @@ fraction, cross-instrument masking, Charbonnier$+$core-L2 loss for v10), epochs,
 optimizer, hardware}. All downstream heads operate on \emph{frozen} features.
 
 % --- versions / equivalence note ---
-\todo{Briefly: several architecture variants (v8 fine-scale, v9 concat fusion,
-v10 loss-shaped) were trained; in-distribution probes and downstream metrics
-find them statistically equivalent (see \S\ref{sec:discussion}). Report the
-production checkpoint used here (v10 warm-start).}
+Within the reconstruction era the architecture was refined in several steps:
+an initial dense variant downsampled \textit{Euclid} VIS to the Rubin grid and
+discarded its resolution advantage; this was fixed by a mixed-resolution
+two-stream encoder that keeps each instrument at native scale, followed by a
+finer fused scale ($0.4\arcsecpx$ via cropped inputs), symmetric per-band
+concatenation fusion, and a Charbonnier reconstruction loss with extra
+weighting on high-signal core pixels. We report the production checkpoint used
+throughout (the loss-shaped, concat-fusion variant). In-distribution probes and
+downstream detection/astrometry metrics do not statistically distinguish the
+last few variants (\S\ref{sec:discussion}); we therefore do not claim a winner
+among them on this field and treat out-of-distribution transfer as the
+discriminating test. \todo{Fix final version nomenclature/checkpoint name and
+training config.}
 
 \subsection{Detection head}
 \label{sec:methods:detection}

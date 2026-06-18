@@ -14,11 +14,15 @@ The joint multi-band position reduces per-band centroid scatter relative to a
 single-band measurement, with the largest gains at low signal-to-noise
 ($\sim$2.4--2.5$\times$ over a VIS-only anchor at $\mathrm{SNR}=5$ in a
 controlled source-injection test), and is validated against \textit{Gaia} to
-$4.4$--$4.8\mas$ at $G<18.5$. We critically examine what the foundation
-contributes: through ablations and injection tests we find the cross-instrument
-gain is genuine but bounded by the VIS localization floor, and that detection
-completeness is suppressed near bright stars by the network's
-signal-to-noise input normalization.
+$4.4$--$4.8\mas$ at $G<18.5$. Aggregating the per-band residuals across the
+field, we recover a coherent degree-scale $\sim$4--7$\mas$ concordance field
+between the Rubin and \textit{Euclid} astrometric solutions that is stable
+across foundation-model versions and reconstruction settings --- a direct map
+of the residual cross-survey WCS mismatch that classical per-instrument
+pipelines leave unmodeled. Through ablations and injection tests we find the
+cross-instrument gain is genuine but bounded by the VIS localization floor, and
+we characterize a completeness loss near bright stars traceable to the
+network's signal-to-noise input normalization.
 % --- OOD ---
 Finally we report a first out-of-distribution test, applying the frozen model
 without retraining to the EDF-S field: detection and \textit{Euclid} NISP

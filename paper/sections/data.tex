@@ -17,6 +17,17 @@ The native pixel scales and per-band World Coordinate Systems are retained;
 the foundation model resamples internally to a common fused scale of
 $0.4\arcsecpx$ (\S\ref{sec:methods}).
 
+\begin{figure*}
+  \centering
+  \includegraphics[width=\linewidth]{random_10bandtile.png}
+  \caption{The ten input channels for a single matched tile. Top: Rubin
+    $ugrizy$ ($512^2$ at $0.2\arcsecpx$). Bottom: \textit{Euclid} VIS and NISP
+    $Y\!J\!H$ ($\sim$1084$^2$ at $0.1\arcsecpx$, from the MER mosaics). The
+    sharp VIS channel and the depth and noise differences across bands are the
+    raw material the foundation model fuses.}
+  \label{fig:tile}
+\end{figure*}
+
 % --- variance / masks ---
 Per-pixel variance maps accompany the Rubin imagery and, in the primary field,
 the \textit{Euclid} imagery. \todo{Note: the EDF-S \textit{Euclid} tiles used
