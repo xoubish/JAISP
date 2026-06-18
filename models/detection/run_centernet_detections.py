@@ -52,6 +52,22 @@ from jaisp_foundation_v10 import EUCLID_BANDS, RUBIN_BANDS                 # noq
 from load_foundation import load_foundation                                # noqa: E402
 
 
+def _rms_from_var_or_image(var, img: np.ndarray) -> np.ndarray:
+    """RMS from variance, with robust MAD fallback when var is missing/invalid.
+
+    Mirrors models/astrometry2/dataset._rms_from_var_or_image so detection and
+    astrometry use the same noise estimate on tiles that lack variance maps
+    (e.g. the EDF-S OOD tiles, whose Euclid npz have no var_* arrays).
+    """
+    med = float(np.median(img))
+    sig = max(float(1.4826 * np.median(np.abs(img - med))), 1e-10)
+    if var is None:
+        return np.full_like(img, sig, dtype=np.float32)
+    rms = np.sqrt(np.maximum(np.nan_to_num(np.asarray(var, dtype=np.float32), nan=0.0), 0.0))
+    good = np.isfinite(rms) & (rms > 0)
+    return np.where(good, rms, sig).astype(np.float32)
+
+
 def _tile_band_dicts(
     rubin_path: Path,
     euclid_path: Path,
@@ -65,11 +81,11 @@ def _tile_band_dicts(
     rms: Dict[str, torch.Tensor] = {}
 
     rubin_img = np.asarray(rd['img'], dtype=np.float32)
-    rubin_var = np.asarray(rd['var'], dtype=np.float32)
+    rubin_var = np.asarray(rd['var'], dtype=np.float32) if 'var' in rd else None
     for bi, band in enumerate(RUBIN_BANDS):
         img = np.nan_to_num(rubin_img[bi], nan=0.0)
         rm = np.maximum(
-            np.nan_to_num(np.sqrt(np.clip(rubin_var[bi], 0, None)), nan=1.0),
+            _rms_from_var_or_image(None if rubin_var is None else rubin_var[bi], img),
             1e-10,
         )
         images[band] = torch.from_numpy(img[None, None].copy()).to(device)
@@ -80,10 +96,11 @@ def _tile_band_dicts(
     for band in EUCLID_BANDS:
         euclid_key = band.split('_', 1)[1]
         img_arr = np.asarray(ed[f'img_{euclid_key}'], dtype=np.float32)
-        var_arr = np.asarray(ed[f'var_{euclid_key}'], dtype=np.float32)
+        var_key = f'var_{euclid_key}'
+        var_arr = np.asarray(ed[var_key], dtype=np.float32) if var_key in ed else None
         img = np.nan_to_num(img_arr, nan=0.0)
         rm = np.maximum(
-            np.nan_to_num(np.sqrt(np.clip(var_arr, 0, None)), nan=1.0),
+            _rms_from_var_or_image(var_arr, img),
             1e-10,
         )
         images[band] = torch.from_numpy(img[None, None].copy()).to(device)
