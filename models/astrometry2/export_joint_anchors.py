@@ -88,7 +88,10 @@ def process_tile(task):
                 if f"img_{short}" not in edata:
                     continue
                 band_img = np.nan_to_num(np.asarray(edata[f"img_{short}"], dtype=np.float32), nan=0.0)
-                band_rms = np.sqrt(np.clip(np.asarray(edata[f"var_{short}"], dtype=np.float32), 1e-12, None))
+                from astrometry2.dataset import _rms_from_var_or_image
+                _vk = f"var_{short}"
+                band_rms = _rms_from_var_or_image(
+                    np.asarray(edata[_vk], dtype=np.float32) if _vk in edata else None, band_img)
                 band_wcs = WCS(safe_header_from_card_string(edata[f"wcs_{short}"].item()))
                 px_scale = 0.1
             band_xy_vis, offset_arcsec, valid, band_snr = centroid_in_band_and_project(

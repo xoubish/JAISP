@@ -46,8 +46,10 @@ def build_band_stack(rdata, edata) -> List[Dict]:
         if key not in edata:
             continue
         img = np.nan_to_num(np.asarray(edata[key], dtype=np.float32), nan=0.0)
-        var = np.asarray(edata.get(f"var_{short}"), dtype=np.float32)
-        rms = np.sqrt(np.clip(var, 1e-12, None))
+        from astrometry2.dataset import _rms_from_var_or_image
+        var_key = f"var_{short}"
+        var = np.asarray(edata[var_key], dtype=np.float32) if var_key in edata else None
+        rms = _rms_from_var_or_image(var, img)
         w = vwcs if short == "VIS" else WCS(safe_header_from_card_string(edata[f"wcs_{short}"].item()))
         bands.append(dict(name=f"euclid_{short}", img=img, rms=rms, wcs=w,
                           sigma=SIGMA_PX_VIS if short == "VIS" else SIGMA_PX_NISP))
