@@ -35,6 +35,11 @@ BANDS = [("rubin_u", 3.0), ("rubin_g", 3.0), ("rubin_r", 3.0), ("rubin_i", 3.0),
          ("rubin_z", 3.0), ("rubin_y", 3.0), ("nisp_Y", 2.5), ("nisp_J", 2.5), ("nisp_H", 2.5)]
 RUBIN_ORDER = ["u", "g", "r", "i", "z", "y"]
 
+# When True, drop Euclid var_* maps so the exporter falls back to MAD-based RMS
+# (control for the EDF-S "no Euclid var" condition). Set in main(); inherited by
+# fork-started workers. Rubin var is left untouched.
+EUCLID_NO_VAR = False
+
 
 def process_tile(task):
     tile_id, rubin_path, euclid_path, det_xy_norm = task
@@ -48,6 +53,8 @@ def process_tile(task):
     try:
         rdata = dict(np.load(rubin_path, allow_pickle=True))
         edata = dict(np.load(euclid_path, allow_pickle=True))
+        if EUCLID_NO_VAR:
+            edata = {k: v for k, v in edata.items() if not k.startswith("var_")}
         vis_img = np.nan_to_num(np.asarray(edata["img_VIS"], dtype=np.float32), nan=0.0)
         H, W = vis_img.shape
         vwcs = WCS(safe_header_from_card_string(edata["wcs_VIS"].item()))
@@ -133,7 +140,13 @@ def main():
     ap.add_argument("--out", default="models/checkpoints/anchors_joint_canonical_790.npz")
     ap.add_argument("--workers", type=int, default=12)
     ap.add_argument("--max-tiles", type=int, default=0)
+    ap.add_argument("--euclid-no-var", action="store_true",
+                    help="Drop Euclid var_* maps (force MAD RMS) — control for EDF-S no-var condition.")
     args = ap.parse_args()
+    if args.euclid_no_var:
+        global EUCLID_NO_VAR
+        EUCLID_NO_VAR = True
+        print("EUCLID_NO_VAR=True: forcing MAD RMS fallback on Euclid bands")
 
     import torch
     from astrometry2.dataset import discover_tile_pairs
