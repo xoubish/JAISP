@@ -92,9 +92,9 @@ The case for the foundation isn't "does it beat a task-specific baseline on this
 
 The fourth property is the one we value most and have tested least:
 
-4. **Transfer to new fields without retraining.** A foundation that learned multi-band physics from ECDFS tiles SHOULD work zero-shot on EDF-North, EDF-South, or any new LSST+Euclid deep field. The expensive part (foundation pretraining) should not need to be repeated per field. Downstream heads trained on ECDFS SHOULD continue to apply, provided the new field's sources have the same statistical properties. This is exactly what a foundation model is for. All training and evaluation in this repo so far has been in-distribution on ECDFS tract5063. Out-of-distribution evaluation on a different field is a milestone not yet executed. Without it we cannot distinguish "foundation helps on this field" from "foundation learned this specific field's idiosyncrasies."
+4. **Transfer to new fields without retraining.** A foundation that learned multi-band physics from ECDFS tiles SHOULD work zero-shot on EDF-North, EDF-South, or any new LSST+Euclid deep field. The expensive part (foundation pretraining) should not need to be repeated per field. Downstream heads trained on ECDFS SHOULD continue to apply, provided the new field's sources have the same statistical properties. This is exactly what a foundation model is for. **Update (2026-06): the first out-of-distribution evaluation has now been executed** — the frozen v10 stack was run zero-shot on EDF-S (72 paired tiles, no retraining). With the correct (real-variance) noise model, detection and astrometry transfer with only a modest, uniform ~5-15% degradation vs ECDFS at matched SNR. See the dedicated section *Out-of-Distribution Evaluation & MER-Catalogue Validation* below for the full results, plus catalogue-validated completeness/purity and injection-recovery depth on both fields.
 
-The long-term plan is to (a) extend evaluation to at least one non-ECDFS field as soon as the astrometry pipeline settles, and (b) use that OOD performance number -- not the in-distribution train/val split -- as the primary success metric for future foundation versions.
+The long-term plan is to (a) keep using OOD performance -- not the in-distribution train/val split -- as the primary success metric for future foundation versions, and (b) extend the EDF-S evaluation to the other deep fields.
 
 ---
 
@@ -1577,6 +1577,80 @@ resample the VIS morphology to Rubin's 0.2"/px native grid or reproject Rubin to
 the VIS grid before sharing templates.
 
 `io/11_flux_psf_field_photometry_validation.ipynb` is now historical until the compact-source baseline is ported from PSFField to the new ePSF head. `io/12_flux_scarlet_like_photometry.ipynb` visualizes the per-scene optimizer. `io/13_flux_foundation_photometry_head.ipynb` loads the current photometry-head checkpoint and compares learned-head residuals against PSF-only residuals on the same CenterNet + astrometry-corrected catalog.
+
+---
+
+## Out-of-Distribution Evaluation & MER-Catalogue Validation
+
+This section records the 2026-06 campaign that (a) executed the first out-of-distribution (OOD) evaluation on EDF-S, (b) validated detection against the real Euclid MER catalogue on both fields, (c) measured the true (catalogue-independent) detection depth by injection-recovery, (d) quantified the multi-band detection gain, and (e) tested whether training the detector on MER labels helps. Work lives in `io/15_ood_evaluation_edfs.ipynb` (EDF-S/OOD) and `io/06_detection_comparison.ipynb` (ECDFS/in-distribution).
+
+### Data provenance (clarified)
+
+A point of frequent confusion, now pinned down: the JAISP **imaging** and the **catalogues** come from different Euclid releases.
+
+- **Euclid imaging** (VIS + NISP Y/J/H tiles): bulk-downloaded from the **ESA archive** and aligned to Rubin tiles in `io/03_euclid_matching_MER.ipynb`. This is almost certainly **DR1** (the `euclid_tile_id` stored in the tiles, e.g. ECDFS `TILE101374533/534`, `TILE101375806`; EDF-S `TILE102021011`, are DR1 indices). The IRSA-SIA path in notebooks 01/02 (`euclid_DpdMerBksMosaic`, which would be Q1) is a *secondary* pathway and not what produced the production tiles. The exact release is not recoverable from on-disk artifacts.
+- **Rubin imaging**: LSST **DP1** (Data Preview 1) ComCam coadds (Butler `REPO="dp1"`, `COLLECTION="LSSTComCam/DP1"`, `deep_coadd`, skymap `lsst_cells_v1`), tract 5063 for ECDFS.
+- **Gaia** (PSF/astrometry anchors): **DR3** (`gaiadr3.gaia_source`).
+- **MER catalogue** (this section's truth reference): Euclid **Q1** MER final catalogue, table `euclid_q1_mer_catalogue`, pulled from IRSA TAP via `pyvo` (`https://irsa.ipac.caltech.edu/TAP`). VIS AB mag is computed from the µJy fluxes as `mag = 23.9 - 2.5*log10(flux_detection_total)`. **Tile-ID numbering differs between releases**: querying Q1 by the stored DR1 `euclid_tile_id` returns 0 rows; query by RA/Dec box instead (large footprints need an async TAP job). So all detection/catalogue comparisons here are **DR1 imaging vs Q1 catalogue** on the same sky — close, but small source-list differences between releases are an expected caveat.
+
+### EDF-S real-variance re-run (Caveat-1 resolution)
+
+The original EDF-S OOD tiles lacked `var_*` maps, forcing a MAD-based RMS fallback. They were re-downloaded **with variance** (euclid `var_VIS/Y/J/H`, rubin `var`+`mask`) and both stages re-run. Switching MAD→real var is a *re-weighting* of the joint-canonical astrometry fit, and it moves bands in **both** directions, so it is not a uniform "fix":
+
+- **Detection**: mean **456→332 det/tile** (MAD inflated counts ~37%, mostly spurious detections in high-noise regions; max collapsed 1019→469). Apples-to-apples vs ECDFS (413/tile, real var), EDF-S now detects **~20% fewer**, not more — i.e. EDF-S is a shallower/harder field, *flipping* the MAD-era "EDF-S is denser" read.
+- **Astrometry** (per-band median offset, MAD→real var, vs ECDFS reference): optical Rubin g/r/i/z pulled **down** ~3-8 mas (g 71→63, r 56→47, i 53→46, z 61→57; ECDFS 47/37/33/39), NISP lifted **up** ~4-9 mas (Y/J/H 41/38/35 → 46/46/44; ECDFS ~40). A controlled experiment — re-running the exporter on 30 ECDFS tiles with `--euclid-no-var` (a flag added to `export_joint_anchors.py`) — reproduced the same swing (optical +8-10 mas, NISP −5-10 mas), proving it is an **instrument-independent re-weighting artifact of the MAD fallback**, not field-dependent.
+- **Net**: the original Caveat-1 ("Rubin g/r/i/z ~1.5× worse on EDF-S") was *mostly the MAD fallback*. With real variance, EDF-S is a **modest, uniform ~5-15% worse than ECDFS across all SNR bins** — a real but small OOD penalty, consistent with shallower DP1 ComCam Rubin data. Both detection and astrometry now tell one coherent story.
+
+The real-var anchors are `models/checkpoints/anchors_joint_canonical_edfs_var.npz` (MAD version backed up as `..._edfs_MADvar_backup.npz`); the var-based detection cache is `data/detection_labels/centernet_v10_edfs_thresh03.pt` (MAD backup `..._MADvar_backup.pt`).
+
+### Detection vs the MER catalogue (completeness & purity)
+
+CenterNet detections were matched (0.5″, per-tile WCS) against the clean MER reference (`vis_det=1 & spurious_flag=0`), binned by VIS magnitude. Purity is matched against the *full* catalogue (a lower bound on true purity). Notebook 15 §1c (EDF-S) and notebook 6 (ECDFS):
+
+| Field | completeness | purity | median match offset |
+| --- | --- | --- | --- |
+| ECDFS (in-distribution) | 90.8% | 62.9% | 52 mas |
+| EDF-S (OOD) | 89.6% | 69.4% | 47 mas |
+
+Completeness **transfers almost perfectly** (in-dist ≈ OOD). The ~47-52 mas match offset independently agrees with the Step-2 astrometry residuals. Two caveats surfaced by the per-magnitude curve and the visual overlay (§1c-vis): (i) the bright end (mag ≲ 22) dips to ~83% — about half is **extended-galaxy centroid offset** (MER centroid >0.5″ from the CenterNet peak; recovers to ~86% at a 2″ radius, and point-like sources are ~92%), the rest genuine bright-star/diffuse suppression (the known bright-star detection-suppression caveat); (ii) ~30% of detections are unmatched (deblending differences, bright-star artifacts, overlap edges, and DR1-vs-Q1 source-list differences).
+
+**Crucially, MER-matching completeness is optimistically biased** — MER's own faint catalogue is itself incomplete, so the faint sources it lists are the easy-to-detect ones. The honest depth comes from injection.
+
+### Injection-recovery: the true detection depth
+
+A catalogue-independent completeness benchmark via **source recycling**: take real isolated MER sources of known VIS mag, extract their all-10-band stamps (real PSF + SED), scale by a factor to a fainter target magnitude, inject at empty good-coverage positions, and re-run the **frozen** detector. Magnitude comes straight from the donor; the profile is automatically realistic. (Two methodology lessons learned the hard way: synthetic narrow-PSF injection at fixed *peak*-SNR fails entirely — narrow profiles wash out in the 0.4″ fused grid — and source-recycling preserves *angular size*, so a clean point-source depth requires restricting donors to compact sources; mixing in extended/LSB donors drops even the bright-end completeness to ~78% because completeness is surface-brightness-dependent, not just magnitude-dependent.)
+
+Point-source completeness (compact donors, all-band, 20 ECDFS tiles): **99% @ mag 22.5, 93% @ 24, 77% @ 25, 50% depth ≈ VIS 25.5, ~30% @ 26.5.** This is markedly steeper than the MER-matched ~90% "flat to 26" — confirming the bias above. **The honest point-source detection depth is VIS ≈ 25.5 (50%).**
+
+### Multi-band detection gain
+
+Same injection, but inject the source **VIS-only** vs **all-10-band** (matched donors/positions/magnitudes); the gap is the multi-band contribution:
+
+| VIS mag | VIS-only | all-10-band | gain |
+| --- | --- | --- | --- |
+| 22.5 | 85.3% | 98.9% | +13.7 |
+| 24.0 | 80.0% | 92.6% | +12.6 |
+| 25.0 | 56.8% | 76.8% | +20.0 |
+| 25.5 | 35.3% | 53.2% | +17.9 |
+| 26.0 | 29.5% | 44.2% | +14.7 |
+
+The 10-band foundation adds a consistent **+10-20 points of completeness over VIS-alone**, peaking ~+20 at VIS≈25, and pushes the 50% depth ~0.5 mag fainter (≈25.0→≈25.5). This is the JAISP detection value proposition, measured. (Note: CenterNet detects on the frozen v10 foundation's encoding of *all 10 bands* — `feats = encoder({10-band dict})` — not a single band; the head is the only trained part. A flip side: a bright source present *only* in VIS, with no counterpart in any other band, is recovered only ~85%, because the fused detector learned that real sources appear in multiple bands and partly discounts single-band signal — relevant for genuine single-band transients/artifacts, fine for normal astrophysical sources.)
+
+### Training the detector on MER labels
+
+Does supervising the detector with the real catalogue help? A minimal MER-supervised trainer (`scratchpad mer_finetune_train.py`): frozen v10 foundation, warm-start the production CenterNet head, train the head only on clean MER VIS labels (mag<26) rendered as CenterNet heatmap targets. **Spatially disjoint split**: train on DR1 tiles 534+806 (200-tile subsample), **hold out tile 533 entirely**. Evaluated on held-out 533 (25 tiles) at conf 0.3:
+
+| held-out 533 | Baseline (classical+synth) | MER fine-tuned |
+| --- | --- | --- |
+| MER completeness | 93.6% | 86.2% |
+| MER purity | 62.8% | **93.5%** |
+| Injection 50% depth | ~VIS 26.0 | ~VIS 25.2 |
+
+MER fine-tuning **trades recall for precision**: purity jumps +31 points (false-positive rate 37%→6.5%) at the cost of ~0.8 mag of depth. This is an *operating-point shift*, not a uniform win, and it is on held-out sky so it is a fair test (no leakage/emulation). It does *not* by itself prove the fine-tuned head is on a better precision/recall frontier — that needs a threshold-matched comparison (re-cut both detectors to matched purity and compare completeness), which is the natural follow-up. The fine-tuned checkpoint is `checkpoints/centernet_v10_MERfinetune/centernet_best.pt`.
+
+### How to judge detection quality (summary)
+
+Three rungs, in increasing rigour: (1) completeness/purity vs MER — competitive (~90%) but catalogue-biased; (2) **injection-recovery** — the catalogue-independent truth, giving a 50% point-source depth of VIS ≈ 25.5; (3) the **multi-band gain** — the foundation's actual value proposition, ~+0.5 mag of depth over VIS-alone. The detection threshold (`conf_threshold`, currently 0.3) is the recall/purity knob; because the detector ingests SNR-normalised input it is already ~background-adaptive (per-tile completeness barely tracks the ~6%-uniform EDF-S noise), so a background-dependent threshold buys little within a uniform-depth field.
 
 ---
 
