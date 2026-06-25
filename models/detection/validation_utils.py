@@ -159,6 +159,23 @@ def _add(arr, cx, cy, stamp):
     arr[cy - r:cy + r + 1, cx - r:cx + r + 1] += stamp; return True
 
 
+def _mode_bands(mode):
+    """Which bands an injection mode places the source into.
+
+    'all'   -> all 10 bands (full multi-instrument source)
+    'vis'   -> Euclid VIS only
+    'nisp'  -> Euclid NIR Y/J/H only (high-z dropout: gone from optical, present in NIR)
+    'rubin' -> Rubin u..y only (optical-only)
+    """
+    allb = set(RUBIN_BANDS) | set(EUCLID_BANDS)
+    return {
+        'all': allb,
+        'vis': {'euclid_VIS'},
+        'nisp': {'euclid_Y', 'euclid_J', 'euclid_H'},
+        'rubin': set(RUBIN_BANDS),
+    }.get(mode, allb)
+
+
 def eval_injection(det, stems, mer, euclid_dir, rubin_dir, device, modes=('all',),
                    target_mags=(22.5, 23.5, 24.0, 24.5, 25.0, 25.5, 26.0, 26.5),
                    n_per_mag=10, conf=0.30, rad_as=0.5, match_px=3.0, edge=24, rvis=8, seed=3):
@@ -235,10 +252,11 @@ def eval_injection(det, stems, mer, euclid_dir, rubin_dir, device, modes=('all',
                     continue
                 injected.append((tx, ty, mg, pend)); placed += 1
         for mode in modes:
+            bset = _mode_bands(mode)
             imgs = {b: images0[b].copy() for b in images0}
             for (tx, ty, mg, pend) in injected:
                 for (b, a, c2, s) in pend:
-                    if mode == 'all' or b == 'euclid_VIS':
+                    if b in bset:
                         _add(imgs[b], a, c2, s)
             D1 = run_detect(det, imgs, rms, vh, device, conf); t1 = cKDTree(D1) if len(D1) else None
             for (tx, ty, mg, pend) in injected:

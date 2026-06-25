@@ -1638,6 +1638,17 @@ Same injection, but inject the source **VIS-only** vs **all-10-band** (matched d
 
 The 10-band foundation adds a consistent **+10-20 points of completeness over VIS-alone**, peaking ~+20 at VIS≈25, and pushes the 50% depth ~0.5 mag fainter (≈25.0→≈25.5). This is the JAISP detection value proposition, measured. (Note: CenterNet detects on the frozen v10 foundation's encoding of *all 10 bands* — `feats = encoder({10-band dict})` — not a single band; the head is the only trained part. A flip side: a bright source present *only* in VIS, with no counterpart in any other band, is recovered only ~85%, because the fused detector learned that real sources appear in multiple bands and partly discounts single-band signal — relevant for genuine single-band transients/artifacts, fine for normal astrophysical sources.)
 
+**Band-subset breakdown — where does detection sensitivity come from?** (notebook `io/17_detection_validation.ipynb` Test 3.) Injecting the donor into one band subset at a time (matched donors/positions/mags) gives recovery vs VIS-equivalent magnitude:
+
+| inj. mag | VIS-only | NISP-only | Rubin-only | all-10 |
+| --- | --- | --- | --- | --- |
+| 22.5 | 85% | 97% | ~0% | 99% |
+| 23.5 | 86% | 80% | ~0% | 96% |
+| 24.5 | 88% | 57% | ~0% | 93% |
+| 25.5 | 35% | 20% | ~0% | 53% |
+
+Two clear, architecturally meaningful results: (i) the **NISP-only** curve is a **high-z optical-dropout proxy** — a Lyman-break source can vanish from the optical yet remain in the NIR; the detector recovers NISP-only injections at **~97% (mag 22.5) down to ~57% (mag 24.5)**, so it can find sources that an optical/VIS-driven catalogue (MER's VIS detection) would entirely miss (at the bright end NISP-only even beats VIS-only, because three NIR bands corroborate where VIS is a single channel). (ii) **Rubin optical-only injections are essentially never detected (~0%)** — the detector is **Euclid-anchored**: its heatmap lives at VIS (0.1″/px) resolution and it was trained on VIS-detected labels, so Rubin (0.2″/px) contributes added *depth/SNR in fusion* but cannot *drive* a detection on its own. (NISP-only recovery is an upper bound on the NIR-only reach at a given flux: a true dropout would be intrinsically faint in the dropped bands.)
+
 ### Training the detector on MER labels
 
 Does supervising the detector with the real catalogue help? A minimal MER-supervised trainer (`scratchpad mer_finetune_train.py`): frozen v10 foundation, warm-start the production CenterNet head, train the head only on clean MER VIS labels (mag<26) rendered as CenterNet heatmap targets. **Spatially disjoint split**: train on DR1 tiles 534+806 (200-tile subsample), **hold out tile 533 entirely**. Evaluated on held-out 533 (25 tiles) at conf 0.3:
