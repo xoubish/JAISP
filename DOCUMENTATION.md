@@ -1582,7 +1582,7 @@ the VIS grid before sharing templates.
 
 ## Out-of-Distribution Evaluation & MER-Catalogue Validation
 
-This section records the 2026-06 campaign that (a) executed the first out-of-distribution (OOD) evaluation on EDF-S, (b) validated detection against the real Euclid MER catalogue on both fields, (c) measured the true (catalogue-independent) detection depth by injection-recovery, (d) quantified the multi-band detection gain, and (e) tested whether training the detector on MER labels helps. Work lives in `io/15_ood_evaluation_edfs.ipynb` (EDF-S/OOD) and `io/06_detection_comparison.ipynb` (ECDFS/in-distribution).
+This section records the 2026-06 campaign that (a) executed the first out-of-distribution (OOD) evaluation on EDF-S, (b) validated detection against the real Euclid MER catalogue on both fields, (c) measured the true (catalogue-independent) detection depth by injection-recovery, (d) quantified the multi-band detection gain, and (e) tested whether training the detector on MER labels helps. Work lives in `io/15_ood_evaluation_edfs.ipynb` (EDF-S/OOD), `io/06_detection_comparison.ipynb` (ECDFS/in-distribution), and `io/17_detection_validation.ipynb` (reproducible, plotted MER-match / injection / multi-band / fine-tune tests, backed by committed code in `models/detection/validation_utils.py` and `models/detection/finetune_centernet_mer.py`).
 
 ### Data provenance (clarified)
 
@@ -1613,6 +1613,8 @@ CenterNet detections were matched (0.5″, per-tile WCS) against the clean MER r
 | EDF-S (OOD) | 89.6% | 69.4% | 47 mas |
 
 Completeness **transfers almost perfectly** (in-dist ≈ OOD). The ~47-52 mas match offset independently agrees with the Step-2 astrometry residuals. Two caveats surfaced by the per-magnitude curve and the visual overlay (§1c-vis): (i) the bright end (mag ≲ 22) dips to ~83% — about half is **extended-galaxy centroid offset** (MER centroid >0.5″ from the CenterNet peak; recovers to ~86% at a 2″ radius, and point-like sources are ~92%), the rest genuine bright-star/diffuse suppression (the known bright-star detection-suppression caveat); (ii) ~30% of detections are unmatched (deblending differences, bright-star artifacts, overlap edges, and DR1-vs-Q1 source-list differences).
+
+**Anatomy of the disagreements** (notebook `io/17_detection_validation.ipynb`, Test 5; code in `models/detection/validation_utils.py:analyze_mer`). Per-band aperture SNR was measured at matched detections, unmatched ("extra") detections, missed MER sources, and random empty ("null") positions. Findings: **misses** are faint — their VIS aperture-SNR distribution peaks near the detection floor. **Extras** carry *some* real excess flux (their max-band SNR distribution peaks ~3-4, clearly above the null ~1) but are **mostly faint/marginal**, far below matched detections; only ~5% are unambiguously bright-real, and only ~15% of those are NIR/Rubin-brighter-than-VIS (genuine multi-band detections MER's VIS-driven catalogue missed). So the ~30% extras are **not** a large hidden population of bright multi-band sources — **MER purity is therefore a mild lower bound, not drastically misleading**, and the genuine multi-band-missed population is real but small. (A postage-stamp gallery of example extras and misses is in Test 6.)
 
 **Crucially, MER-matching completeness is optimistically biased** — MER's own faint catalogue is itself incomplete, so the faint sources it lists are the easy-to-detect ones. The honest depth comes from injection.
 
