@@ -92,3 +92,4 @@ Thumbs.db
 
 # Claude session artifact
 .claude/
+paper_figures/_fig3_recon_cache.pkl
