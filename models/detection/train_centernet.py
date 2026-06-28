@@ -247,6 +247,7 @@ def train(args):
             nsig=args.nsig,
             max_sources=1000,
             extra_labels=args.extra_labels,
+            labels_mode=args.labels_mode,
         )
         # Split at tile level so all augmentations of a tile stay together.
         # A sample-level split leaks: different augments of the same tile end up
@@ -500,7 +501,7 @@ if __name__ == '__main__':
     p.add_argument('--lr',               type=float, default=1e-4)
     p.add_argument('--nsig',             type=float, default=3.0,
                    help='Detection significance for pseudo-labels')
-    p.add_argument('--labels_mode', default='vis_peak', choices=['vis_peak', 'multiband'],
+    p.add_argument('--labels_mode', default='vis_peak', choices=['vis_peak', 'multiband', 'vis_sep'],
                    help='Pseudo-label source: improved VIS classical labels or multi-band SEP labels')
     p.add_argument('--uncertain_ignore', action='store_true',
                    help='Ignore negative heatmap loss around low-threshold uncertain source proposals')

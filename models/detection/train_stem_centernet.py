@@ -612,8 +612,9 @@ if __name__ == "__main__":
     p.add_argument("--batch_size", type=int, default=1)
     p.add_argument("--lr", type=float, default=1e-4)
     p.add_argument("--nsig", type=float, default=3.0)
-    p.add_argument("--labels_mode", default="vis_peak", choices=["vis_peak", "multiband"],
-                   help="Pseudo-label source: improved VIS classical labels or multi-band SEP labels")
+    p.add_argument("--labels_mode", default="vis_peak", choices=["vis_peak", "multiband", "vis_sep"],
+                   help="Pseudo-label source: improved VIS classical labels, multi-band SEP labels, "
+                        "or SEP-primary VIS labels with the classical cleaning wrapper (vis_sep)")
     p.add_argument("--uncertain_ignore", action="store_true",
                    help="Ignore negative heatmap loss around low-threshold uncertain source proposals")
     p.add_argument("--uncertain_nsig", type=float, default=1.8,

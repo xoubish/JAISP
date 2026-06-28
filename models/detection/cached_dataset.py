@@ -32,12 +32,19 @@ from detection.dataset import (
     TileDetectionDataset,
     _pseudo_labels,
     _pseudo_labels_vis,
+    _pseudo_labels_vis_sep,
 )
 
 
 def _compute_one_label(args):
     """Compute pseudo-labels for a single tile (top-level for pickling)."""
-    tid, euclid_dir, rubin_dir, nsig, max_sources = args
+    # Back-compat: older callers pass a 5-tuple (no labels_mode -> vis_peak).
+    if len(args) == 6:
+        tid, euclid_dir, rubin_dir, nsig, max_sources, labels_mode = args
+    else:
+        tid, euclid_dir, rubin_dir, nsig, max_sources = args
+        labels_mode = 'vis_peak'
+    vis_label_fn = _pseudo_labels_vis_sep if labels_mode == 'vis_sep' else _pseudo_labels_vis
     if euclid_dir:
         euclid_path = Path(euclid_dir) / f'{tid}_euclid.npz'
         if euclid_path.exists():
@@ -45,7 +52,7 @@ def _compute_one_label(args):
                 edata = np.load(str(euclid_path), allow_pickle=True, mmap_mode='r')
                 vis_img = np.nan_to_num(
                     np.asarray(edata['img_VIS'], dtype=np.float32), nan=0.0)
-                c, cl, _, _ = _pseudo_labels_vis(vis_img, nsig, max_sources)
+                c, cl, _, _ = vis_label_fn(vis_img, nsig, max_sources)
                 return tid, c, cl, 'vis'
             except Exception:
                 pass
@@ -88,10 +95,16 @@ class CachedFeatureDataset(Dataset):
         nsig:         float = 3.0,
         max_sources:  int = 1000,
         extra_labels: Optional[str] = None,
+        labels_mode:  str = 'vis_peak',
     ):
         self.feature_dir = Path(feature_dir)
         self.nsig = nsig
         self.max_sources = max_sources
+        if labels_mode not in ('vis_peak', 'vis_sep'):
+            raise ValueError(
+                f"CachedFeatureDataset supports labels_mode in "
+                f"{{'vis_peak','vis_sep'}}, got {labels_mode!r}")
+        self.labels_mode = labels_mode
 
         # Discover all cached feature files
         feat_files = sorted(self.feature_dir.glob('tile_*_aug*.pt'))
@@ -173,7 +186,11 @@ class CachedFeatureDataset(Dataset):
         Tiles present in the dataset but absent from the cache are computed
         incrementally rather than silently receiving empty labels.
         """
-        cache_path = self.feature_dir / 'pseudo_labels.pt'
+        # Mode-specific cache file so the SEP-relabel run never clobbers the
+        # production vis_peak labels (vis_peak keeps the historical filename).
+        cache_name = ('pseudo_labels.pt' if self.labels_mode == 'vis_peak'
+                      else f'pseudo_labels_{self.labels_mode}.pt')
+        cache_path = self.feature_dir / cache_name
         tiles_to_compute = list(self._tile_ids)  # default: compute everything
 
         if cache_path.exists():
@@ -215,7 +232,7 @@ class CachedFeatureDataset(Dataset):
 
         euclid_str = str(euclid_dir) if euclid_dir else None
         rubin_str = str(rubin_dir)
-        work = [(tid, euclid_str, rubin_str, self.nsig, self.max_sources)
+        work = [(tid, euclid_str, rubin_str, self.nsig, self.max_sources, self.labels_mode)
                 for tid in tiles_to_compute]
         total = len(work)
         processed = 0

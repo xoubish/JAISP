@@ -826,6 +826,100 @@ def _pseudo_labels_vis(
     return centroids, classes, H, W
 
 
+def _pseudo_labels_vis_sep(
+    vis_img: np.ndarray,       # [H_vis, W_vis]
+    nsig: float = 3.0,
+    max_sources: int = 1000,
+    spike_radius: int = 40,
+    min_star_area: int = 20,
+    spike_width: float = 3.0,
+) -> Tuple[np.ndarray, np.ndarray, int, int]:
+    """SEP-primary VIS pseudo-labels with the same cleaning wrapper as
+    ``_pseudo_labels_vis``.
+
+    The primary detector is SEP (Source Extractor) instead of the multi-scale
+    local-peak finder. The cleaning steps kept are: bright-core centroids (one
+    detection per saturated star, always retained), thin spike-ridge masking,
+    and greedy score-based dedup. The ``_merge_resolved_vis_components`` step
+    used by ``_pseudo_labels_vis`` is deliberately *omitted* here -- on SEP
+    inputs it was found to re-introduce multiple detections near bright stars
+    and to cost completeness against MER.
+
+    Motivation/tuning (validated on 10 ECDFS tiles vs the clean Q1 MER
+    catalogue, 0.5'' match): bare SEP scores highest vs MER (comp ~98%, pur
+    ~57%) but only because it splits nearly every bright star into multiples
+    (227/228 cores) and fires on spikes (~17% on-spike) -- useless as training
+    labels. This SEP+cleaning(no-merge) recipe gives comp ~88% / pur ~53%
+    while staying clean (1/228 multi-star cores, ~6% on-spike), a modest but
+    real gain over the multi-scale peak finder (comp 86% / pur 47%). Used for
+    the SEP-relabel detector retrain (see DOCUMENTATION, "Detection").
+
+    Returns (centroids_norm [M,2], classes [M], H_vis, W_vis).
+    """
+    H, W = vis_img.shape
+
+    bright_xs, bright_ys, spike_mask = _vis_bright_core_and_spike_mask(
+        vis_img,
+        spike_radius=spike_radius,
+        min_star_area=min_star_area,
+        spike_width=spike_width,
+    )
+
+    # SEP is the primary (and only) peak source here, run at the requested
+    # significance. Matches the bare-SEP config that wins against MER
+    # (thresh~nsig, minarea=5, fine deblending) -- the cleaning below removes
+    # its spike/bright-star artifacts.
+    sep_x, sep_y = _sep_vis_proposals(
+        vis_img,
+        thresh=max(1.5, float(nsig)),
+        minarea=5,
+        deblend_nthresh=32,
+        deblend_cont=0.005,
+    )
+
+    if sep_x.size:
+        xs = np.asarray(sep_x, dtype=np.float32)
+        ys = np.asarray(sep_y, dtype=np.float32)
+        xi = np.clip(xs.round().astype(int), 0, W - 1)
+        yi = np.clip(ys.round().astype(int), 0, H - 1)
+        keep = ~spike_mask[yi, xi]
+        xs, ys = xs[keep], ys[keep]
+        scores = _point_scores(vis_img, xs, ys)
+        xs, ys = _dedupe_points_by_score(xs, ys, scores, radius_px=5.0)
+    else:
+        xs = np.zeros(0, dtype=np.float32)
+        ys = np.zeros(0, dtype=np.float32)
+
+    # Prepend bright-core centroids (always kept regardless of spike mask)
+    xs = np.concatenate([bright_xs, xs])
+    ys = np.concatenate([bright_ys, ys])
+
+    if xs.size > 0:
+        scores = _point_scores(vis_img, xs, ys)
+        xs, ys = _dedupe_points_by_score(xs, ys, scores, radius_px=5.0)
+    # NB: no _merge_resolved_vis_components here -- on SEP inputs it re-creates
+    # multi-detections near bright stars and costs MER completeness.
+    if max_sources and xs.size > max_sources:
+        scores = _point_scores(vis_img, xs, ys)
+        keep = np.argsort(scores)[::-1][:int(max_sources)]
+        xs, ys = xs[keep], ys[keep]
+
+    if xs.size == 0:
+        return (
+            np.zeros((0, 2), dtype=np.float32),
+            np.zeros((0,), dtype=np.int64),
+            H, W,
+        )
+
+    classes = np.zeros(len(xs), dtype=np.int64)
+    centroids = np.stack([
+        xs / max(W - 1, 1),
+        ys / max(H - 1, 1),
+    ], axis=1).astype(np.float32)
+
+    return centroids, classes, H, W
+
+
 def _vis_bright_extended_rescue_labels(
     vis_img: np.ndarray,
     existing_norm: Optional[np.ndarray] = None,
@@ -998,9 +1092,14 @@ class TileDetectionDataset(Dataset):
         self.use_all_bands = use_all_bands and (euclid_dir is not None)
         self.bands        = ALL_BANDS if self.use_all_bands else RUBIN_BANDS
 
-        if labels_mode not in ("vis_peak", "multiband"):
+        if labels_mode not in ("vis_peak", "multiband", "vis_sep"):
             raise ValueError(f"unknown labels_mode={labels_mode!r}")
         self.labels_mode = labels_mode
+        # VIS label fn: SEP-primary for "vis_sep", else the multi-scale peak
+        # finder. "multiband" uses this as its fallback when Euclid is missing.
+        self._vis_label_fn = (
+            _pseudo_labels_vis_sep if labels_mode == "vis_sep" else _pseudo_labels_vis
+        )
         self.multiband_kwargs = dict(multiband_kwargs or {})
         self.uncertain_ignore = bool(uncertain_ignore)
         self.uncertain_nsig = float(uncertain_nsig)
@@ -1078,7 +1177,7 @@ class TileDetectionDataset(Dataset):
                     vis_img = np.nan_to_num(
                         np.asarray(edata['img_VIS'], dtype=np.float32), nan=0.0,
                     )
-                    centroids_np, classes_np, H, W = _pseudo_labels_vis(
+                    centroids_np, classes_np, H, W = self._vis_label_fn(
                         vis_img, self.nsig, self.max_sources,
                     )
                     weights_np = np.ones(len(centroids_np), dtype=np.float32)
