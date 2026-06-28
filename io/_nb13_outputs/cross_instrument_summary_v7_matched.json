@@ -1,0 +1,36 @@
+{
+ "checkpoint": "/home/shemmati/Work/Projects/JAISP/models/checkpoints/jaisp_v7_concat/checkpoint_best.pt",
+ "tag": "v7",
+ "fused_scale": 0.8,
+ "n_tiles": 6,
+ "n_sources": 103,
+ "feat_dim": 256,
+ "diag2b_source_ridge_r2": {
+  "rubin_u": -0.34899871548016864,
+  "rubin_g": 0.14254472653071085,
+  "rubin_r": 0.32837358117103577,
+  "rubin_i": -0.06483129660288493,
+  "rubin_z": -0.5044447183609009,
+  "rubin_y": -0.12340428431828816,
+  "euclid_VIS": 0.24542948603630066,
+  "euclid_Y": 0.5067842602729797,
+  "euclid_J": 0.12287016709645589,
+  "euclid_H": 0.41724209984143573
+ },
+ "diag2b_source_mlp_r2": {
+  "rubin_u": 0.16721697648366293,
+  "rubin_g": 0.43492627143859863,
+  "rubin_r": 0.5807644675175349,
+  "rubin_i": 0.5490614324808121,
+  "rubin_z": 0.45078404744466144,
+  "rubin_y": 0.27402519186337787,
+  "euclid_VIS": 0.6337172985076904,
+  "euclid_Y": 0.7049064636230469,
+  "euclid_J": 0.5816780974467596,
+  "euclid_H": 0.6579669788479805
+ },
+ "diag2b_mlp_rubin_mean": 0.40946306453810805,
+ "diag2b_mlp_euclid_mean": 0.6445672096063694,
+ "diag2b_ridge_rubin_mean": -0.09512678451008266,
+ "diag2b_ridge_euclid_mean": 0.32308150331179303
+}
