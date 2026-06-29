@@ -1,8 +1,5 @@
 # JAISP Paper — Outline
 
-> Fig. 7 (completeness) merged into Fig. 6; later figures renumbered. Captions stay
-> version-agnostic.
-
 ## 1. Introduction
 - Big surveys, need for joint processing (cite JSP)
 - State of AI in astronomy — replace or augment traditional?
