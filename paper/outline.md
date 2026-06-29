@@ -13,7 +13,6 @@
 - Rubin *ugrizy* — DP1 ComCam coadds, patches/tracts
 - Euclid VIS + NISP *YJH* — imaging from DR1 MER mosaics, catalogs from Q1 MER (don't conflate)
 - MER vs NIR mosaics
-- Gaia DR3 — PSF training + absolute astrometric reference
 - Fields, area, depth
 - Tiling and overlap; dedup; no leakage (patch-disjoint audit)
 - Variance maps vs MAD fallback
