@@ -1676,6 +1676,42 @@ MER fine-tuning **trades recall for precision**: purity jumps +31 points (false-
 
 Three rungs, in increasing rigour: (1) completeness/purity vs MER — competitive (~90%) but catalogue-biased; (2) **injection-recovery** — the catalogue-independent truth, giving a 50% point-source depth of VIS ≈ 25.5; (3) the **multi-band gain** — the foundation's actual value proposition, ~+0.5 mag of depth over VIS-alone. The detection threshold (`conf_threshold`, currently 0.3) is the recall/purity knob; because the detector ingests SNR-normalised input it is already ~background-adaptive (per-tile completeness barely tracks the ~6%-uniform EDF-S noise), so a background-dependent threshold buys little within a uniform-depth field.
 
+### Final paper head decision & detection figures (2026-06-29)
+
+The exploratory numbers above were measured on assorted tile sets and head variants. For the paper they were re-run on a **single fixed protocol**: the 16 disjoint held-out tiles in `data/bakeoff_eval16_stems.txt` (held out of the 200-tile training set), source-recycling injection with **compact donors only**, `n=15`/mag, conf `0.30`, evaluated by `models/detection/validation_utils.py` (`eval_injection`, `eval_mer`, `analyze_mer`, `per_band_snr`).
+
+**Paper head = CenterNet on the frozen v10 fused 10-band bottleneck, `vis_peak` labels, round-1, full 200 tiles** → `checkpoints/centernet_v10_vispeak_r1_full/centernet_best.pt`. Chosen by a head bake-off judged on **injection truth, not MER agreement**. (NB: this supersedes `centernet_v10_uncertain_synth_r2` as the paper head; the uncertain/synthetic flags are no-ops in the cached CenterNet path and only ever affected the live StemCenterNet.)
+
+Canonical paper injection numbers (16 held-out tiles, conf 0.30):
+
+| metric | value |
+| --- | --- |
+| 50% point-source depth, all 10 bands | VIS 26.0 |
+| 50% point-source depth, VIS only | VIS 25.6 |
+| **multi-band gain** | **+0.4 mag** |
+| 50% depth, NISP only (dropout proxy) | VIS 24.5 |
+| 50% depth, Rubin only | ~0 (Euclid-anchored) |
+| MER completeness (VIS<24.5), purity @ 0.30 | ~84%, ~56% (purity = conservative floor) |
+
+These (200-tile head, 16 disjoint tiles) are the paper figures of record. The earlier "~25.5 depth / +10–20 pp gain" estimates were 20-tile / mixed-donor / different-head runs; the 24-tile bake-off head separately gave an inflated +44 pp gain purely from undertraining (low VIS-only baseline) — 200 tiles rebalanced VIS-only and gave the honest +0.4 mag.
+
+**Head comparison (justifies the choice; same 16 tiles, conf 0.30):**
+
+| 50% depth (VIS mag) | CenterNet (fused bottleneck) | StemCenterNet (native stems) |
+| --- | --- | --- |
+| all 10 bands | 26.0 | 25.9 |
+| VIS only | 25.6 | 25.9 |
+| **multi-band gain** | **+0.43** | **+0.04** |
+| NISP only (dropout) | 24.5 | 23.1 |
+
+Both reach ~26 in VIS-driven depth, but **only the fused bottleneck fuses**: CenterNet converts the other 9 bands into +0.43 mag of depth and is 1.4 mag more sensitive in the NISP-only dropout regime, while StemCenterNet's native stems gain essentially nothing (+0.04). An SEP-relabelled training variant (`vis_sep` in `dataset.py`) was also tested in the bake-off and gave no depth improvement over `vis_peak` (it beat vis_peak only on MER *agreement*, which did not predict detector quality) — discarded.
+
+**Paper figures** (generators in `paper_figures/`, PNGs in `paper/figures/`):
+- **Fig 5 — inference overlay**: `figure_5_detection.ipynb` → `fig5_detection.png`. One held-out VIS tile `tile_x00768_y01280_tract5063_patch_25` (0.1″/px, 1.8′). Overlays: classical VIS (cyan ○, multi-scale peaks + SEP, 3σ), CenterNet (magenta ×, thr 0.30), StemCenterNet (orange +, thr 0.55), clean Q1 MER (red □). 15″ scale bar, no title/axes. Cache `_fig5_overlay_cache.pkl`.
+- **Fig 6 — detection performance** (combined, 3 panels): `figure_6_injection.ipynb` → `fig6_detection_performance.png`. *Top*: completeness vs VIS mag — injection all-10/VIS-only/NISP-only + MER-catalogue recovery (dashed) + normalized MER VIS-mag histogram (qualitative background). *Bottom-left*: completeness vs measured VIS aperture S/N. *Bottom-right*: completeness (VIS<24.5) + purity vs detection threshold, 0.30 working point marked. Pure assembly of two caches: `_fig6_injection_cache.pkl` (injection) + `_fig7_completeness_cache.pkl` (catalogue/S-N/threshold sweep). (The standalone `figure_7_completeness.ipynb` was folded into Fig 6 and removed; its cache is retained because Fig 6 reads it.)
+- **Head-comparison table** (`tab:detection_heads`): the CenterNet-vs-StemCenterNet table above.
+- **Paper order**: Fig 5 overlay → head-comparison table (decide CenterNet) → Fig 6 performance (characterize the chosen head). All captions are version-agnostic ("the foundation", not "v10").
+
 ---
 
 ## Project Structure
@@ -1701,7 +1737,8 @@ JAISP/
 |   +-- download_tiles_product.sh      Helper for fetching/regenerating the tile product
 |
 +-- checkpoints/
-|   +-- centernet_v10_uncertain_synth_r2/ Latest V10 fused CenterNet evaluated in notebook 06
+|   +-- centernet_v10_vispeak_r1_full/  PAPER head: CenterNet vis_peak r1, full 200 tiles (Fig 5/6)
+|   +-- centernet_v10_uncertain_synth_r2/ Earlier V10 fused CenterNet evaluated in notebook 06
 |   +-- centernet_v10_warmstart_nsig2_round2_conservative/ Older conservative V10 CenterNet retrain
 |   +-- centernet_v8_fine/             Retained production CenterNet (on jaisp_v8_fine)
 |   +-- centernet_v7_rms_aware/        V7 CenterNet baseline
