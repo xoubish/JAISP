@@ -42,11 +42,11 @@ from eval_latent_position import centroid_in_band_and_project  # noqa: E402
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 FOUNDATION = ROOT / "models/checkpoints/jaisp_v10_warmstart/checkpoint_best.pt"
 HEADS = {
-    "prod": ROOT / "models/checkpoints/latent_position_v10_no_psf/best.pt",
-    "patchval": ROOT / "models/checkpoints/latent_position_v10_patchval25/best.pt",
-    "joint": ROOT / "models/checkpoints/latent_position_v10_patchval25_joint/best.pt",
+    "prod": ROOT / "models/checkpoints/latent_position_v10_vispeak/best.pt",
+    "patchval": ROOT / "models/checkpoints/latent_position_v10_vispeak_patchval25/best.pt",
+    "joint": ROOT / "models/checkpoints/latent_position_v10_vispeak_patchval25_joint/best.pt",
 }
-LABELS = torch.load(ROOT / "data/detection_labels/centernet_v10_790_thresh03.pt",
+LABELS = torch.load(ROOT / "data/detection_labels/centernet_v10_790_vispeak_thresh03.pt",
                     map_location="cpu", weights_only=False)
 LABELS = LABELS["labels"] if "labels" in LABELS else LABELS
 

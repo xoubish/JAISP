@@ -36,7 +36,7 @@ SNR_LEVELS = [5, 7, 10, 15, 30]
 RNG = np.random.default_rng(20260611)  # same seed => same positions as injection_truth_test
 STAMP_R = 5  # px, per band
 
-LABELS = torch.load(ROOT / "data/detection_labels/centernet_v10_790_thresh03.pt",
+LABELS = torch.load(ROOT / "data/detection_labels/centernet_v10_790_vispeak_thresh03.pt",
                     map_location="cpu", weights_only=False)
 LABELS = LABELS["labels"] if "labels" in LABELS else LABELS
 

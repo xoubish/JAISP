@@ -118,6 +118,26 @@ r_naive = report(GAIA_EPOCH, "naive2016")
 r_old   = report(2025.0, "old2025.0")
 r_self  = report(t_eff, "selfcal")
 
+# ---- epoch scan for the figure: slope(t) and bright floor(t) ----
+import json as _json
+scan_ep = list(np.round(np.arange(2020.0, 2027.01, 0.25), 2))
+scan = {"epoch": [], "slope": [], "floor_bright": []}
+for _t in scan_ep:
+    _dra, _dde = resid(_t)
+    _bra, _bde = np.median(_dra), np.median(_dde)
+    _sra, _ = robust_slope(mpmra, _dra); _sde, _ = robust_slope(mpmdec, _dde)
+    _rad = np.hypot(_dra - _bra, _dde - _bde)
+    _b = mgmag < 18.5
+    scan["epoch"].append(float(_t))
+    scan["slope"].append(float(0.5 * (_sra + _sde)))
+    scan["floor_bright"].append(float(np.median(_rad[_b])))
+scan["t_eff"] = float(t_eff)
+scan["tie_selfcal"] = [float(r_self["tie"][0]), float(r_self["tie"][1])]
+scan["floor_selfcal"] = float(r_self["floor_bright"])
+_json.dump(scan, open(ROOT / "io/_nb09_outputs/gaia_selfcal_curve.json", "w"), indent=1)
+print("saved gaia_selfcal_curve.json")
+
+
 print("\n==> The self-cal epoch is where the residual no longer tracks PM (slopes ~0).")
 print("    Compare the frame tie and floor across the three rows above.")
 import json
