@@ -128,6 +128,21 @@ def _best_row(rows, ra, dec):
     return best
 
 
+def _retry(fn, attempts=5, base_sleep=3.0):
+    """Call fn() with retries + linear backoff. IRSA IBE/SIA intermittently
+    returns HTTP 400 / malformed responses under sustained load; a short wait
+    and retry recovers almost all of them."""
+    last = None
+    for i in range(attempts):
+        try:
+            return fn()
+        except Exception as e:  # noqa: BLE001 -- transient network/server errors
+            last = e
+            if i < attempts - 1:
+                time.sleep(base_sleep * (i + 1))
+    raise last
+
+
 def _mer_tile_id(access_url: str) -> str | None:
     m = re.search(r"TILE(\d+)", str(access_url))
     return f"TILE{m.group(1)}" if m else None
@@ -155,17 +170,22 @@ def _cut(access_url, ra, dec):
     only the small cutout (one request, ~a few MB), instead of streaming the
     full ~1.5 GB mosaic."""
     url = f"{access_url}?center={ra},{dec}&size={CUTOUT_PX}pix&gzip=false"
-    with fsspec.open(url, "rb") as fh:
-        with fits.open(fh, memmap=False) as hdul:
-            hdu = hdul[0] if hdul[0].header.get("NAXIS", 0) >= 2 else hdul[1]
-            w = WCS(hdu.header)
-            data = np.array(hdu.data, dtype=np.float32)
-    return _coerce(data, w)
+
+    def _do():
+        with fsspec.open(url, "rb") as fh:
+            with fits.open(fh, memmap=False) as hdul:
+                hdu = hdul[0] if hdul[0].header.get("NAXIS", 0) >= 2 else hdul[1]
+                w = WCS(hdu.header)
+                data = np.array(hdu.data, dtype=np.float32)
+        return _coerce(data, w)
+
+    return _retry(_do)
 
 
 def fetch_tile(ra, dec):
     coord = SkyCoord(ra=ra * u.deg, dec=dec * u.deg, frame="icrs")
-    tab = Irsa.query_sia(pos=(coord, SEARCH_RADIUS_ARCSEC * u.arcsec), collection=COLLECTION)
+    tab = _retry(lambda: Irsa.query_sia(pos=(coord, SEARCH_RADIUS_ARCSEC * u.arcsec),
+                                        collection=COLLECTION))
     try:
         tab = tab.to_table()
     except Exception:
