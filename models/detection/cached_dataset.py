@@ -36,10 +36,24 @@ from detection.dataset import (
 )
 
 
+# Per-worker cache of the (global) MER Q1 catalogue, keyed by fits path.
+_MER_CAT = {}
+
+
+def _get_mer_cat(fits_path):
+    if fits_path not in _MER_CAT:
+        from detection.labels_mer import load_mer_catalogue
+        _MER_CAT[fits_path] = load_mer_catalogue(fits_path)
+    return _MER_CAT[fits_path]
+
+
 def _compute_one_label(args):
     """Compute pseudo-labels for a single tile (top-level for pickling)."""
-    # Back-compat: older callers pass a 5-tuple (no labels_mode -> vis_peak).
-    if len(args) == 6:
+    mer_fits = None
+    # Back-compat: 5-tuple (no labels_mode), 6-tuple (+labels_mode), 7-tuple (+mer_fits).
+    if len(args) == 7:
+        tid, euclid_dir, rubin_dir, nsig, max_sources, labels_mode, mer_fits = args
+    elif len(args) == 6:
         tid, euclid_dir, rubin_dir, nsig, max_sources, labels_mode = args
     else:
         tid, euclid_dir, rubin_dir, nsig, max_sources = args
@@ -52,7 +66,12 @@ def _compute_one_label(args):
                 edata = np.load(str(euclid_path), allow_pickle=True, mmap_mode='r')
                 vis_img = np.nan_to_num(
                     np.asarray(edata['img_VIS'], dtype=np.float32), nan=0.0)
-                c, cl, _, _ = vis_label_fn(vis_img, nsig, max_sources)
+                if labels_mode == 'mer':
+                    from detection.labels_mer import mer_labels_for_tile
+                    c, cl, _, _ = mer_labels_for_tile(
+                        vis_img, str(edata['wcs_VIS']), _get_mer_cat(mer_fits))
+                else:
+                    c, cl, _, _ = vis_label_fn(vis_img, nsig, max_sources)
                 return tid, c, cl, 'vis'
             except Exception:
                 pass
@@ -96,15 +115,19 @@ class CachedFeatureDataset(Dataset):
         max_sources:  int = 1000,
         extra_labels: Optional[str] = None,
         labels_mode:  str = 'vis_peak',
+        mer_fits:     Optional[str] = None,
     ):
         self.feature_dir = Path(feature_dir)
         self.nsig = nsig
         self.max_sources = max_sources
-        if labels_mode not in ('vis_peak', 'vis_sep'):
+        if labels_mode not in ('vis_peak', 'vis_sep', 'mer'):
             raise ValueError(
                 f"CachedFeatureDataset supports labels_mode in "
-                f"{{'vis_peak','vis_sep'}}, got {labels_mode!r}")
+                f"{{'vis_peak','vis_sep','mer'}}, got {labels_mode!r}")
+        if labels_mode == 'mer' and not mer_fits:
+            raise ValueError("labels_mode='mer' requires mer_fits (MER Q1 catalogue path)")
         self.labels_mode = labels_mode
+        self.mer_fits = mer_fits
 
         # Discover all cached feature files
         feat_files = sorted(self.feature_dir.glob('tile_*_aug*.pt'))
@@ -232,7 +255,8 @@ class CachedFeatureDataset(Dataset):
 
         euclid_str = str(euclid_dir) if euclid_dir else None
         rubin_str = str(rubin_dir)
-        work = [(tid, euclid_str, rubin_str, self.nsig, self.max_sources, self.labels_mode)
+        work = [(tid, euclid_str, rubin_str, self.nsig, self.max_sources,
+                 self.labels_mode, self.mer_fits)
                 for tid in tiles_to_compute]
         total = len(work)
         processed = 0

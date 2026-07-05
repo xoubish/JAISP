@@ -1068,6 +1068,7 @@ class TileDetectionDataset(Dataset):
         use_all_bands:    bool = False,
         augment:          bool = True,
         labels_mode:      str = "vis_peak",
+        mer_fits:         Optional[str] = None,
         multiband_kwargs: Optional[dict] = None,
         uncertain_ignore: bool = False,
         uncertain_nsig:   float = 1.8,
@@ -1092,14 +1093,20 @@ class TileDetectionDataset(Dataset):
         self.use_all_bands = use_all_bands and (euclid_dir is not None)
         self.bands        = ALL_BANDS if self.use_all_bands else RUBIN_BANDS
 
-        if labels_mode not in ("vis_peak", "multiband", "vis_sep"):
+        if labels_mode not in ("vis_peak", "multiband", "vis_sep", "mer"):
             raise ValueError(f"unknown labels_mode={labels_mode!r}")
+        if labels_mode == "mer" and not mer_fits:
+            raise ValueError("labels_mode='mer' requires mer_fits (MER Q1 catalogue path)")
         self.labels_mode = labels_mode
         # VIS label fn: SEP-primary for "vis_sep", else the multi-scale peak
-        # finder. "multiband" uses this as its fallback when Euclid is missing.
+        # finder. "multiband"/"mer" use this as the fallback when Euclid is missing.
         self._vis_label_fn = (
             _pseudo_labels_vis_sep if labels_mode == "vis_sep" else _pseudo_labels_vis
         )
+        self._mer_cat = None
+        if labels_mode == "mer":
+            from detection.labels_mer import load_mer_catalogue
+            self._mer_cat = load_mer_catalogue(mer_fits)
         self.multiband_kwargs = dict(multiband_kwargs or {})
         self.uncertain_ignore = bool(uncertain_ignore)
         self.uncertain_nsig = float(uncertain_nsig)
@@ -1128,18 +1135,33 @@ class TileDetectionDataset(Dataset):
         self._label_cache = {}
         self._weight_cache = {}
         self._ignore_cache = {} if self.uncertain_ignore else None
+        self.tile_ids = []   # per-idx tile id (for patch-disjoint splitting)
         n_mb, n_vis, n_rubin = 0, 0, 0
         print(f'  Pre-computing pseudo-labels (mode={labels_mode}, nsig={nsig}) ...',
               end=' ', flush=True)
         for idx in range(len(self._base)):
             tile = self._base.tiles[idx]
             euclid_path = tile.get('euclid_path')
+            self.tile_ids.append(Path(tile['rubin_path']).stem)
 
             centroids_np = None
             classes_np   = None
             H = W = None
 
-            if labels_mode == "multiband" and euclid_path and Path(euclid_path).exists():
+            if labels_mode == "mer" and euclid_path and Path(euclid_path).exists():
+                try:
+                    from detection.labels_mer import mer_labels_for_tile
+                    edata = np.load(euclid_path, allow_pickle=True, mmap_mode='r')
+                    vis_img = np.nan_to_num(
+                        np.asarray(edata['img_VIS'], dtype=np.float32), nan=0.0)
+                    centroids_np, classes_np, H, W = mer_labels_for_tile(
+                        vis_img, str(edata['wcs_VIS']), self._mer_cat)
+                    weights_np = np.ones(len(centroids_np), dtype=np.float32)
+                    n_vis += 1
+                except Exception:
+                    centroids_np = None  # fall through to vis/rubin path
+
+            if centroids_np is None and labels_mode == "multiband" and euclid_path and Path(euclid_path).exists():
                 try:
                     edata = np.load(euclid_path, allow_pickle=True, mmap_mode='r')
                     def _g(k):

@@ -354,6 +354,7 @@ def train(args):
         use_all_bands=(args.euclid_dir is not None),
         augment=True,
         labels_mode=args.labels_mode,
+        mer_fits=args.mer_fits,
         uncertain_ignore=args.uncertain_ignore,
         uncertain_nsig=args.uncertain_nsig,
         uncertain_radius_px=args.uncertain_radius_px,
@@ -378,12 +379,25 @@ def train(args):
         spike_width=args.teacher_spike_width,
     )
 
-    n_val = max(1, int(0.1 * len(full_ds)))
-    n_tr = len(full_ds) - n_val
-    tr_ds, val_ds = random_split(
-        full_ds, [n_tr, n_val],
-        generator=torch.Generator().manual_seed(args.seed),
-    )
+    if args.val_patches:
+        # Patch-disjoint (spatially-disjoint) split; overlap duplicates make a
+        # random split leak. TileDetectionDataset is one sample per tile
+        # (augmented on the fly), so a tile-level split is index-level here.
+        vp = tuple(f"_patch_{p.strip()}" for p in args.val_patches.split(",") if p.strip())
+        val_idx = [i for i, t in enumerate(full_ds.tile_ids) if t.endswith(vp)]
+        tr_idx = [i for i in range(len(full_ds)) if i not in set(val_idx)]
+        tr_ds, val_ds = Subset(full_ds, tr_idx), Subset(full_ds, val_idx)
+        n_tr, n_val = len(tr_idx), len(val_idx)
+        if rank == 0:
+            print(f"  Patch-disjoint split: held-out {args.val_patches} -> "
+                  f"{n_val} val tiles, {n_tr} train tiles")
+    else:
+        n_val = max(1, int(0.1 * len(full_ds)))
+        n_tr = len(full_ds) - n_val
+        tr_ds, val_ds = random_split(
+            full_ds, [n_tr, n_val],
+            generator=torch.Generator().manual_seed(args.seed),
+        )
 
     val_workers = max(1, args.num_workers // 2) if args.num_workers > 0 else 0
     if use_ddp:
@@ -612,7 +626,10 @@ if __name__ == "__main__":
     p.add_argument("--batch_size", type=int, default=1)
     p.add_argument("--lr", type=float, default=1e-4)
     p.add_argument("--nsig", type=float, default=3.0)
-    p.add_argument("--labels_mode", default="vis_peak", choices=["vis_peak", "multiband", "vis_sep"],
+    p.add_argument("--mer_fits", default=None, help="MER Q1 catalogue FITS (required for --labels_mode mer)")
+    p.add_argument("--val_patches", default=None,
+                   help="Comma-separated patch ids to hold out for a PATCH-DISJOINT split (e.g. '25')")
+    p.add_argument("--labels_mode", default="vis_peak", choices=["vis_peak", "multiband", "vis_sep", "mer"],
                    help="Pseudo-label source: improved VIS classical labels, multi-band SEP labels, "
                         "or SEP-primary VIS labels with the classical cleaning wrapper (vis_sep)")
     p.add_argument("--uncertain_ignore", action="store_true",

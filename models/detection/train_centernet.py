@@ -248,15 +248,25 @@ def train(args):
             max_sources=1000,
             extra_labels=args.extra_labels,
             labels_mode=args.labels_mode,
+            mer_fits=args.mer_fits,
         )
         # Split at tile level so all augmentations of a tile stay together.
         # A sample-level split leaks: different augments of the same tile end up
         # in both train and val, making val loss misleadingly low then rising.
         rng = np.random.default_rng(args.seed)
         tile_ids = full_ds._tile_ids  # list[str]
-        shuffled = rng.permutation(len(tile_ids))
-        n_val_tiles = max(1, int(0.1 * len(tile_ids)))
-        val_tile_set = {tile_ids[int(i)] for i in shuffled[:n_val_tiles]}
+        if args.val_patches:
+            # Patch-disjoint (spatially-disjoint) split: overlap duplicates make a
+            # random tile split leak, so hold out whole patches for honest val/eval.
+            vp = [p.strip() for p in args.val_patches.split(',') if p.strip()]
+            suffixes = tuple(f'_patch_{p}' for p in vp)
+            val_tile_set = {t for t in tile_ids if t.endswith(suffixes)}
+            print(f'  Patch-disjoint split: held-out patches {vp} -> '
+                  f'{len(val_tile_set)} val tiles, {len(tile_ids) - len(val_tile_set)} train tiles')
+        else:
+            shuffled = rng.permutation(len(tile_ids))
+            n_val_tiles = max(1, int(0.1 * len(tile_ids)))
+            val_tile_set = {tile_ids[int(i)] for i in shuffled[:n_val_tiles]}
         tr_indices  = [i for i, (tid, _) in enumerate(full_ds._samples) if tid not in val_tile_set]
         val_indices = [i for i, (tid, _) in enumerate(full_ds._samples) if tid in val_tile_set]
         tr_ds  = Subset(full_ds, tr_indices)
@@ -501,8 +511,13 @@ if __name__ == '__main__':
     p.add_argument('--lr',               type=float, default=1e-4)
     p.add_argument('--nsig',             type=float, default=3.0,
                    help='Detection significance for pseudo-labels')
-    p.add_argument('--labels_mode', default='vis_peak', choices=['vis_peak', 'multiband', 'vis_sep'],
-                   help='Pseudo-label source: improved VIS classical labels or multi-band SEP labels')
+    p.add_argument('--labels_mode', default='vis_peak', choices=['vis_peak', 'multiband', 'vis_sep', 'mer'],
+                   help='Round-1 label source: VIS peak-finder, multiband SEP, VIS SEP, or MER Q1 catalogue')
+    p.add_argument('--mer_fits', default=None,
+                   help="MER Q1 catalogue FITS (required for --labels_mode mer)")
+    p.add_argument('--val_patches', default=None,
+                   help="Comma-separated patch ids to hold out for a PATCH-DISJOINT val/eval split "
+                        "(e.g. '25'). Overrides the default random 10%% tile split.")
     p.add_argument('--uncertain_ignore', action='store_true',
                    help='Ignore negative heatmap loss around low-threshold uncertain source proposals')
     p.add_argument('--uncertain_nsig', type=float, default=1.8,
