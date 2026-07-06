@@ -87,6 +87,8 @@ def _run_training_round(
     nsig: float = 3.0,
     head_ch: int = 256,
     labels_mode: str = 'vis_peak',
+    val_patches: str = None,
+    mer_fits: str = None,
     uncertain_ignore: bool = False,
     uncertain_nsig: float = 1.8,
     uncertain_radius_px: float = 5.0,
@@ -135,6 +137,10 @@ def _run_training_round(
         cmd += ['--extra_labels', extra_labels]
     if init_checkpoint:
         cmd += ['--init_checkpoint', init_checkpoint]
+    if val_patches:
+        cmd += ['--val_patches', val_patches]
+    if mer_fits:
+        cmd += ['--mer_fits', mer_fits]
     if uncertain_ignore:
         cmd += ['--uncertain_ignore']
     if wandb_project:
@@ -170,6 +176,7 @@ def _refine_labels(
     bright_rescue_match_min: float = 8.0,
     bright_rescue_match_max: float = 35.0,
     bright_rescue_max_per_tile: int = 32,
+    labels_mode: str = 'vis_peak',
     device: torch.device = None,
 ) -> tuple:
     """Run trained detector on all tiles. Promote novel high-confidence
@@ -208,7 +215,7 @@ def _refine_labels(
     feat_files = sorted(feature_dir.glob('tile_*_aug0.pt'))
 
     # Load cached pseudo-labels (written by CachedFeatureDataset._compute_labels)
-    label_cache_path = feature_dir / 'pseudo_labels.pt'
+    label_cache_path = feature_dir / ('pseudo_labels.pt' if labels_mode == 'vis_peak' else f'pseudo_labels_{labels_mode}.pt')
     if label_cache_path.exists():
         saved_labels = torch.load(label_cache_path, map_location='cpu',
                                   weights_only=False)
@@ -431,8 +438,11 @@ def main():
     p.add_argument('--sigma',       type=float, default=2.0)
     p.add_argument('--head_ch',     type=int, default=256,
                    help='CenterNet decoder width. Lower is faster/lighter; default 256.')
-    p.add_argument('--labels_mode', default='vis_peak', choices=['vis_peak', 'multiband'],
+    p.add_argument('--labels_mode', default='vis_peak', choices=['vis_peak', 'multiband', 'vis_sep', 'mer'],
                    help='Pseudo-label source: improved VIS classical labels or multi-band SEP labels')
+    p.add_argument('--val_patches', default=None,
+                   help='Comma-separated patch ids held out for a PATCH-DISJOINT split (e.g. 25)')
+    p.add_argument('--mer_fits', default=None, help='MER Q1 catalogue FITS (for --labels_mode mer)')
     p.add_argument('--uncertain_ignore', action='store_true',
                    help='Ignore negative heatmap loss around low-threshold uncertain source proposals')
     p.add_argument('--uncertain_nsig', type=float, default=1.8,
@@ -506,6 +516,7 @@ def main():
         promoted, demoted_labels = _refine_labels(
             feature_dir=args.feature_dir,
             checkpoint=init_checkpoint,
+            labels_mode=args.labels_mode,
             rubin_dir=args.rubin_dir,
             euclid_dir=args.euclid_dir,
             nsig=args.nsig,
@@ -542,6 +553,7 @@ def main():
         promoted, demoted_labels = _refine_labels(
             feature_dir=args.feature_dir,
             checkpoint=init_checkpoint,
+            labels_mode=args.labels_mode,
             rubin_dir=args.rubin_dir,
             euclid_dir=args.euclid_dir,
             nsig=args.nsig,
@@ -586,6 +598,8 @@ def main():
             nsig=args.nsig,
             head_ch=args.head_ch,
             labels_mode=args.labels_mode,
+            val_patches=args.val_patches,
+            mer_fits=args.mer_fits,
             uncertain_ignore=args.uncertain_ignore,
             uncertain_nsig=args.uncertain_nsig,
             uncertain_radius_px=args.uncertain_radius_px,
@@ -611,6 +625,7 @@ def main():
             promoted, demoted_labels = _refine_labels(
                 feature_dir=args.feature_dir,
                 checkpoint=ckpt_path,
+                labels_mode=args.labels_mode,
                 rubin_dir=args.rubin_dir,
                 euclid_dir=args.euclid_dir,
                 nsig=args.nsig,

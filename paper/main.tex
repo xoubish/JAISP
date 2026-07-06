@@ -70,7 +70,7 @@ This does not mean every problem calls for a single, large foundation model. Muc
 In this work we learn a single shared representation of Rubin and \textit{Euclid} imaging through self-supervised pretraining, and reuse it across several downstream measurements. A foundation model is trained once to capture the cross-instrument spatial and spectral structure that joint processing requires; its frozen features then drive lightweight task-specific heads. We focus here on source detection and astrometry, and develop the photometry and shape-measurement heads in forthcoming work.
 We work from already-processed survey mosaics rather than individual exposures, which lets us concentrate on the joint representation itself; the same approach could in principle be pushed earlier in the pipeline, toward less-processed data where more of the instrumental signal survives. Even at the mosaic level, we find that the learned representation transfers \textit{Euclid}'s sharp localization to Rubin's bands and to faint sources, improves source detection by combining all ten channels, and maps the astrometric concordance between two independently Gaia-aligned surveys. These results hold on a separate deep field with no retraining, a first test of the representation's transferability across the sky.
 
-This paper is organized as follows. Section~\ref{sec:data} describes the Rubin and \textit{Euclid} imaging and the Gaia reference data; Section~\ref{sec:architecture} presents the foundation model and the frozen-feature head design, and validates the learned representation; Sections~\ref{sec:detection} and~\ref{sec:astrometry} present the detection and astrometry heads; Section~\ref{sec:ood} tests transfer to a separate deep field; and Section~\ref{sec:discussion} discusses implications and next steps.
+This paper is organized as follows. Section~\ref{sec:data} describes the Rubin and \textit{Euclid} imaging; Section~\ref{sec:architecture} presents the foundation model and the frozen-feature head design, and validates the learned representation; Sections~\ref{sec:detection} and~\ref{sec:astrometry} present the detection and astrometry heads; Section~\ref{sec:ood} tests transfer to a separate deep field; and Section~\ref{sec:discussion} discusses implications and next steps.
 
 
 \section{Data}\label{sec:data}
@@ -79,7 +79,7 @@ This paper is organized as follows. Section~\ref{sec:data} describes the Rubin a
     \includegraphics[width=\textwidth]{figures/fig1_data.png}
 \caption{\textbf{Data and survey footprints.}
     \textbf{(Left:)} The ECDFS field used for training, where both Euclid and Rubin provide overlapping coverage: a single Rubin tract (5063) spanning six patches,
-    tiled into 791 $512\times512$ cutouts (stride 256\,px, 50\% overlap) over $\sim$0.2\,deg$^2$, shown on the Euclid VIS mosaic and tinted by patch. 
+    tiled into 790 $512\times512$ cutouts (stride 256\,px, 50\% overlap) over $\sim$0.2\,deg$^2$, shown on the Euclid VIS mosaic and tinted by patch. 
     \textbf{(Top-right:)} The EDF-S field, a widely separated region held out to test out-of-distribution transfer with no retraining: 72 tiles ($\sim$0.02\,deg$^2$).
     \textbf{(Bottom-right:)} The multi-waveband input channels for one matched tile---Rubin $ugrizy$ (gold
     labels) and Euclid VIS and NISP $Y$/$J$/$H$ (blue labels). Each panel is a $1'$ field. Rubin imaging is sampled at
@@ -87,18 +87,18 @@ This paper is organized as follows. Section~\ref{sec:data} describes the Rubin a
     \label{fig:data}
 \end{figure*}
 
-\begin{itemize}
-    \item multi-band multi survey imaging
-    \item Rubin u g r i z y, DP1 ComCam coadds, patches, tracts, ...
-    \item Euclid VIS and NISP Y J H -- imaging from MER mosaics, catalogues from Q1 MER, DR1/Q1
-    \item MER vs NIR mosaics
-    \item Fields, area, depth, ...
-    \item tiling and overlap: 50\% overlap, bit-identical overlap pixels, dedup needed, no leakage (patch-disjoint audit)
-    \item variance maps 
-    \item figure 1: 10 band cutouts of a patch with RMS
-\end{itemize}
+The dataset for this work combines overlapping imaging from Rubin and \textit{Euclid} over two widely separated Euclid Deep Fields. Training uses the Euclid Deep Field Fornax (EDF-F), which coincides with the Extended Chandra Deep Field South (ECDFS) in the Rubin footprint; the Euclid Deep Field South (EDF-S) is reserved entirely for the out-of-distribution transfer test of Section~\ref{sec:ood} and is never seen during training. For each field we assemble a common ten-band stack: the six Rubin optical bands $ugrizy$ together with \textit{Euclid} VIS and the three NISP near-infrared bands $Y$, $J$, and $H$ (Figure~\ref{fig:data}). All imaging is drawn from currently public data releases. The region used here is a small part of the available Rubin--\textit{Euclid} overlap: it is a single Rubin tract within one deep field, while the deep overlap spans several tracts per field and multiple fields, leaving substantial room to scale the same approach to larger areas as deeper releases arrive.
+
+Rubin imaging is drawn from the Legacy Survey of Space and Time Data Preview 1 \citep[DP1;][]{DP1}, the first release from the Rubin Observatory. DP1 comprises coadded ugrizy imaging obtained with the Rubin Commissioning Camera (LSSTComCam) over seven non-contiguous fields during on-sky commissioning in late 2024, and we use the six-band coadds for the ECDFS field, the deepest and most uniformly observed of the seven \citep{DP1}. Within ECDFS we use a single Rubin tract (tract 5063), spanning six patches, which covers the region of common Rubin--Euclid depth used here. The coadds are sampled at $0.2\arcsecpx$; the median point-spread function is broad by space-based standards, with a full width at half maximum of roughly $1''$ at this early commissioning stage, so \textit{Euclid} VIS provides the sharp spatial reference throughout this work. The $5\sigma$ point-source coadd depths in this field are approximately $g,r \approx 26$, falling to $u\approx24.6$, and $y\approx23.1$; the full per-band values and processing details are given in the DP1 release paper.
+
+\textit{Euclid} imaging is drawn from the Quick Data Release 1 \citep[Q1;][]{EuclidQ1}, the first public \textit{Euclid} release, which covers the three Euclid Deep Fields, including EDF-F and EDF-S used here. We use the visible channel VIS \citep{VIS} and the three NISP near-infrared bands $Y$, $J$, and $H$ \citep{NIR}, taken from the background-subtracted MER mosaics produced by the \textit{Euclid} MERge processing function \citep{MER}. All four bands are delivered on a common $0.1\arcsecpx$ grid, with VIS providing the highest resolution ($\sim0.16''$) and the NISP bands resampled onto the same grid; the $5\sigma$ point-source depths are $\approx26$ in VIS and $\approx24$ in each NISP band. Per-pixel variance maps accompany every band and are used for noise normalization throughout (Section~\ref{sec:architecture}).
+
+Using the MER mosaics means inheriting that preprocessing: background subtraction, and in particular the resampling of the native near-infrared NISP frames onto the finer VIS pixel grid, are applied before our pipeline sees the data. This is a deliberate, conservative starting point that keeps the input fully reproducible from public products. Future \textit{Euclid} releases will provide the NISP mosaics at their native near-infrared resolution, which would let a joint model ingest them directly and perform the cross-instrument registration itself, reducing the preprocessing carried over from the survey pipeline; we return to this in Section~\ref{sec:discussion}.
 
 
+For each field we lay the imaging out on a common tile grid. Rubin tiles are $512\times512$ pixels ($\sim102''$ on a side at $0.2\arcsecpx$), with the matching \textit{Euclid} region cut at twice the sampling; the ten bands of each tile are spatially aligned to a common frame. Tiles are placed on a $256$-pixel stride, so adjacent tiles overlap by $50\%$ and a given point on the sky falls in up to four tiles. The training field yields $790$ matched Rubin--\textit{Euclid} tiles over $\sim0.2$\,deg$^2$; the held-out EDF-S field provides a further $72$ matched tiles ($\sim0.02$\,deg$^2$), used only for the transfer test of Section~\ref{sec:ood}. This overlap is useful during pretraining, where the same source appears at different positions relative to the tile edge and so provides free augmentation, and during detection, where sources that sit near the edge of one tile fall near the center of a neighbor.
+
+The overlap does, however, require care in evaluation. Because the tiles are cut from the same underlying coadd mosaics, the pixels shared by two overlapping tiles are identical rather than independent re-observations. A naive tile-level train/validation split would therefore place bit-identical copies of the same sky, carrying identical labels, on both sides of the split, making validation metrics artificially inflated. All held-out evaluations in this paper instead use a spatially disjoint split at the level of Rubin patches, so that no sky region and no source appears in both training and evaluation. We verified that results computed under this patch-disjoint protocol match those on the training field, confirming that the reported performance is not inflated by overlap leakage.
 
 \section{AI Architecture}\label{sec:architecture}
 
@@ -140,34 +140,33 @@ Pre-training completed in roughly 1.25 wall-clock hours ($\sim2.5$ GPU-hours). O
 The reconstruction loss is evaluated in noise-normalized units, with each pixel weighted by a signal-and-gradient information map so that source pixels dominate over empty sky. The per-pixel term is a Charbonnier penalty, supplemented by an additional squared-error term on the highest-information ``core'' pixels of sources. The exact functional form and all coefficients are given in the public code.
 The complete implementation, including the foundation model, the reconstruction loss, the downstream heads, and the scripts that reproduce the analyses and figures in this paper, is publicly available.\footnote{\url{https://github.com/xoubish/JAISP}}
 
-\subsection{Validation of the learned representation}\label{sec:validation}
-
-Before attaching any task-specific head, we verify that the frozen representation has captured the cross-instrument structure it was trained to learn. We do this in three ways: by checking that held-out bands can be reconstructed faithfully, that the per-band information is recoverable from the frozen features a head would use, and that the model routes information between bands in a physically sensible way.
-
-\textit{Reconstruction fidelity.} Figure~\ref{fig:foundation_reconstruction} shows masked-band reconstruction on validation tiles never seen during training. In each case a single band is withheld and predicted from the other nine, sampled across the full input range: a Rubin optical band, the high-resolution \textit{Euclid} VIS channel, and a \textit{Euclid} NISP near-infrared band are shown. The reconstructions reproduce the held-out sky faithfully, with residuals confined to the cores of the brightest point sources and the faint extended wings of large galaxies, and with high truth-to-reconstruction correlation across both instruments and the entire optical-to-near-infrared range. That a band from one instrument can be predicted from bands of the other confirms the model has learned genuine cross-instrument correspondence, not merely within-instrument copying.
-
-
 \begin{figure}
     \centering
     \includegraphics[width=\columnwidth]{figures/fig3_reconstruction.png}
     \caption{Masked-band reconstruction on three held-out ECDFS tiles
     (validation split, never seen during training), validating the
     self-supervised pre-training objective. In each row a single band is withheld and reconstructed from the other nine: Rubin $r$ (top), Euclid VIS (middle), and Euclid NISP $H$ (bottom). Columns show the true band (left), the reconstruction (center), and the residual truth $-$ reconstruction (right); panels are $48''$ on a side. The residual uses a diverging scale whose limits are the brightest source pixel of that row
-    ($\pm$pk), so full color saturation would require an error as large as the peak source flux; the near-white residuals therefore indicate that reconstruction errors are a small fraction of the signal, concentrated only at the cores of the brightest point sources and in the faint extended wings of large galaxies. The annotated $r$ is the Pearson correlation between truth and reconstruction over the brightest 10\% of pixels; averaged across held-out tiles the mean per-band correlation is $0.99$ ($r$), $0.85$ (VIS), and $0.93$ ($H$). The foundation reconstructs unseen sky faithfully across both instruments and the full optical-to-near-infrared range, confirming it is
+    ($\pm$pk), so full color saturation would require an error as large as the peak source flux; the near-white residuals therefore indicate that reconstruction errors are a small fraction of the signal, concentrated only at the cores of the brightest point sources and in the faint extended wings of large galaxies. The annotated $r$ is the Pearson correlation between truth and reconstruction over the brightest 10\% of pixels; averaged across the 39 held-out tiles the mean per-band correlation is $0.99$ ($r$), $0.77$ (VIS), and $0.90$ ($H$). The foundation reconstructs unseen sky faithfully across both instruments and the full optical-to-near-infrared range, confirming it is
     well trained and ready to drive the downstream heads.}
     \label{fig:foundation_reconstruction}
 \end{figure}
 
 
+\subsection{Validation of the learned representation}\label{sec:validation}
+
+Before attaching any task-specific head, we verify that the frozen representation has captured the cross-instrument structure it was trained to learn. We do this in three ways: by checking that held-out bands can be reconstructed faithfully, that the per-band information is recoverable from the frozen features a head would use, and that the model routes information between bands in a physically sensible way.
+
+\textit{Reconstruction fidelity.} Figure~\ref{fig:foundation_reconstruction} shows masked-band reconstruction on validation tiles never seen during training. In each case a single band is withheld and predicted from the other nine, sampled across the full input range: a Rubin optical band, the high-resolution \textit{Euclid} VIS channel, and a \textit{Euclid} NISP near-infrared band are shown. The reconstructions reproduce the held-out sky faithfully, with residuals confined to the cores of the brightest point sources and the faint extended wings of large galaxies, and with high truth-to-reconstruction correlation across both instruments and the entire optical-to-near-infrared range. That a band from one instrument can be predicted from bands of the other confirms the model has learned genuine cross-instrument correspondence, not merely within-instrument copying.
+
 \begin{figure*}
     \centering
     \includegraphics[width=\textwidth]{figures/fig4_probe.png}
     \caption{Two views of the frozen foundation representation. \emph{Left
-    (decodability):} a probe predicts each band's per-source brightness ($\log S/N$) from the frozen bottleneck features at detected source positions (6-fold spatial hold-out, $\sim$1000 sources; features standardized, ridge penalty cross-validated, and per band restricted to sources with signal in that band). Open markers are a linear (ridge) probe, filled markers a
-    nonlinear (MLP) probe, the connecting line is the nonlinear gain, and the gray bar is the fold scatter. All ten bands are linearly decodable ($R^2 = 0.7$--$0.92$); VIS reads back lowest only because sources are selected on VIS $S/N$, truncating its range. \emph{Right (information routing):} input-gradient attribution---mask a target band (row) and backpropagate the reconstruction loss to each source band's pixels (row-normalized; the diagonal is self-attribution, shown gray). VIS is omitted because, when present, it absorbs $\sim$100\% of the attribution (the universal spatial scaffold); shown is the routing among the remaining nine bands. $n_{\rm eff} = 2^{H}$ ($H$ the Shannon entropy of each row) is the effective
+    (decodability):} a probe predicts each band's per-source brightness ($\log S/N$) from the frozen bottleneck features at detected source positions (6-fold spatial hold-out, $\sim$770 sources; features standardized, ridge penalty cross-validated, and per band restricted to sources with signal in that band). Open markers are a linear (ridge) probe, filled markers a
+    nonlinear (MLP) probe, the connecting line is the nonlinear gain, and the gray bar is the fold scatter. All ten bands are linearly decodable ($R^2 = 0.7$--$0.95$); VIS reads back lowest only because sources are selected on VIS $S/N$, truncating its range. \emph{Right (information routing):} input-gradient attribution---mask a target band (row) and backpropagate the reconstruction loss to each source band's pixels (row-normalized; the diagonal is self-attribution, shown gray). VIS is omitted because, when present, it absorbs $\sim$100\% of the attribution (the universal spatial scaffold); shown is the routing among the remaining nine bands. $n_{\rm eff} = 2^{H}$ ($H$ the Shannon entropy of each row) is the effective
     number of source bands: Rubin bands draw on many sources
-    ($n_{\rm eff}\approx4$--$7$: spectral neighbors, with a $g/r$ hub, plus NISP), whereas the NISP bands form a near-closed block ($n_{\rm eff}\approx2$--$3$:
-    $Y/J/H$ mutually, barely using Rubin). The right panel is a VIS-absent counterfactual that isolates this secondary routing.}
+    ($n_{\rm eff}\approx4$--$7$: spectral neighbors, with a $g/r$ hub, plus NISP), whereas the NISP bands form a near-closed block ($n_{\rm eff}\approx3$:
+    $Y/J/H$ mutually, with only $\sim$10\% of their attribution reaching Rubin). The right panel is a VIS-absent counterfactual that isolates this secondary routing.}
     \label{fig:foundation_probe}
 \end{figure*}
 
@@ -182,82 +181,112 @@ Together these checks establish that the frozen representation is faithful, that
 \begin{figure*}[t]
 \centering
 \includegraphics[width=\textwidth]{figures/fig5_detection.png}
-\caption{\textbf{Detection on a Euclid VIS frame: the foundation head versus classical and catalogue references.} A single $1.8'$ VIS tile (\texttt{tile\_x00768\_y01280}, $0.1''/\mathrm{px}$, held out from the detection training set), with four source lists overlaid. \emph{Cyan circles:}
-the classical VIS source list (multi-scale peak-finder $+$ \textsc{SEP}, $3\sigma$, with spike and duplicate cleaning). \emph{Magenta crosses:} the foundation CenterNet head operating on the frozen, fused 10-band bottleneck.
+\caption{\textbf{Detection on a Euclid VIS frame: the foundation head versus classical and catalogue references.} A single $1.8'$ VIS tile (\texttt{tile\_x01792\_y00000}, $0.1''/\mathrm{px}$, held out from the detection training set in a spatially-disjoint patch split), with four source lists overlaid. \emph{Cyan circles:}
+the classical VIS source list (\textsc{SEP} source extraction at $3\sigma$, with bright-star and duplicate cleaning). \emph{Magenta crosses:} the foundation CenterNet head operating on the frozen, fused 10-band bottleneck.
 \emph{Orange pluses:} the StemCenterNet variant on native per-instrument stems. \emph{Red squares:} the clean Euclid Q1 MER catalogue (VIS-detected, non-spurious). The white bar is $15''$.}
 \label{fig:detection_overlay}
 \end{figure*}
 
+
 \begin{table}[t]
 \centering
 \caption{Detection-head comparison on the frozen foundation. Source-recycling injection on
-the same 16 held-out tiles at threshold $0.30$; $d_{50}$ is the 50\% point-source depth in
-VIS magnitudes. Only the fused bottleneck converts the other nine bands into added depth.}
+the same 108 held-out tiles (a spatially-disjoint patch) at threshold $0.30$; $d_{50}$ is the 50\% point-source depth in
+VIS magnitudes. Only the fused bottleneck converts the other nine bands into added depth.
+NISP-only injection reaches the $50\%$ level for neither head.}
 \label{tab:detection_heads}
 \begin{tabular}{lcc}
 \toprule
                        & CenterNet & StemCenterNet \\
                        & (fused)   & (stems)       \\
 \midrule
-$d_{50}$, all 10 bands & $26.0$  & $25.9$  \\
-$d_{50}$, VIS only     & $25.6$  & $25.9$  \\
-multi-band gain        & $+0.43$ & $+0.04$ \\
-$d_{50}$, NISP only    & $24.5$  & $23.1$  \\
+$d_{50}$, all 10 bands & $25.0$  & $25.1$  \\
+$d_{50}$, VIS only     & $24.6$  & $25.1$  \\
+multi-band gain        & $+0.45$ & $+0.03$ \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-
-\begin{figure*}[t]
-\centering
-\includegraphics[width=\textwidth]{figures/fig6_detection_performance.png}
-\caption{Detection performance of the foundation CenterNet head, which reads the frozen 10-band fused bottleneck, evaluated on 16 held-out tiles. \emph{Top:} completeness versus VIS magnitude. Solid curves are catalog-independent source-recycling injection with the source placed in all 10 bands (blue), VIS only (orange), or NISP $Y\!/\!J\!/\!H$ only (red); the shaded band between all-10 and VIS-only is the $\approx0.4$\,mag gained from multi-band fusion, giving a 50\% point-source depth of VIS\,$=26.0$. The dashed grey curve is recovery
-of the real clean \Euclid\ Q1 MER catalog, and the grey histogram shows the normalized MER VIS-magnitude distribution. MER recovery stays high ($\sim$85--95\%) across the range the catalog reaches. \emph{Bottom left:} the same MER-catalog recovery (full 10-band detector at threshold $0.30$) binned by \emph{measured} VIS aperture S/N rather than magnitude, independent of any photometric zeropoint. \emph{Bottom right:} completeness (VIS\,$<24.5$)
-and purity as the detection threshold is varied, with the $0.30$ working point marked; purity is measured against the full MER catalog and is a conservative floor, since some unmatched detections are real sources absent from MER VIS selected catalog.}
-\label{fig:detection_performance}
-\end{figure*}
-
-Source detection is the first downstream test of the foundation representation, and it asks a specific question: does the frozen latent carry multi-band source evidence beyond what a single sharp band already provides, and can a lightweight head built on it match classical detection and then go further? Detection on \textit{Euclid} VIS alone is sharp and reliable, but it cannot use color, low-surface-brightness structure, or the Rubin and NISP channels in a learned way. We compare three source lists that differ only in what information they see: a classical peak-finder on the VIS image, which serves as the baseline and as the source of training labels, and two variants of a learned detection head built on the frozen foundation features. Comparing them isolates whether the representation has learned genuine multi-band source evidence, and whether that evidence is best expressed in the fused latent or in the higher-resolution per-band features.
+Source detection is the first downstream test of the foundation representation, and it asks a specific question: does the frozen latent carry multi-band source evidence beyond what a single sharp band already provides, and can a lightweight head built on it match classical detection and then go further? Detection on \textit{Euclid} VIS alone is sharp and reliable, but it cannot use color, low-surface-brightness structure, or the Rubin and NISP channels in a learned way. We compare three source lists that differ only in what information they see: a classical VIS source-extraction list (\textsc{SEP}), which serves as the baseline and as the source of training labels, and two variants of a learned detection head built on the frozen foundation features. Comparing them isolates whether the representation has learned genuine multi-band source evidence, and whether that evidence is best expressed in the fused latent or in the higher-resolution per-band features.
 
 Both variants share the same output design and differ only in the features they read. Following CenterNet \citep[][]{centernet}, each predicts a dense source-evidence map over the tile, in which a true source is represented during training by a small Gaussian peak at its position rather than by a single hard pixel, so that nearby pixels receive a graded target suited to sub-pixel positions. A focal loss handles the extreme imbalance between the rare source pixels and the dominant empty sky. Alongside the evidence map each predicts a sub-pixel offset and a brightness proxy at every location. At inference the procedure is essentially learned peak-finding: local maxima above a confidence threshold are kept, and the offset is read off to refine each position. This is the same operation as classical peak-finding, but performed on a learned ten-band source-evidence image rather than on a single band.
 
 The two variants differ in where they read that evidence. The fused-bottleneck variant (CenterNet) operates on the frozen bottleneck, where the foundation model has already mixed all ten bands, and so tests whether the representation has learned multi-band source evidence. The native-stem variant (StemCenterNet) operates instead on the per-band stem features at their original resolution, projected onto a common grid, and so tests whether finer spatial detail helps localization beyond what the coarser bottleneck retains. Each adds only a few million trainable parameters on top of the frozen encoder.
 
+\begin{figure*}[t]
+\centering
+\includegraphics[width=\textwidth]{figures/fig6_detection_performance.png}
+\caption{Detection performance of the foundation CenterNet head, which reads the frozen 10-band fused bottleneck, evaluated on 108 held-out tiles (a spatially-disjoint patch, never seen in training). \emph{Top:} completeness versus VIS magnitude. Solid curves are catalog-independent source-recycling injection with the source placed in all 10 bands (blue), VIS only (orange), or NISP $Y\!/\!J\!/\!H$ only (red); the shaded band between all-10 and VIS-only is the $\approx0.45$\,mag gained from multi-band fusion, giving a 50\% point-source depth of VIS\,$\approx25.0$. The dashed grey curve is recovery of the real clean Euclid Q1 MER catalog, and the grey histogram (arbitrary scale) shows the MER VIS-magnitude distribution. MER recovery stays high ($\sim$85--95\%) across the range the catalog reaches. \emph{Bottom left:} the same MER-catalog recovery (full 10-band detector at threshold $0.30$) binned by \emph{measured} VIS aperture S/N rather than magnitude, independent of any photometric zeropoint. \emph{Bottom right:} completeness (VIS\,$<24.5$) and purity as the detection threshold is varied, with the $0.30$ working point marked; purity is measured against the full MER catalog and is a conservative floor, since some unmatched detections are real sources absent from the VIS-selected MER catalogue.}
+\label{fig:detection_performance}
+\end{figure*}
+
+
 We also tried a Detection Transformer \citep[DETR;][]{DETR}, which represents objects with a fixed set of learned ``query'' slots assigned to sources through a matching step. Its set-prediction machinery is built for the complexity of natural scenes and is data-hungry, and on our limited training set it converged slowly and unstably. A per-pixel design fits the problem better: every pixel receives a direct training signal, and detection reduces to finding peaks in a learned source-evidence image, much as sources are found classically. Blending, the main concern for such peak-based approaches, is also less severe here, since the fused representation brings the sharp \textit{Euclid} VIS scaffold to bear alongside the ground-based bands.
 
-A natural source of labels would be the \Euclid\ Q1 MER catalog, but we deliberately did not train on it. Detection should not require heavy curated supervision, so we kept the labels lightweight and internal, generating them directly from the VIS imaging: a multi-scale peak-finder, with standard source extraction \citep[\textsc{SEP};][]{SEP} used as an auxiliary check, followed by light spike and duplicate cleaning. We also tested a variant in which \textsc{SEP} was the primary detector rather than an assist; it added candidates but did not make the reference list cleaner, so we kept peak-finding as the primary recipe. The head bootstraps from these labels and then improves on them through self-training.
+A natural source of labels would be the Euclid Q1 MER catalog, but we deliberately did not train on it. Detection should not require heavy curated supervision, so we keep the labels lightweight and internal, generating them directly from the VIS imaging with standard source extraction \citep[\textsc{SEP};][]{SEP} at $3\sigma$, followed by bright-star and duplicate cleaning. We compared this against a multi-scale peak-finder; \textsc{SEP} produced the cleaner reference---markedly higher agreement with the MER catalogue at matched purity---so we adopt it as the primary recipe. The head is trained on these labels.
 
-We use the MER catalog instead as an external cross-check. Fine-tuning the head on MER produced no improvement, which is consistent with MER's role here: the Q1 MER catalog is VIS-selected rather than a complete truth catalog, so it neither adds information beyond our VIS-based labels nor rewards the deeper, multi-band sources the head recovers, including objects such as high-redshift dropouts that are faint or absent in VIS.
+We use the MER catalog instead as an external cross-check. Training the head on MER labels rather than our internal ones gives essentially the same detector---the same injection depth, with only a marginal change in catalogue-match agreement (itself circular, since a MER-trained model is scored against MER). This is consistent with MER's role here: the Q1 MER catalog is VIS-selected rather than a complete truth catalog, so it neither adds information beyond our VIS-based labels nor rewards the deeper, multi-band sources the head recovers that are faint in VIS but supported by the other bands.
 
-Figure~\ref{fig:detection_overlay} overlays the four source lists on a single held-out \textit{Euclid} VIS tile. The overall agreement is good: on the great majority of sources the four lists coincide. Two differences are visible on close inspection. First, the classical VIS peak-finder tends to over-fragment extended galaxies, placing several detections across the spiral arms or star-forming clumps of a single resolved system, whereas the learned heads more often return one detection per object. Second, among the learned heads the fused CenterNet variant is visibly the strongest: it recovers more faint sources than either the classical list or the native-stem variant, including objects that are faint in VIS but supported by the other bands. Whether the detector's added faint sources are real rather than noise is what the injection test below quantifies, by showing that real faint multi-band sources are in fact recoverable; the overlay shows the qualitative pattern, and the quantitative comparison follows.
+Figure~\ref{fig:detection_overlay} overlays the four source lists on a single held-out \textit{Euclid} VIS tile. The overall agreement is good: on the great majority of sources the four lists coincide. Two differences are visible on close inspection. First, the classical \textsc{SEP} list tends to over-fragment extended galaxies, placing several detections across the spiral arms or star-forming clumps of a single resolved system, whereas the learned heads more often return one detection per object. Second, among the learned heads the fused CenterNet variant is visibly the strongest: it recovers more faint sources than either the classical list or the native-stem variant, including objects that are faint in VIS but supported by the other bands. Whether the detector's added faint sources are real rather than noise is what the injection test below quantifies, by showing that real faint multi-band sources are in fact recoverable; the overlay shows the qualitative pattern, and the quantitative comparison follows.
 
-We attach the detection head to the frozen foundation at the fused, multi-instrument bottleneck (the $0.4''/\mathrm{px}$ latent of Fig.~\ref{fig:arch}) and train only the head. Depth is measured by injection, since catalog matching cannot probe past the reference catalog's own incompleteness at the faint end: using source recycling, we take real, isolated, compact sources of known VIS magnitude, extract their full ten-band cutouts (real PSF and SED), rescale them to a fainter target magnitude, inject them at empty positions, and re-run the frozen detector; recovery as a function of injected magnitude gives a catalog-independent completeness curve (Fig.~\ref{fig:detection_performance}, top). The fused head reaches a $50\%$ point-source depth of VIS\,$=26.0$, about $0.4$\,mag deeper than the same detector restricted to VIS alone ($25.6$) -- a multi-band gain that pushes it past the effective turnover of the VIS-selected MER catalog. Running the identical benchmark on the native-stem head (StemCenterNet) confirms that this gain is a property of the fused representation, not of the head: it reaches the same VIS-driven depth but gains essentially nothing from the other nine bands ($+0.04$\,mag vs $+0.43$\,mag; Table~\ref{tab:detection_heads}). We therefore adopt the fused CenterNet configuration for all subsequent results.
+We attach the detection head to the frozen foundation at the fused, multi-instrument bottleneck (the $0.4''/\mathrm{px}$ latent of Fig.~\ref{fig:arch}) and train only the head. Depth is measured by injection, since catalog matching cannot probe past the reference catalog's own incompleteness at the faint end: using source recycling, we take real, isolated, compact sources of known VIS magnitude, extract their full ten-band cutouts (real PSF and SED), rescale them to a fainter target magnitude, inject them at empty positions, and re-run the frozen detector; recovery as a function of injected magnitude gives a catalog-independent completeness curve (Fig.~\ref{fig:detection_performance}, top). The fused head reaches a $50\%$ point-source depth of VIS\,$\approx25.0$, about $0.45$\,mag deeper than the same detector restricted to VIS alone ($24.6$) -- a multi-band gain that pushes it past the effective turnover of the VIS-selected MER catalog. Running the identical benchmark on the native-stem head (StemCenterNet) confirms that this gain is a property of the fused representation, not of the head: it reaches the same VIS-driven depth but gains essentially nothing from the other nine bands ($+0.03$\,mag vs $+0.45$\,mag; Table~\ref{tab:detection_heads}). We therefore adopt the fused CenterNet configuration for all subsequent results.
 
-To localize where this sensitivity comes from, we repeat the injection placing the source in only one instrument subset at a time. Injecting into the NISP bands alone still yields
-substantial recovery (50\% depth VIS\,$\approx24.5$), a proxy for high-redshift optical dropouts, which a VIS-driven catalog would miss entirely. Injecting into the Rubin bands alone yields essentially no detections: the head is \Euclid-anchored, operating at VIS resolution and trained on VIS-detected labels, so the ground-based bands add depth in fusion but cannot drive a detection on their own.
+To localize where this sensitivity comes from, we repeat the injection placing the source in only one instrument subset at a time. Injecting into the NISP bands alone yields only partial recovery, peaking near $40\%$ at the bright end and never reaching the $50\%$ level; injecting into the Rubin bands alone yields essentially no detections. The head is \textit{Euclid}/VIS-anchored---operating at VIS resolution and trained on VIS-detected labels---so the other bands add depth in fusion but cannot drive detections on their own.
 
 Against the clean MER catalog, the detector recovers $\sim$85--95\% of listed sources across the magnitude range MER reaches (Fig.~\ref{fig:detection_performance}, top, dashed curve), with
-the same recovery binned by measured VIS aperture S/N shown in the lower-left panel so that it does not depend on a photometric zeropoint. Purity, measured against the full MER catalog, rises with the detection threshold as completeness falls (lower-right panel); we adopt a working point of $0.30$. Because MER Q1 is VIS-selected rather than a complete truth catalog, these numbers describe agreement with a VIS reference, not completeness or purity against truth: the unmatched detections include real multi-band sources absent from MER, so the quoted purity is a conservative lower bound.
+the same recovery binned by measured VIS aperture S/N shown in the lower-left panel so that it does not depend on a photometric zeropoint. Purity, measured against the full MER catalog, rises with the detection threshold as completeness falls (lower-right panel); we adopt a working point of $0.30$. Because MER Q1 is VIS-selected rather than a complete truth catalog, these numbers describe agreement with a VIS reference, not completeness or purity against truth: the unmatched detections include real multi-band sources absent from MER---they carry Rubin/NISP aperture flux well above random sky positions---so the quoted purity is a conservative lower bound.
 
-In summary, the head begins from classical VIS detection and goes beyond it: it is deeper, uses all ten bands, and returns one detection per object where the classical peak-finder fragments extended systems. Its main limitation lies at the other end of the size distribution -- large, low-concentration galaxies whose light is spread over many pixels are occasionally missed, because the $0.4''/\mathrm{px}$ fused bottleneck on which the head operates cannot concentrate
+In summary, the head begins from classical VIS detection and goes beyond it: it is deeper, uses all ten bands, and returns one detection per object where classical source extraction fragments extended systems. Its main limitation lies at the other end of the size distribution -- large, low-concentration galaxies whose light is spread over many pixels are occasionally missed, because the $0.4''/\mathrm{px}$ fused bottleneck on which the head operates cannot concentrate
 their flux into a sharp peak. A finer bottleneck would address this and is the natural next step.
 
 
 \section{Astrometry}\label{sec:astrometry}
-\begin{itemize}
-    \item Idea: use the detections + foundation to (a) measure positions in faint bands by transferring the sharp VIS localization, and (b) map the cross-survey concordance field -- not "beat the existing solution"
-    \item How do Rubin and Euclid mosaics agree before any correction, given they are both GAIA aligned
-    \item $\sim$40--50 mas raw offset is S/N dependent and dominated by per-source centering, not WCS distortion (+figure 8)
-    \item including faint sources inflates the scatter but do they help with fitting the field (+figure 9)
-    \item Head correcting for centering of faint things, and remeasuring the field (+figure 10)
-    \item but the head has an intrinsic $\sim$17--18 mas faint-end ceiling; the classical joint 10-band fitter (6.7 mas at SNR 5) is the best position instrument
-    \item injection truth test: real $\sim$2.5$\times$ gain at low SNR (VIS-localization transfer), bounded by the VIS floor
-    \item centroid-emulation caveat: at the faint end the residual-vs-label metric measures emulation of the classical centroid, not truth -- why injection + Gaia are needed
-    \item absolute validation against Gaia: frame tie $(+3.7,+1.9)$ mas, $4.4$--$4.8$ mas at $G<18.5$
-    \item concordance field is a measurement (degree-scale $\sim$4--7 mas), not a correction: applying it does not improve held-out positions
-    \item PINN vs HGP (agree at degree scale, sub-degree is solver noise)
-    \item Ian's finding on centering dependence on a/b 
-\end{itemize}
+
+
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=\textwidth]{figures/fig7_astrometry_agreement.png}
+    \caption{Raw astrometric agreement between Rubin/NISP and \textit{Euclid} VIS
+    \emph{before any correction}, from classical Gaussian-centroid positions of matched sources pooled over the ECDFS field; plotted offsets are (Rubin/NISP $-$ VIS). \emph{Left:} two-dimensional offset clouds, each contour enclosing $50\%$ of that band's sources. Solid contours are all detections; dashed contours are bright sources ($\mathrm{S/N}\geq30$). Although both surveys are independently registered to Gaia, the bright clouds do \emph{not} close on the origin: they sit at a small, band-dependent systematic offset of a few mas. Notably, the NISP bands ($Y\!/\!J\!/\!H$) sit at a \emph{larger} offset ($\sim$7\,mas) than the Rubin bands ($\sim$3\,mas)
+    despite sharing VIS's pixel grid, a registration residual of the
+    $0.3\arcsec\!\rightarrow\!0.1\arcsec$ resampling of NISP onto the MER grid. The legend lists the bright\,/\,all median offset per band; the $u$ and $y$ bands are given as numbers only, their clouds lying off the plotted scale. \emph{Right:} median radial offset versus signal-to-noise for the six well-measured bands, following the expected $\mathrm{FWHM}/\mathrm{SNR}$
+    degradation; the dotted line marks the $\mathrm{S/N}=30$ bright cut. Bright sources already agree to $\sim$8--18\,mas but are both offset and sparse ($\sim$1--3\,arcmin$^{-2}$), whereas the faint-galaxy-dominated full population disagrees by $\sim$50--60\,mas. Measuring and removing that systematic offset (the concordance field) and shrinking the per-source scatter (the position head) are the two goals of this section.}
+    \label{fig:astrom_agreement}
+\end{figure*}
+
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=\textwidth]{figures/fig8_head_correction.png}
+    \caption{Effect of the per-object latent position head on cross-survey agreement, using the same offset measurement as Fig.~\ref{fig:astrom_agreement}
+    (Rubin/NISP $-$ \textit{Euclid} VIS) over all 790 ECDFS tiles. Solid curves are astrometry head-corrected; dashed curves are the raw classical centroids. \emph{Left:} all-detection offset clouds (each contour encloses $50\%$ of that
+    band's sources). The head collapses the raw $\sim$50\,mas clouds to $\sim$11--16\,mas and re-centres them on the origin, removing both the
+    per-source scatter and the systematic offset; the legend gives the raw\,$\rightarrow$\,head median per band ($u$ and $y$ raw clouds lie off the plotted scale). \emph{Right:} median radial offset versus signal-to-noise. The raw offset rises to $\sim$70\,mas at the faint end (dashed), whereas the head-corrected offset (solid) is far flatter---the head brings faint sources down toward the bright-source floor, largely removing the $\mathrm{FWHM}/\mathrm{SNR}$ degradation, though a residual dependence remains.}
+    \label{fig:head_correction}
+\end{figure*}
+
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=\textwidth]{figures/fig9_concordance_field.png}
+    \caption{The cross-survey concordance field before and after astrometry head correction.  \emph{Top:} the
+    NISP\,$J$ residual field over the ECDFS footprint (arrows: direction; color: $|$field$|$; smoothed to $150\arcsec$). Before the head measured with two solvers: the physics-informed
+    network (PINN, left) and the hierarchical Gaussian process (HGP, center). They recover the same $\sim$5--7\,mas pattern. After the per-object correction head (right, \emph{same color scale}) the coherent field collapses to $\sim$1\,mas: the head absorbs it
+    source-by-source. \emph{Bottom:} the HGP
+    hierarchical decomposition of the pre-head field into a component common to all bands ($\sim$4\,mas), per-instrument group terms (Rubin, NISP), and small
+    per-band residuals ($u$--$H$); the dominant common term shows most of the field is a single shared cross-survey systematic rather than per-band noise.}
+    \label{fig:concordance_field}
+\end{figure*}
+
+Astrometry is the second downstream test of the foundation representation, and the question it asks is whether the joint learned representation can improve astrometry itself: both the precision of individual source positions and the alignment between the two surveys. Rubin and Euclid each arrive with a mature astrometric solution, independently registered to the Gaia reference frame \citep{gaia2016, gaia2023}, and this work does not attempt to improve either. But nothing in what follows relies on that prior registration. The per-source correction and the cross-survey alignment developed here are built entirely from the pixels: the representation learns where the two instruments see the same sources and uses that correspondence directly. In principle the same machinery would align two surveys that share no external reference frame at all; the Gaia registration matters only for tying the result to an absolute frame, which we do not address here. What the shared frame does provide in this case is a stringent starting point, since two independently Gaia-aligned surveys should already agree, and measuring how well they actually do is itself informative. Concretely, this section develops two products: a per-source position head that transfers the sharp VIS localization to the nine other bands, where the PSF is broader or the source fainter, and a measurement of the residual agreement between the two solutions, which we call the cross-survey concordance field. The two live at very different amplitudes, and separating them cleanly is the main work of this section.
+
+Figure~\ref{fig:astrom_agreement} shows the starting point: the raw astrometric agreement between the surveys before any correction, from classical Gaussian-fit centroids of sources matched between each band and VIS, pooled over the training field. Bright sources (S/N $\geq 30$) already agree well, with per-band median radial offsets of ${\sim}8$--$18$\,mas, but their offset clouds do not close on the origin: each band sits at a small, coherent systematic offset of a few mas. Notably, the NISP bands sit at a larger offset (${\sim}7$\,mas) than the Rubin bands (${\sim}3$\,mas) despite being delivered on the same pixel grid as VIS; this is a registration residual of resampling the native $0.3''$ NISP frames onto the $0.1''$ MER grid, a preprocessing step inherited with the mosaics (Section~\ref{sec:data}). The full source population, dominated by faint galaxies, tells a different story: it disagrees at ${\sim}50$--$60$\,mas, and the right panel shows that this disagreement follows the expected photon-noise scaling of centroid precision with FWHM and S/N \citep{king1983}. The raw offset is therefore not one error but two, of different nature and very different amplitude.
+
+This decomposition dictates the strategy. The coherent component is small, a few mas, and is carried by bright sources that are sparse on the sky (${\sim}1$--$3\,\mathrm{arcmin}^{-2}$); it is a smooth field to be mapped. The dominant component is per-source centering noise: it lives at the photon-noise floor set by each band's PSF and depth, it is uncorrelated between neighboring sources, and no global correction can remove it. It has to be corrected one source at a time, conditioned on the actual image content, which is precisely what a head on the foundation representation can do.
+
+The position head is a small network (${\sim}0.7$M parameters) attached to the frozen encoder. For each detected source it reads two local windows: one from the fused bottleneck, whose $0.4''$\,px$^{-1}$ features carry the chromatic morphology of all ten bands, and one from the VIS stem features at their native $0.1''$\,px$^{-1}$ sampling, which provide the fine spatial reference. From these it predicts a per-source, per-band position offset together with its uncertainty. Training is self-supervised and requires no external catalog: VIS Gaussian-fit centroids serve as targets, the query position is perturbed by a controlled jitter, and the head learns to recover the centroid that the local features encode. The loss is a Rayleigh negative log-likelihood that includes a fixed label-noise floor of 5\,mas, reflecting the systematic floor of the underlying WCS solutions, so that the head is not rewarded for chasing noise in individual bright-source labels.
+
+Figure~\ref{fig:head_correction} shows the effect. The head collapses the raw ${\sim}50$\,mas offset clouds to ${\sim}11$--$16$\,mas medians in every non-VIS band and re-centers them on the origin, removing the per-source scatter and the coherent band offsets together. The S/N dependence flattens correspondingly: faint sources are brought down toward the bright-source floor, largely removing the FWHM/S/N degradation, though a residual dependence remains. Because the head is trained against classical VIS centroids, agreement with those labels could in principle reflect emulation of the label convention rather than genuinely better positions; we test this directly by injecting sources of known position into all ten bands of held-out tiles. At a peak S/N of 5, head positions err against truth by ${\sim}19$\,mas, compared to ${\sim}47$\,mas for classical single-band centroids, close to the ${\sim}17$\,mas floor set by the VIS anchor itself. The mechanism is exactly the transfer the section set out to test: the head carries VIS's localization to the other bands, and it adds no precision beyond what VIS itself provides. \todo{add Ian's result on the dependence of centering accuracy on source axis ratio $a/b$, with figure}
+
+With the per-source scatter under control, the small coherent component can be measured cleanly. Figure~\ref{fig:concordance_field} shows the concordance field, fit to the bright-source offsets with two solvers of deliberately different character: a physics-informed neural network (PINN; \citealt{PINN}) whose auxiliary losses impose curl-free structure, smoothness, and band consistency, and a hierarchical Gaussian process (HGP) that decomposes the field into a component common to all bands, per-instrument group terms, and per-band residuals, with posterior uncertainties. The point of using two solvers is that they can fail differently: the PINN constrains the field through physical priors, the HGP through hierarchical smoothness with calibrated posterior uncertainty, and structure that survives both is unlikely to be an artifact of either. At degree scales they recover the same ${\sim}5$--$7$\,mas pattern. Below that scale the comparison is no longer meaningful: refitting the PINN on identical inputs reproduces its own field only to ${\sim}5$\,mas, so sub-degree differences between the solvers are within the fit noise, and we do not interpret structure there. The HGP decomposition shows the field is dominated by its common component (${\sim}4$\,mas), shared across all ten bands: most of it is a single cross-survey systematic between the two Gaia-tied solutions rather than per-band noise. After the head correction the coherent field collapses to ${\sim}1$\,mas, absorbed source by source. We emphasize that the concordance field is a measurement, not a correction: applying the fitted field to held-out positions does not improve them, and its value is as a map of how well two independently calibrated surveys agree on the sky, at the few-mas level over degree scales.
 
 \section{OOD}\label{sec:ood}
 \begin{itemize}
@@ -270,10 +299,10 @@ their flux into a sharp peak. A finer bottleneck would address this and is the n
 
 \section{Discussion}\label{sec:discussion}
 \begin{itemize}
-    \item Native rather than processed mosaics
-    \item better PSF
+    \item DR1 better processing and deeper than Q1, also Native rather than processed mosaics
+    \item better PSF, better centering
     \item classical to inform model training, but faster inference once learned
-    \item label noise limits in-distribution metrics; next head must beat 6.7 mas at SNR 5 (likely needs finer than 0.4"/px bottleneck)
+    \item label noise limits in-distribution metrics
     \item next paper
 \end{itemize}
 
@@ -282,7 +311,7 @@ their flux into a sharp peak. A finer bottleneck would address this and is the n
 \end{acknowledgments}
 
 \facilities{Rubin Observatory, Euclid}
-\software{Astropy \citep{astropy2022}, NumPy, SciPy, PyTorch, SEP \citep{barbary2016}}
+\software{Astropy \citep{astropy2022}, NumPy, SciPy, PyTorch, SEP}
 
 \bibliographystyle{aasjournalv7}
 \bibliography{refs}
