@@ -881,9 +881,11 @@ class JAISPTrainerV10:
             if "python_random_state" in ckpt:
                 random.setstate(ckpt["python_random_state"])
             if "torch_rng_state" in ckpt:
-                torch.set_rng_state(ckpt["torch_rng_state"])
+                # map_location moves these CPU ByteTensors to the GPU; the RNG
+                # setters only accept CPU ByteTensors.
+                torch.set_rng_state(ckpt["torch_rng_state"].cpu())
             if torch.cuda.is_available() and ckpt.get("cuda_rng_state_all") is not None:
-                torch.cuda.set_rng_state_all(ckpt["cuda_rng_state_all"])
+                torch.cuda.set_rng_state_all([s.cpu() for s in ckpt["cuda_rng_state_all"]])
         if weights_only:
             return -1
         return int(ckpt["epoch"])
