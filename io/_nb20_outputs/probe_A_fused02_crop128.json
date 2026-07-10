@@ -1,0 +1,31 @@
+{
+ "checkpoint": "/home/shemmati/Work/Projects/JAISP/models/checkpoints/jaisp_v10_q1_fused02_scratch/checkpoint_best.pt",
+ "tag": "A_fused02_crop128",
+ "fused_scale": 0.2,
+ "crop": 128,
+ "n_sources": 217,
+ "ridge_r2": {
+  "rubin_u": 0.5665799889788902,
+  "rubin_g": 0.7547998103754071,
+  "rubin_r": 0.6728180057043334,
+  "rubin_i": 0.7562381423202602,
+  "rubin_z": 0.8369206422508672,
+  "rubin_y": 0.5042662801689751,
+  "euclid_VIS": 0.6954960213747348,
+  "euclid_Y": 0.6097323309250856,
+  "euclid_J": -0.5462738758083722,
+  "euclid_H": 0.5839430804382365
+ },
+ "mlp_r2": {
+  "rubin_u": 0.6095667369663715,
+  "rubin_g": 0.804586244126161,
+  "rubin_r": 0.8973754417772094,
+  "rubin_i": 0.8648675338675579,
+  "rubin_z": 0.8669551700353623,
+  "rubin_y": 0.8419001884758472,
+  "euclid_VIS": 0.5892433052261671,
+  "euclid_Y": 0.8343793513874213,
+  "euclid_J": 0.8950576869150003,
+  "euclid_H": 0.8039959321419398
+ }
+}
