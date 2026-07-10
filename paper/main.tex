@@ -14,7 +14,9 @@
 \newcommand{\jaisp}{\textsc{Jaisp}}
 \newcommand{\arcsecpx}{\arcsec\,\mathrm{px}^{-1}}
 \newcommand{\todo}[1]{\textcolor{red}{[TODO: #1]}}
-\newcommand{\ipac}{\affiliation{Caltech/IPAC, Pasadena, CA, USA}}
+\newcommand{\ipac}{\affiliation{IPAC, California Institute of Technology, Pasadena, CA 91125, USA}}
+\newcommand{\JPL}{\affiliation{Jet Propulsion Laboratory, California Institute of Technology, 4800 Oak Grove Drive, Pasadena, CA 91109, USA}}
+
 \newcommand{\mas}{\ensuremath{\,\mathrm{mas}}}
 \usepackage{xcolor}
 
@@ -39,6 +41,10 @@
 
 \author[0000-0001-9674-1564]{Rachel Akeson}
 \ipac
+\email{}
+
+\author[0009-0002-0098-6183]{Charles Darren Dowell}
+\JPL
 \email{}
 
 \author[0000-0002-9382-9832]{Andreas Faisst}
@@ -110,7 +116,7 @@ The core of \jaisp{} is a single foundation model that learns a shared represent
 
 The architecture must reconcile a mismatch between the instruments. Rubin imaging is sampled at $0.2\arcsecpx$ across six optical bands (ugrizy), whereas \textit{Euclid} VIS and the three NISP bands (Y, J, H) from MER are sampled twice as finely, at $0.1\arcsecpx$. Resampling both onto a single common grid would discard spatial information from the sharper instrument. The model instead keeps each instrument at its native resolution through separate encoder branches, and brings them together only once they reach a common physical scale.
 
-Each band first passes through its own convolutional ``stem,'' a small network that maps a single noisy band into a shared feature space while normalizing for that band's noise level. The per-band features then enter one of two parallel encoder branches, one for Rubin and one for \textit{Euclid}, built from ConvNeXt blocks \citep[a modern convolutional design;][]{convnext}. Within each branch the feature maps are progressively reduced in spatial size and increased in depth, so that despite their different native sampling both branches arrive at a common $0.4\arcsecpx$ grid. The two streams are then summed with learned identity embeddings that let the network tell Rubin features from \textit{Euclid} ones, and passed to a transformer bottleneck \citep[][]{transformers}. Through self-attention, every location in the fused map can exchange information with every other, and it is here that cross-instrument and cross-band relationships are combined. Per-instrument decoders expand the bottleneck features back to native resolution to reconstruct the withheld band, with the target band specified to the decoder so that a single model can reconstruct any of the bands. The complete model contains roughly nine million parameters; layer-by-layer specifications are given in Figure~\ref{fig:arch}.
+Each band first passes through its own convolutional ``stem,'' a small network that maps a single noisy band into a shared feature space while normalizing for that band's noise level. The per-band features then enter one of two parallel encoder branches, one for Rubin and one for \textit{Euclid}, built from ConvNeXt blocks \citep[a modern convolutional design;][]{convnext}. Within each branch the feature maps are progressively reduced in spatial size and increased in depth, so that despite their different native sampling both branches arrive at a common $0.4\arcsecpx$ grid. The two streams are then summed with learned identity embeddings that let the network tell Rubin features from \textit{Euclid} ones, and passed to a transformer bottleneck \citep[][]{transformers}. Through self-attention, every location in the fused map can exchange information with every other, and it is here that cross-instrument and cross-band relationships are combined. Per-instrument decoders expand the bottleneck features back to native resolution to reconstruct the withheld band, with the target band specified to the decoder so that a single model can reconstruct any of the bands. The complete model contains roughly nine million parameters; layer-by-layer specifications are given in Figure~\ref{fig:arch}. The $0.4\arcsecpx$ fused scale is a measured choice rather than a default: an otherwise identical foundation trained with the grid refined to $0.2\arcsecpx$ at matched transformer cost (halving the training crops to hold the token count fixed) is indistinguishable from the fiducial model in both held-out band reconstruction and the decodability diagnostics of Section~\ref{sec:validation}. Refining the fused grid alone buys nothing these measures can detect, so we retain the coarser, cheaper scale.
 
 Within each branch the per-band feature maps must be combined before the streams are fused. A natural default is to pool them into a single map, but doing so attenuates each band's contribution to the learning signal: averaging six Rubin bands, for example, divides each band's gradient by six, so the encoder is discouraged from forming sharp per-band features. The model instead concatenates the per-band features and projects them, preserving each band's identity through the encoder at full strength. This keeps wavelength-dependent information, such as how a galaxy's morphology and effective PSF change from band to band, available to the representation, where the photometry and deblending heads later draw on it. When a band is withheld as the reconstruction target its input slot is zero-filled, and the projection learns to ignore the empty slot, which also lets the model operate when some bands are absent.
 
@@ -218,7 +224,7 @@ Against the clean MER catalog, the detector recovers $\sim$85--97\% of listed so
 the same recovery binned by measured VIS aperture S/N shown in the lower-left panel so that it does not depend on a photometric zeropoint. Purity, measured against the full MER catalog, rises with the detection threshold as completeness falls (lower-right panel); we adopt a working point of $0.30$. Because MER Q1 is VIS-selected rather than a complete truth catalog, these numbers describe agreement with a VIS reference, not completeness or purity against truth: the unmatched detections include real multi-band sources absent from MER---they carry Rubin/NISP aperture flux well above random sky positions---so the quoted purity is a conservative lower bound.
 
 In summary, the head begins from classical VIS detection and extends it: it is deeper, uses all ten bands, and returns one detection per object where classical source extraction fragments extended systems. Its main limitation lies at the other end of the size distribution -- large, low-concentration galaxies whose light is spread over many pixels are occasionally missed, because the $0.4''/\mathrm{px}$ fused bottleneck on which the head operates cannot concentrate
-their flux into a sharp peak. A finer bottleneck would address this and is the natural next step.
+their flux into a sharp peak. Since simply retraining the encoder at a finer fused scale leaves the representation unchanged (Section~\ref{sec:architecture}), the natural next step is a multi-scale readout for the head itself.
 
 
 \section{Astrometry}\label{sec:astrometry}
@@ -293,7 +299,7 @@ The relation between the learned stack and the classical pipelines it builds on 
 
 Label noise, rather than representational capacity, limits several of the in-distribution numbers. Detection purity, scored against a VIS-selected catalogue, understates the true value, and depth had to be established by injection because a reference catalogue can only vouch for the sources it contains. The astrometric floor is likewise set by the VIS Gaussian-centroid labels the head is trained toward: the injection test places the head within ${\sim}2$\,mas of that anchor, so the head has extracted nearly all the precision its labels contain. The direct implication is that better labels convert into better measurements with no architectural change---deeper VIS stacks, ePSF-based centroiding, or Gaia-anchored positions would each lower the floor the same head can reach.
 
-The limitations identified along the way point in a consistent direction. The detection head is VIS-anchored---sources injected into NISP alone are recovered at best partially, and into the Rubin bands alone almost not at all---and the $0.4''$ fused bottleneck under-detects the largest, most diffuse galaxies; a finer bottleneck and labels not derived solely from VIS would relax both. The transfer test of Section~\ref{sec:ood} probes a new field, not new hardware: transfer across instruments, with \textit{Roman} \citep{Spergel2015} as the natural third stream alongside Rubin and \textit{Euclid}, is the harder and more valuable test ahead. The nearest-term step, however, is completing the measurement layer: photometry and shape heads, now in development, will work from the same frozen features and treat the per-band morphology and PSF structure the encoder was forced to retain as the measured quantities themselves rather than as aids to localization. Together with the detection and astrometry heads presented here, these would make the joint Rubin--\textit{Euclid} pixels directly usable for the catalogue-level measurements that precision cosmology requires: one representation, trained once on public mosaics, reused across tasks and fields.
+The limitations identified along the way point in a consistent direction. The detection head is VIS-anchored---sources injected into NISP alone are recovered at best partially, and into the Rubin bands alone almost not at all---and the $0.4''$ fused bottleneck under-detects the largest, most diffuse galaxies; a multi-scale bottleneck readout and labels not derived solely from VIS would relax both (a uniformly finer fused grid alone does not, as the matched-cost test of Section~\ref{sec:architecture} shows). The transfer test of Section~\ref{sec:ood} probes a new field, not new hardware: transfer across instruments, with \textit{Roman} \citep{Spergel2015} as the natural third stream alongside Rubin and \textit{Euclid}, is the harder and more valuable test ahead. The nearest-term step, however, is completing the measurement layer: photometry and shape heads, now in development, will work from the same frozen features and treat the per-band morphology and PSF structure the encoder was forced to retain as the measured quantities themselves rather than as aids to localization. Together with the detection and astrometry heads presented here, these would make the joint Rubin--\textit{Euclid} pixels directly usable for the catalogue-level measurements that precision cosmology requires: one representation, trained once on public mosaics, reused across tasks and fields.
 
 \begin{acknowledgments}
 This work was supported by \todo{grant name and number}.
@@ -309,3 +315,4 @@ This research has made use of the NASA/IPAC Infrared Science Archive (IRSA), whi
 \bibliography{refs}
 
 \end{document}
+
