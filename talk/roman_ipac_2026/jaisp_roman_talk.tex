@@ -9,7 +9,7 @@
 \usepackage{graphicx}
 \usepackage{booktabs}
 \usepackage{amsmath,amssymb}
-\graphicspath{{../../paper/figures/}}
+\graphicspath{{figures/}{../../paper/figures/}}
 
 % --- clean look ---
 \usetheme{default}
@@ -57,15 +57,16 @@
 % ------------------------------------------------------------ 2
 \begin{frame}{Why combine surveys at the pixel level?}
   \begin{itemize}\setlength\itemsep{0.7em}
-    \item Cosmology is now limited by \alert{systematics, not statistics}: residual tensions
-      between probes can neither be dismissed as noise nor attributed to new physics.
+    \item Cosmology is now limited by \alert{systematics, not statistics}: the remaining
+      disagreements between cosmological probes are too significant to ignore, but we cannot
+      yet tell measurement error apart from new physics.
     \item Rubin/LSST, \textit{Euclid}, and \textit{Roman} will observe overlapping sky from
       ${\sim}0.3$ to $2\,\mu$m at sub-arcsecond resolution --- in combination they can
       \alert{calibrate and cross-check one another}, suppressing survey-specific systematics
       no single survey can control alone.
-    \item But joint pixel-level processing means confronting \alert{heterogeneous PSFs,
-      samplings, depths, and noise} simultaneously --- a regime where classical
-      pipelines strain.
+    \item Working at the pixel level means handling two instruments with \alert{different
+      resolutions, PSFs, depths, and noise} at the same time --- something no
+      single-survey pipeline was built to do.
     \item Classical pipelines encode decades of problem-specific effort. The goal is not to
       discard them, but to move the \emph{joint, cross-instrument} part of the problem into a
       representation \alert{learned from the pixels themselves}.
@@ -73,19 +74,20 @@
 \end{frame}
 
 % ------------------------------------------------------------ 3
-\begin{frame}{The foundation-model recipe: one representation, many cheap heads}
+\begin{frame}{Train one model once --- reuse it for every measurement}
   \begin{columns}[T]
     \begin{column}{0.58\textwidth}
-      \textbf{Train once, self-supervised:}
+      \textbf{The model trains itself:}
       \begin{itemize}
-        \item masked-band autoencoder --- hide one of the ten bands, predict it from the other nine
-        \item \alert{no labels, no catalogs} --- raw public mosaics only
+        \item hide one of the ten bands; predict that band's image from the other nine
+        \item the images are their own supervision --- \alert{no labels, no catalogs, no simulations}
       \end{itemize}
       \vspace{0.5em}
-      \textbf{Freeze, then reuse:}
+      \textbf{Then lock it and reuse it:}
       \begin{itemize}
-        \item every measurement is a small head ($\lesssim$ few M parameters) reading cached frozen features
-        \item detection \& astrometry in hand; photometry \& shapes in preparation
+        \item every measurement afterwards is a small add-on network reading the same
+          stored features, at a tiny fraction of the training cost
+        \item detection \& astrometry working today; photometry \& shapes in preparation
       \end{itemize}
     \end{column}
     \begin{column}{0.38\textwidth}
@@ -93,8 +95,8 @@
         \textbf{Cost structure}\\[0.4em]
         Pretraining: \alert{${\sim}2.5$ GPU-hours}\\[0.2em]
         Model size: ${\sim}9$M parameters\\[0.2em]
-        Features: extracted once per dataset\\[0.2em]
-        Each new task: a small head on cached features\\[0.4em]
+        Features: computed once per dataset\\[0.2em]
+        Each new task: a small add-on network\\[0.4em]
         {\small $\Rightarrow$ marginal cost per task $\to$ small; per field $\to$ zero (as we will see)}
       \end{beamercolorbox}
     \end{column}
@@ -106,10 +108,11 @@
   \centering
   \includegraphics[width=0.86\textwidth]{fig1_data.png}
   \begin{itemize}\small
-    \item \textbf{Rubin DP1} (ComCam commissioning, $ugrizy$ at $0.2''$/px, PSF ${\sim}1''$)
-      $+$ \textbf{\textit{Euclid} Q1} MER mosaics (VIS $+$ NISP $YJH$ at $0.1''$/px).
-    \item Training: 790 matched ten-band tiles over ${\sim}0.2\,\mathrm{deg}^2$ of ECDFS/EDF-Fornax.
-      \alert{EDF-S held out entirely} for the transfer test.
+    \item \textbf{Rubin DP1} (commissioning camera, $ugrizy$, $0.2''$/px, ${\sim}1''$ seeing)
+      $+$ \textbf{\textit{Euclid} Q1} (VIS and near-infrared $YJH$, $0.1''$/px): 790 overlapping
+      ten-band tiles over ${\sim}0.2\,\mathrm{deg}^2$ --- the first public release of each survey.
+    \item \alert{A second deep field (EDF-S) is set aside untouched} --- the model never sees
+      it --- to test at the end whether everything transfers to new sky.
   \end{itemize}
 \end{frame}
 
@@ -118,12 +121,35 @@
   \centering
   \includegraphics[width=0.80\textwidth]{fig2_architecture.png}
   \begin{itemize}\small
-    \item Per-band stems $\to$ two encoder branches (Rubin at $0.2''$, \textit{Euclid} at $0.1''$)
-      $\to$ fused on a common $0.4''$ grid $\to$ transformer bottleneck mixes all ten bands.
-    \item \alert{Why reconstruction, not alignment?} Contrastive/JEPA objectives reward
-      \emph{similar} features but never require \emph{where} --- pixel reconstruction forces
-      sub-pixel spatial layout to survive into the representation.
+    \item Rubin stays at $0.2''$/px, \textit{Euclid} at $0.1''$/px --- \alert{no resampling onto a
+      shared grid}, so neither instrument's spatial information is thrown away.
+    \item The branches merge on a common $0.4''$ grid, where all ten bands exchange information.
   \end{itemize}
+\end{frame}
+
+% ------------------------------------------------------------ 5b
+\begin{frame}{We didn't start here: ten iterations to this design}
+  \small
+  \begin{tabular}{@{}p{0.09\textwidth}p{0.60\textwidth}l@{}}
+    \toprule
+    v1--v2 & \textbf{Contrastive patch matching} --- make matching Rubin/\textit{Euclid} cutouts
+             look similar in feature space & \textcolor{jaispaccent}{failed: sky-dominated} \\[0.35em]
+    v3     & \textbf{Object-centric matching} --- discover individual sources, pair them across
+             instruments & \textcolor{jaispaccent}{abandoned: no precision} \\[0.35em]
+    v4--v5 & \textbf{Feature matching on full tiles (JEPA)} --- make the two instruments'
+             features agree at corresponding positions & \textcolor{jaispaccent}{beaten by a simple CNN} \\[0.35em]
+    v6     & \textbf{The turn: predict actual pixels} --- hide one band, reconstruct its image;
+             no shortcut that discards position & \alert{\textbf{paradigm shift}} \\[0.35em]
+    v7--v8 & \textbf{Mixed resolution} --- one branch per instrument at its native pixel scale,
+             merged at a common physical scale & \textcolor{jaispteal}{works} \\[0.35em]
+    v9--v10 & \textbf{Refinements} --- every band gets an equal vote in training; the loss
+             focuses on real sources & \textcolor{jaispteal}{\textbf{production}} \\
+    \bottomrule
+  \end{tabular}
+  \vfill
+  \centering
+  \emph{Features that look similar aren't features that know \textbf{where} ---
+    the year of negative results is the design.}
 \end{frame}
 
 % ------------------------------------------------------------ 6
@@ -151,11 +177,11 @@
   \centering
   \includegraphics[width=0.88\textwidth]{fig4_probe.png}
   \begin{itemize}\small
-    \item \textbf{Left:} every band's brightness is \alert{linearly decodable} from the frozen
-      features ($R^2 \approx 0.7$--$0.95$) --- accessible to any downstream head.
-    \item \textbf{Right:} information routing mirrors real SEDs: VIS acts as the universal
-      spatial scaffold; Rubin bands draw on spectral neighbors; NISP $YJH$ form a
-      near-closed block.
+    \item \textbf{Left:} a simple linear fit reads each band's brightness straight back out of
+      the features ($R^2 \approx 0.7$--$0.95$) --- the information is there and easy to reach.
+    \item \textbf{Right:} the model leans on bands the way real galaxy colors would predict:
+      VIS is the sharp scaffold everything is built on; Rubin bands draw on their spectral
+      neighbors; the three near-infrared bands mostly predict one another.
   \end{itemize}
 \end{frame}
 
@@ -164,8 +190,9 @@
   \centering
   \includegraphics[height=0.60\textheight]{fig5_detection.png}
   \begin{itemize}\small
-    \item A CenterNet-style head on the frozen fused features, trained on \alert{lightweight
-      classical labels} (SEP $3\sigma$ on VIS) --- no curated catalog supervision.
+    \item A small detection network turns the ten-band features into a \alert{source-evidence
+      map} --- finding sources is still peak-finding, as in classical detection, but on all
+      ten bands at once. Trained on lightweight classical labels ($3\sigma$ VIS extraction).
     \item Matches the \textit{Euclid} Q1 MER catalog on held-out sky; returns
       \alert{one detection per galaxy} where classical extraction fragments extended systems.
   \end{itemize}
@@ -181,22 +208,25 @@
     \begin{column}{0.40\textwidth}
       \vspace{0.5em}
       \begin{itemize}\small\setlength\itemsep{0.6em}
-        \item vs.\ MER catalog: \alert{93\% completeness, 95\% purity} (purity a conservative floor).
-        \item Catalog-independent injection depth: $50\%$ point-source depth
-          \alert{VIS $\approx 25.0$} --- \alert{$+0.45$ mag deeper} than the same detector on VIS alone.
+        \item Depth measured by hiding real sources, dimmed to a chosen magnitude, in the
+          images and counting how many are found: $50\%$ recovery at \alert{VIS $\approx 25.0$},
+          \alert{$+0.45$ mag deeper} than the same detector on VIS alone.
+        \item Against the \textit{Euclid} catalog: \alert{93\% completeness, 95\% purity}
+          (an undercount --- some ``false'' detections are real sources the catalog missed).
       \end{itemize}
       \vspace{0.3em}
       {\small
       \begin{tabular}{lcc}
         \toprule
-        $d_{50}$ (VIS mag) & fused & stems \\
+        50\% depth (VIS) & ten-band & per-band \\
         \midrule
         all 10 bands & $25.0$ & $25.1$ \\
         VIS only     & $24.6$ & $25.1$ \\
         \alert{multi-band gain} & \alert{$+0.45$} & $+0.03$ \\
         \bottomrule
       \end{tabular}}\\[0.4em]
-      {\small The gain lives in the \alert{fused representation}, not the head design.}
+      {\small An identical detector reading per-band features gains almost nothing --- the
+      depth comes from the \alert{combined ten-band representation} itself.}
     \end{column}
   \end{columns}
 \end{frame}
@@ -206,12 +236,12 @@
   \centering
   \includegraphics[width=0.76\textwidth]{fig8_head_correction.png}
   \begin{itemize}\small
-    \item Raw cross-survey scatter: ${\sim}50\mas$, dominated by photon-noise centroiding of
-      faint galaxies. A $0.7$M-parameter position head collapses it to \alert{$14$--$17\mas$}
-      and re-centers every band on the origin.
-    \item Against \alert{injected truth}: $19\mas$ at $\mathrm{S/N}=5$ vs.\ ${\sim}50\mas$
-      classically --- within ${\sim}2\mas$ of the VIS anchor floor. The head carries VIS-quality
-      localization to the other nine bands.
+    \item The same sources measured in both surveys disagree by ${\sim}50\mas$ --- mostly
+      photon noise in centroiding faint galaxies. A small correction network reads the model's
+      features at each source and shrinks this to \alert{$14$--$17\mas$ in every band}.
+    \item Is it real? We hide sources at \alert{known positions}: corrected positions err by
+      only $19\mas$ at $\mathrm{S/N}=5$ (classical: ${\sim}50\mas$) --- nearly the ${\sim}17\mas$
+      precision of the sharp VIS channel itself, now carried into every band.
   \end{itemize}
 \end{frame}
 
@@ -220,22 +250,23 @@
   \centering
   \includegraphics[height=0.60\textheight]{fig10_concordance_field.png}
   \begin{itemize}\small
-    \item Beneath the scatter: a coherent \alert{$9$--$10\mas$ pattern} between the two surveys'
-      independently Gaia-anchored solutions --- ${\sim}7\mas$ shared by \alert{all ten bands}.
-      Recovered by two independent solvers; the head absorbs it source-by-source (${\to}1.5\mas$).
-    \item A few-mas, degree-scale \alert{map of cross-survey agreement} --- a QA product for
-      joint processing that no single pipeline can produce.
+    \item Beneath the per-source scatter sits a coherent \alert{$9$--$10\mas$ pattern} between
+      the two surveys' astrometric solutions --- even though both are tied to Gaia; ${\sim}7\mas$
+      is shared by \alert{all ten bands}. Two entirely different fitting methods recover the same
+      pattern, and the per-source correction absorbs it (${\to}1.5\mas$).
+    \item A few-mas map of \alert{how well two independently calibrated surveys actually
+      agree} --- quality assurance no single pipeline can produce.
   \end{itemize}
 \end{frame}
 
 % ------------------------------------------------------------ 12
-\begin{frame}{Does any of this transfer? Zero-shot on a second deep field}
+\begin{frame}{Does any of this transfer? A second deep field, nothing retrained}
   \centering
   \includegraphics[width=0.88\textwidth]{fig11_ood.png}
   \begin{itemize}\small
-    \item Frozen foundation $+$ frozen heads, applied to EDF-S: \alert{nothing retrained}.
-    \item Detection: $93.4\%/93.1\%$ completeness/purity vs.\ $93.3\%/94.5\%$ in-distribution.
-      Astrometry: same ${\sim}12$--$18\mas$ floor, within $1$--$3\mas$ of the training field.
+    \item The locked model and its measurement networks, applied to EDF-S: \alert{nothing retrained}.
+    \item Detection: $93.4\%/93.1\%$ completeness/purity vs.\ $93.3\%/94.5\%$ on the training
+      field. Positions land on the same ${\sim}12$--$18\mas$ floor, within $1$--$3\mas$.
     \item Scaling to more area is a matter of \alert{applying the stack, not rebuilding it}.
   \end{itemize}
 \end{frame}
@@ -244,34 +275,33 @@
 \begin{frame}{\textit{Roman}: the natural third stream}
   \begin{columns}[T]
     \begin{column}{0.52\textwidth}
-      \textbf{The architecture is built for this:}
+      \textbf{Why the model is ready:}
       \begin{itemize}\small\setlength\itemsep{0.4em}
-        \item one encoder branch per instrument, fused on a common physical grid ---
-          \alert{adding \textit{Roman} $=$ adding a third branch}, not redesigning the model
-        \item pretraining needs only \alert{overlapping public pixels} --- no labels, no
-          simulations; hours of GPU time once WFI imaging overlaps Rubin/\textit{Euclid} sky
+        \item one encoder branch per instrument \emph{is} the design ---
+          adding \textit{Roman} means \alert{adding a third branch}, not redesigning the model
+        \item training needs only \alert{overlapping public images} --- no labels, no
+          simulations --- and hours of GPU time, once WFI imaging overlaps Rubin/\textit{Euclid} sky
       \end{itemize}
       \vspace{0.4em}
-      \textbf{What \textit{Roman} brings to the stack:}
+      \textbf{What \textit{Roman} adds:}
       \begin{itemize}\small\setlength\itemsep{0.4em}
-        \item \alert{sharp, deep NIR at $0.11''$/px} --- the near-infrared analog of the VIS
-          spatial anchor, where today we lean on resampled NISP
-        \item wide-area survey over thousands of deg$^2$ \alert{inside the LSST footprint},
+        \item \alert{sharp, deep near-infrared imaging at $0.11''$/px} --- the infrared
+          counterpart of the sharp VIS reference, where today we must rely on resampled NISP
+        \item a wide survey of thousands of deg$^2$ \alert{inside the LSST footprint},
           plus deep time-domain fields
       \end{itemize}
     \end{column}
     \begin{column}{0.46\textwidth}
-      \textbf{What the joint model does for \textit{Roman}:}
+      \textbf{What \textit{Roman} gains:}
       \begin{itemize}\small\setlength\itemsep{0.4em}
-        \item multi-band detection gains beyond any single-band catalog
-          (here: $+0.45$ mag from fusion)
-        \item WFI-anchored positions carried into Rubin's seeing-limited bands
-        \item \alert{three-way concordance fields}: Rubin--\textit{Euclid}--\textit{Roman}
-          astrometric agreement mapped at the few-mas level --- systematics QA no
+        \item detection that uses all surveys at once --- for Rubin$+$\textit{Euclid}
+          that was worth $+0.45$ mag
+        \item \textit{Roman}-quality positions carried into the ground-based bands
+        \item \alert{three-way agreement maps}: Rubin--\textit{Euclid}--\textit{Roman}
+          astrometry compared at the few-mas level --- quality assurance no
           single pipeline can produce
-        \item ingest native-resolution frames and solve cross-instrument registration
-          \emph{inside} the model (the ${\sim}3\mas$ NISP resampling residual we detect is
-          exactly this kind of inherited error)
+        \item cross-instrument alignment solved \emph{inside} the model instead of inherited
+          from preprocessing (the ${\sim}3\mas$ NISP resampling error we found is exactly that)
       \end{itemize}
       \vspace{0.4em}
       \centering
@@ -283,15 +313,15 @@
 % ------------------------------------------------------------ 14
 \begin{frame}{Takeaways}
   \begin{itemize}\setlength\itemsep{0.9em}
-    \item A ${\sim}9$M-parameter foundation model, pretrained \alert{label-free} on public
-      Rubin\,$+$\,\textit{Euclid} mosaics in ${\sim}2.5$ GPU-hours, learns a shared ten-band
-      representation precise enough for measurement.
+    \item A small (${\sim}9$M-parameter) foundation model, trained \alert{without any labels}
+      on public Rubin\,$+$\,\textit{Euclid} images in ${\sim}2.5$ GPU-hours, learns a shared
+      ten-band representation precise enough to measure with.
     \item \textbf{Detection}: matches the \textit{Euclid} catalog (93\%/95\%), and ten-band fusion
       pushes \alert{$0.45$ mag deeper} than VIS alone.
     \item \textbf{Astrometry}: VIS-quality positions in every band --- ${\sim}50 \to 14$--$17\mas$,
-      $19\mas$ at $\mathrm{S/N}=5$ against injected truth --- and a few-mas
-      \alert{concordance field} between two Gaia-tied solutions.
-    \item The frozen stack \alert{transfers zero-shot} to a second deep field. All of this on the
+      verified at $19\mas$ on hidden test sources --- and a few-mas \alert{map of the
+      disagreement} between the two surveys' Gaia-tied solutions.
+    \item The whole stack \alert{transfers unchanged} to a second deep field. All of this on the
       \emph{earliest} data both surveys have released --- a floor, not a ceiling.
     \item \textit{Roman} slots in as a \alert{third encoder stream}: sharp NIR anchor, three-way
       cross-survey calibration, and one representation reused across tasks, fields ---
