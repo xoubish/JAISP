@@ -9,7 +9,8 @@
 \usepackage{graphicx}
 \usepackage{booktabs}
 \usepackage{amsmath,amssymb}
-\graphicspath{{../../paper/figures/}}
+% talk-specific enlarged-font figures take precedence; fall back to the paper's
+\graphicspath{{figures/}{../../paper/figures/}}
 
 % --- clean look ---
 \usetheme{default}
@@ -84,7 +85,8 @@
       \vspace{0.5em}
       \textbf{Freeze, then reuse:}
       \begin{itemize}
-        \item every measurement is a small head ($\lesssim$ few M parameters) reading cached frozen features
+        \item each measurement is a small, task-specific network --- a \emph{head}
+          ($\lesssim$ few M parameters) --- that reads the frozen features
         \item detection \& astrometry in hand; photometry \& shapes in preparation
       \end{itemize}
     \end{column}
@@ -118,11 +120,12 @@
   \centering
   \includegraphics[width=0.80\textwidth]{fig2_architecture.png}
   \begin{itemize}\small
-    \item Per-band stems $\to$ two encoder branches (Rubin at $0.2''$, \textit{Euclid} at $0.1''$)
-      $\to$ fused on a common $0.4''$ grid $\to$ transformer bottleneck mixes all ten bands.
-    \item \alert{Why reconstruction, not alignment?} Contrastive/JEPA objectives reward
-      \emph{similar} features but never require \emph{where} --- pixel reconstruction forces
-      sub-pixel spatial layout to survive into the representation.
+    \item Each band enters through its own small input layer; the two instruments run in
+      separate encoder branches (Rubin at $0.2''$, \textit{Euclid} at $0.1''$), are brought onto
+      a shared $0.4''$ grid, and a transformer then mixes information across all ten bands.
+    \item \alert{Why train by predicting pixels?} Methods that only match features across bands
+      reward \emph{similarity} but never pin down \emph{position}; predicting the actual pixels
+      forces the model to keep sub-pixel spatial detail.
   \end{itemize}
 \end{frame}
 
@@ -151,11 +154,11 @@
   \centering
   \includegraphics[width=0.88\textwidth]{fig4_probe.png}
   \begin{itemize}\small
-    \item \textbf{Left:} every band's brightness is \alert{linearly decodable} from the frozen
-      features ($R^2 \approx 0.7$--$0.95$) --- accessible to any downstream head.
-    \item \textbf{Right:} information routing mirrors real SEDs: VIS acts as the universal
-      spatial scaffold; Rubin bands draw on spectral neighbors; NISP $YJH$ form a
-      near-closed block.
+    \item \textbf{Left:} every band's brightness can be \alert{read back out with a simple linear
+      fit} on the frozen features ($R^2 \approx 0.7$--$0.95$) --- so any downstream task can reach it.
+    \item \textbf{Right:} which bands the model leans on mirrors real galaxy spectra: VIS is the
+      shared spatial reference; Rubin bands borrow mostly from their spectral neighbors; the
+      NISP $YJH$ bands mostly inform one another.
   \end{itemize}
 \end{frame}
 
@@ -164,10 +167,10 @@
   \centering
   \includegraphics[height=0.60\textheight]{fig5_detection.png}
   \begin{itemize}\small
-    \item A CenterNet-style head on the frozen fused features, trained on \alert{lightweight
-      classical labels} (SEP $3\sigma$ on VIS) --- no curated catalog supervision.
+    \item A lightweight detection network on the frozen features, trained on \alert{quick
+      classical labels} (a $3\sigma$ source-extractor run on VIS) --- no hand-curated catalog needed.
     \item Matches the \textit{Euclid} Q1 MER catalog on held-out sky; returns
-      \alert{one detection per galaxy} where classical extraction fragments extended systems.
+      \alert{one detection per galaxy} where classical extraction often splits large galaxies into pieces.
   \end{itemize}
 \end{frame}
 
@@ -206,9 +209,9 @@
   \centering
   \includegraphics[width=0.76\textwidth]{fig8_head_correction.png}
   \begin{itemize}\small
-    \item Raw cross-survey scatter: ${\sim}50\mas$, dominated by photon-noise centroiding of
-      faint galaxies. A $0.7$M-parameter position head collapses it to \alert{$14$--$17\mas$}
-      and re-centers every band on the origin.
+    \item Raw cross-survey scatter: ${\sim}50\mas$, set mostly by how hard it is to center
+      faint galaxies in noise. A small ($0.7$M-parameter) position network shrinks it to
+      \alert{$14$--$17\mas$} and re-centers every band.
     \item Against \alert{injected truth}: $19\mas$ at $\mathrm{S/N}=5$ vs.\ ${\sim}50\mas$
       classically --- within ${\sim}2\mas$ of the VIS anchor floor. The head carries VIS-quality
       localization to the other nine bands.
@@ -221,10 +224,11 @@
   \includegraphics[height=0.60\textheight]{fig10_concordance_field.png}
   \begin{itemize}\small
     \item Beneath the scatter: a coherent \alert{$9$--$10\mas$ pattern} between the two surveys'
-      independently Gaia-anchored solutions --- ${\sim}7\mas$ shared by \alert{all ten bands}.
-      Recovered by two independent solvers; the head absorbs it source-by-source (${\to}1.5\mas$).
-    \item A few-mas, degree-scale \alert{map of cross-survey agreement} --- a QA product for
-      joint processing that no single pipeline can produce.
+      positions, each tied independently to \textit{Gaia} --- ${\sim}7\mas$ of it shared by
+      \alert{all ten bands}. Two independent methods find the same pattern; the position network
+      removes it source-by-source (${\to}1.5\mas$).
+    \item A few-mas, degree-scale \alert{map of where the two surveys agree} --- a quality-control
+      product for joint processing that no single pipeline can produce.
   \end{itemize}
 \end{frame}
 
@@ -266,12 +270,12 @@
         \item multi-band detection gains beyond any single-band catalog
           (here: $+0.45$ mag from fusion)
         \item WFI-anchored positions carried into Rubin's seeing-limited bands
-        \item \alert{three-way concordance fields}: Rubin--\textit{Euclid}--\textit{Roman}
-          astrometric agreement mapped at the few-mas level --- systematics QA no
+        \item \alert{three-way agreement maps}: Rubin--\textit{Euclid}--\textit{Roman}
+          positions cross-checked at the few-mas level --- a systematics check no
           single pipeline can produce
-        \item ingest native-resolution frames and solve cross-instrument registration
-          \emph{inside} the model (the ${\sim}3\mas$ NISP resampling residual we detect is
-          exactly this kind of inherited error)
+        \item take in each instrument's frames at native resolution and line them up
+          \emph{inside} the model (the ${\sim}3\mas$ NISP resampling error we detect is
+          exactly this kind of inherited problem)
       \end{itemize}
       \vspace{0.4em}
       \centering
@@ -290,7 +294,7 @@
       pushes \alert{$0.45$ mag deeper} than VIS alone.
     \item \textbf{Astrometry}: VIS-quality positions in every band --- ${\sim}50 \to 14$--$17\mas$,
       $19\mas$ at $\mathrm{S/N}=5$ against injected truth --- and a few-mas
-      \alert{concordance field} between two Gaia-tied solutions.
+      \alert{cross-survey agreement map} between two Gaia-tied solutions.
     \item The frozen stack \alert{transfers zero-shot} to a second deep field. All of this on the
       \emph{earliest} data both surveys have released --- a floor, not a ceiling.
     \item \textit{Roman} slots in as a \alert{third encoder stream}: sharp NIR anchor, three-way
