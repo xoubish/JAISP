@@ -41,8 +41,8 @@
   \large --- and a path to \textit{Roman} ---}
 \author{Shoubaneh Hemmati\\[0.3em]
   {\small with G.\ Helou, Y.-H.\ Lin, R.\ Akeson, C.\,D.\ Dowell, A.\ Faisst, T.\ Greene, D.\ Shupe}}
-\institute{IPAC, California Institute of Technology}
-\date{Roman Science Conference $\cdot$ Caltech/IPAC $\cdot$ July 2026}
+\institute{Caltech/IPAC, NASA JPL}
+\date{Roman Science Conference $\cdot$ July 2026}
 
 \begin{document}
 
@@ -51,43 +51,55 @@
   \titlepage
   \vfill
   \centering
-  \srcnote{Hemmati et al.\ 2026, submitted to ApJ \quad$\cdot$\quad code: github.com/xoubish/JAISP}
+  \srcnote{Hemmati et al.\ 2026, in prep.\ \quad$\cdot$\quad code: github.com/xoubish/JAISP}
 \end{frame}
 
 % ------------------------------------------------------------ 2
 \begin{frame}{Why combine surveys at the pixel level?}
   \begin{itemize}\setlength\itemsep{0.7em}
-    \item Cosmology is now limited by \alert{systematics, not statistics}: the remaining
-      disagreements between cosmological probes are too significant to ignore, but we cannot
-      yet tell measurement error apart from new physics.
+    \item Cosmology is now limited by \alert{systematics, not statistics}: whether the
+      tensions between cosmological probes are real physics or measurement error, settling
+      them requires control of systematics at a level no survey has yet demonstrated.
     \item Rubin/LSST, \textit{Euclid}, and \textit{Roman} will observe overlapping sky from
-      ${\sim}0.3$ to $2\,\mu$m at sub-arcsecond resolution --- in combination they can
-      \alert{calibrate and cross-check one another}, suppressing survey-specific systematics
-      no single survey can control alone.
-    \item Working at the pixel level means handling two instruments with \alert{different
-      resolutions, PSFs, depths, and noise} at the same time --- something no
-      single-survey pipeline was built to do.
-    \item Classical pipelines encode decades of problem-specific effort. The goal is not to
-      discard them, but to move the \emph{joint, cross-instrument} part of the problem into a
-      representation \alert{learned from the pixels themselves}.
+      ${\sim}0.3$ to $2\,\mu$m at sub-arcsecond resolution --- combined at the pixel level,
+      they can \alert{cross-check one another}. But that means handling \alert{different
+      resolutions, PSFs, depths, and noise} at once, which no single-survey pipeline was
+      built to do.
+    \item AI will not replace decades of classical pipeline effort --- certainly not all at
+      once; reaching that maturity takes \alert{comparable, problem-specific work}, and
+      classical methods \alert{inform the learning} along the way (here: they provide our
+      training labels and every benchmark we test against).
   \end{itemize}
 \end{frame}
 
 % ------------------------------------------------------------ 3
+\begin{frame}{Data: the earliest public release of each survey}
+  \centering
+  \includegraphics[width=0.86\textwidth]{fig1_data.png}
+  \begin{itemize}\small
+    \item \textbf{Rubin DP1}: commissioning camera, $ugrizy$, $0.2''$/px, ${\sim}1''$ seeing.
+    \item \textbf{\textit{Euclid} Q1}: VIS and near-infrared $YJH$, $0.1''$/px.
+    \item \textbf{Training field (ECDFS)}: 790 overlapping ten-band tiles over
+      ${\sim}0.2\,\mathrm{deg}^2$.
+    \item \textbf{Out-of-distribution field (EDF-S)}: \alert{set aside untouched} --- the model
+      never sees it --- to test at the end whether everything transfers to new sky.
+  \end{itemize}
+\end{frame}
+
+% ------------------------------------------------------------ 4
 \begin{frame}{Train one model once --- reuse it for every measurement}
   \begin{columns}[T]
     \begin{column}{0.58\textwidth}
-      \textbf{The model trains itself:}
+      \textbf{Self-supervised pretraining} (masked-band reconstruction):
       \begin{itemize}
-        \item hide one of the ten bands; predict that band's image from the other nine
-        \item the images are their own supervision --- \alert{no labels, no catalogs, no simulations}
+        \item mask one of the ten bands; reconstruct it from the other nine
+        \item \alert{no labels, no catalogs, no simulations}
       \end{itemize}
       \vspace{0.5em}
-      \textbf{Then lock it and reuse it:}
+      \textbf{Freeze the encoder, reuse the features:}
       \begin{itemize}
-        \item every measurement afterwards is a small add-on network reading the same
-          stored features, at a tiny fraction of the training cost
-        \item detection \& astrometry working today; photometry \& shapes in preparation
+        \item each task is a \alert{lightweight head} on the same cached features
+        \item detection \& astrometry today; photometry, shapes, redshifts, \ldots\ in preparation
       \end{itemize}
     \end{column}
     \begin{column}{0.38\textwidth}
@@ -96,24 +108,11 @@
         Pretraining: \alert{${\sim}2.5$ GPU-hours}\\[0.2em]
         Model size: ${\sim}9$M parameters\\[0.2em]
         Features: computed once per dataset\\[0.2em]
-        Each new task: a small add-on network\\[0.4em]
+        Each new task: a lightweight head\\[0.4em]
         {\small $\Rightarrow$ marginal cost per task $\to$ small; per field $\to$ zero (as we will see)}
       \end{beamercolorbox}
     \end{column}
   \end{columns}
-\end{frame}
-
-% ------------------------------------------------------------ 4
-\begin{frame}{Data: the earliest public release of each survey}
-  \centering
-  \includegraphics[width=0.86\textwidth]{fig1_data.png}
-  \begin{itemize}\small
-    \item \textbf{Rubin DP1} (commissioning camera, $ugrizy$, $0.2''$/px, ${\sim}1''$ seeing)
-      $+$ \textbf{\textit{Euclid} Q1} (VIS and near-infrared $YJH$, $0.1''$/px): 790 overlapping
-      ten-band tiles over ${\sim}0.2\,\mathrm{deg}^2$ --- the first public release of each survey.
-    \item \alert{A second deep field (EDF-S) is set aside untouched} --- the model never sees
-      it --- to test at the end whether everything transfers to new sky.
-  \end{itemize}
 \end{frame}
 
 % ------------------------------------------------------------ 5
@@ -123,7 +122,7 @@
   \begin{itemize}\small
     \item Rubin stays at $0.2''$/px, \textit{Euclid} at $0.1''$/px --- \alert{no resampling onto a
       shared grid}, so neither instrument's spatial information is thrown away.
-    \item The branches merge on a common $0.4''$ grid, where all ten bands exchange information.
+    \item The branches merge on a common grid, where all ten bands exchange information.
   \end{itemize}
 \end{frame}
 
@@ -149,7 +148,7 @@
   \vfill
   \centering
   \emph{Features that look similar aren't features that know \textbf{where} ---
-    the year of negative results is the design.}
+    contrastive, JEPA, masked autoencoding: we walked the road, and pixels won.}
 \end{frame}
 
 % ------------------------------------------------------------ 6
@@ -163,7 +162,10 @@
       \vspace{1.5em}
       \begin{itemize}\setlength\itemsep{0.8em}
         \item Held-out tiles: withhold one band, predict it from the other nine.
-        \item Rubin $r$, \textit{Euclid} VIS, and NISP $H$ all reconstructed faithfully ---
+        \item The loss is \alert{noise-normalized (per-pixel variance) and weighted toward
+          source pixels} --- the model is graded on astronomical structure, not on
+          reproducing blank sky.
+        \item Every band is reconstructed faithfully (three examples shown) ---
           residuals confined to bright cores and faint galaxy wings.
         \item A band from \alert{one instrument predicted from bands of the other}:
           genuine cross-instrument correspondence, not within-instrument copying.
@@ -187,15 +189,23 @@
 
 % ------------------------------------------------------------ 8
 \begin{frame}{Downstream task 1 --- Detection}
-  \centering
-  \includegraphics[height=0.60\textheight]{fig5_detection.png}
-  \begin{itemize}\small
-    \item A small detection network turns the ten-band features into a \alert{source-evidence
-      map} --- finding sources is still peak-finding, as in classical detection, but on all
-      ten bands at once. Trained on lightweight classical labels ($3\sigma$ VIS extraction).
-    \item Matches the \textit{Euclid} Q1 MER catalog on held-out sky; returns
-      \alert{one detection per galaxy} where classical extraction fragments extended systems.
-  \end{itemize}
+  \begin{columns}[T]
+    \begin{column}{0.50\textwidth}
+      \centering
+      \includegraphics[width=\textwidth]{fig_detection_heads.png}
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \centering
+      \includegraphics[width=0.66\textwidth]{fig5_detection.png}
+      \begin{itemize}\footnotesize
+        \item Same head design, two read-out points: \alert{fused ten-band features}
+          vs.\ native per-band stems.
+        \item Matches the \textit{Euclid} Q1 MER catalog on held-out sky;
+          \alert{one detection per galaxy} where classical extraction fragments
+          extended systems.
+      \end{itemize}
+    \end{column}
+  \end{columns}
 \end{frame}
 
 % ------------------------------------------------------------ 9
@@ -206,27 +216,16 @@
       \includegraphics[width=\textwidth]{fig6_detection_performance.png}
     \end{column}
     \begin{column}{0.40\textwidth}
-      \vspace{0.5em}
-      \begin{itemize}\small\setlength\itemsep{0.6em}
-        \item Depth measured by hiding real sources, dimmed to a chosen magnitude, in the
-          images and counting how many are found: $50\%$ recovery at \alert{VIS $\approx 25.0$},
-          \alert{$+0.45$ mag deeper} than the same detector on VIS alone.
-        \item Against the \textit{Euclid} catalog: \alert{93\% completeness, 95\% purity}
-          (an undercount --- some ``false'' detections are real sources the catalog missed).
+      \vspace{1.5em}
+      \begin{itemize}\small\setlength\itemsep{1.0em}
+        \item Against the \textit{Euclid} Q1 MER catalog on held-out sky:
+          \alert{93\% completeness, 95\% purity}.
+        \item Injection test --- real sources, dimmed to a chosen magnitude, hidden in the
+          images: ten-band detection is \alert{$+0.45$ mag deeper} than the same detector
+          on VIS alone.
+        \item On the deeper \textit{Euclid} DR1 imaging, the same injection test reaches
+          \alert{VIS $\approx 26.0$}.
       \end{itemize}
-      \vspace{0.3em}
-      {\small
-      \begin{tabular}{lcc}
-        \toprule
-        50\% depth (VIS) & ten-band & per-band \\
-        \midrule
-        all 10 bands & $25.0$ & $25.1$ \\
-        VIS only     & $24.6$ & $25.1$ \\
-        \alert{multi-band gain} & \alert{$+0.45$} & $+0.03$ \\
-        \bottomrule
-      \end{tabular}}\\[0.4em]
-      {\small An identical detector reading per-band features gains almost nothing --- the
-      depth comes from the \alert{combined ten-band representation} itself.}
     \end{column}
   \end{columns}
 \end{frame}
@@ -239,9 +238,10 @@
     \item The same sources measured in both surveys disagree by ${\sim}50\mas$ --- mostly
       photon noise in centroiding faint galaxies. A small correction network reads the model's
       features at each source and shrinks this to \alert{$14$--$17\mas$ in every band}.
-    \item Is it real? We hide sources at \alert{known positions}: corrected positions err by
-      only $19\mas$ at $\mathrm{S/N}=5$ (classical: ${\sim}50\mas$) --- nearly the ${\sim}17\mas$
-      precision of the sharp VIS channel itself, now carried into every band.
+    \item Ground-truth check: inject sources at \alert{known positions} and re-measure.
+      At $\mathrm{S/N}=5$ the head recovers them to \alert{$19\mas$}; classical centroiding
+      scatters by ${\sim}50\mas$. That is within ${\sim}2\mas$ of the VIS anchor itself ---
+      \alert{VIS-quality positions in every band}.
   \end{itemize}
 \end{frame}
 
@@ -303,9 +303,6 @@
         \item cross-instrument alignment solved \emph{inside} the model instead of inherited
           from preprocessing (the ${\sim}3\mas$ NISP resampling error we found is exactly that)
       \end{itemize}
-      \vspace{0.4em}
-      \centering
-      \alert{\small Launch window opens August 30 --- the recipe is ready.}
     \end{column}
   \end{columns}
 \end{frame}
