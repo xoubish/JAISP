@@ -40,9 +40,10 @@
   \Large A Joint Rubin--\textit{Euclid} Foundation Model for Detection and Astrometry\\[0.3em]
   \large --- and a path to \textit{Roman} ---}
 \author{Shoubaneh Hemmati\\[0.3em]
-  {\small with G.\ Helou, Y.-H.\ Lin, R.\ Akeson, C.\,D.\ Dowell, A.\ Faisst, T.\ Greene, D.\ Shupe}}
-\institute{Caltech/IPAC, NASA JPL}
-\date{Roman Science Conference $\cdot$ July 2026}
+  {\small with G.\ Helou, Y.-H.\ Lin, R.\ Akeson, C.\,D.\ Dowell, A.\ Faisst, T.\ Greene, D.\ Shupe}\\[0.4em]
+  {\small Caltech/IPAC, NASA JPL}}
+\institute{}
+\date{Shifting Landscapes in Astrophysics: New Frontiers to Explore with \textit{Roman} $\cdot$ July 2026}
 
 \begin{document}
 
@@ -105,11 +106,11 @@
     \begin{column}{0.38\textwidth}
       \begin{beamercolorbox}[sep=0.8em,rounded=true]{block body}
         \textbf{Cost structure}\\[0.4em]
-        Pretraining: \alert{${\sim}2.5$ GPU-hours}\\[0.2em]
+        Pretraining (once): \alert{${\sim}2.5$ GPU-hours}\\[0.2em]
         Model size: ${\sim}9$M parameters\\[0.2em]
-        Features: computed once per dataset\\[0.2em]
+        New sky: \alert{one encoding pass} (no training)\\[0.2em]
         Each new task: a lightweight head\\[0.4em]
-        {\small $\Rightarrow$ marginal cost per task $\to$ small; per field $\to$ zero (as we will see)}
+        {\small $\Rightarrow$ train once $\cdot$ encode each field once $\cdot$ measure many times}
       \end{beamercolorbox}
     \end{column}
   \end{columns}
