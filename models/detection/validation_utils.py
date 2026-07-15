@@ -178,17 +178,26 @@ def _mode_bands(mode):
 
 def eval_injection(det, stems, mer, euclid_dir, rubin_dir, device, modes=('all',),
                    target_mags=(22.5, 23.5, 24.0, 24.5, 25.0, 25.5, 26.0, 26.5),
-                   n_per_mag=10, conf=0.30, rad_as=0.5, match_px=3.0, edge=24, rvis=8, seed=3):
+                   n_per_mag=10, conf=0.30, rad_as=0.5, match_px=3.0, edge=24, rvis=8, seed=3,
+                   donor_mag=(19.5, 21.5), donor_conc=None):
     """Source-recycling injection-recovery completeness vs VIS mag.
 
     For each mode ('all' = inject in all 10 bands; 'vis' = VIS only), inject real
     isolated donors scaled to target mags at empty good-coverage positions and measure
     recovery by the frozen detector. Returns {mode: {mag: (recovered, injected)}}.
+
+    donor_mag bounds the donor pool in MER VIS magnitude. donor_conc, if set,
+    additionally requires the donor's VIS concentration f(<0.3'')/f(<1.5'') to
+    exceed it, restricting to unresolved (star-like) donors: the default pool at
+    19.5-21.5 is dominated by compact GALAXIES (median concentration ~0.3 vs
+    ~0.6 for the real faint population; io/22), so dimming it measures
+    extended-morphology completeness, not point-source depth.
     """
     rng = np.random.default_rng(seed)
     # donor pool: bright, isolated
     sky = cKDTree(np.c_[mer['cRA'], mer['cDEC']]); nn2 = sky.query(np.c_[mer['cRA'], mer['cDEC']], k=2)[0][:, 1]
-    don = (mer['cMAG'] > 19.5) & (mer['cMAG'] < 21.5) & (nn2 > 3 / 3600.)
+    don = (mer['cMAG'] > donor_mag[0]) & (mer['cMAG'] < donor_mag[1]) & (nn2 > 3 / 3600.)
+    yy_, xx_ = np.mgrid[-30:31, -30:31]; RR_ = np.hypot(xx_, yy_)
     DRA, DDEC, DMAG = mer['cRA'][don], mer['cDEC'][don], mer['cMAG'][don]
     rec = {m: {mg: [0, 0] for mg in target_mags} for m in modes}
     for stem in stems:
@@ -211,8 +220,17 @@ def eval_injection(det, stems, mer, euclid_dir, rubin_dir, device, modes=('all',
         for j in din:
             a, b = int(round(float(dx[j]))), int(round(float(dy[j])))
             s = vis[b - 5:b + 6, a - 5:a + 6] - np.median(vis[b - 5:b + 6, a - 5:a + 6]); tot = s[s > 0].sum()
-            if tot > 0 and s[3:8, 3:8][s[3:8, 3:8] > 0].sum() / tot > 0.6:
-                cdon.append(j)
+            if not (tot > 0 and s[3:8, 3:8][s[3:8, 3:8] > 0].sum() / tot > 0.6):
+                continue
+            if donor_conc is not None:
+                st = vis[b - 30:b + 31, a - 30:a + 31]
+                if st.shape != (61, 61):
+                    continue
+                st = st - np.median(np.concatenate([st[0], st[-1], st[:, 0], st[:, -1]]))
+                f15 = st[RR_ <= 15].sum()
+                if f15 <= 0 or st[RR_ <= 3].sum() / f15 < donor_conc:
+                    continue
+            cdon.append(j)
         if len(cdon) < 2:
             continue
         cdon = np.array(cdon)

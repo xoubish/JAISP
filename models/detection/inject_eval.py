@@ -4,9 +4,21 @@ point-source depth per mode (all-10 / VIS-only / NISP-only), the multi-band
 fusion gain (all - vis), and settles CenterNet-vs-Stem. conf=0.30 uniform for
 comparability (the all-vs-vis GAP is robust to conf). Curves saved for Fig 6.
 
-Usage: PYTHONPATH=models python models/detection/inject_eval.py
+Usage: PYTHONPATH=models python models/detection/inject_eval.py [--rvis 30]
+
+--rvis sets the stamp cutout radius in VIS pixels (default 30 = 3''). The
+original 2026-06 runs used rvis=8 (0.8''), which truncates the PSF wings of
+the bright donors relative to the MER *total* magnitudes that label them:
+measured stamp-flux/catalog-flux ratios are ~35% low for the 19.5-21.5 donor
+pool (io/22_injection_nodim_validation.ipynb), so dimmed injections landed
+~0.4-0.5 mag fainter than labeled and the r8 depths are mislabeled
+conservative. At 3'' the VIS wings and the ~1'' Rubin PSF are essentially
+fully enclosed. Results are written to injection_metrics_r{rvis}.json for
+rvis != 8 (the committed r8 file is left untouched); progress is cached
+per (model, tile) in injection_cache_r{rvis}.json so interrupted runs resume.
 """
 from __future__ import annotations
+import argparse
 import json
 import numpy as np
 import torch
@@ -51,30 +63,74 @@ def depth50(mags, comp):
 
 
 def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--rvis', type=int, default=8, help="stamp radius in VIS px (8 = legacy, 30 = 3'')")
+    ap.add_argument('--donor-conc', type=float, default=None,
+                    help="min donor VIS concentration f(<0.3'')/f(<1.5''); 0.65 = star-like donors")
+    ap.add_argument('--donor-faint', type=float, default=21.5, help='faint bound of donor pool')
+    ap.add_argument('--mags', default=None, help='comma-separated target mags (default: module MAGS)')
+    ap.add_argument('--models', default=None, help='comma-separated model names to run (default: all)')
+    ap.add_argument('--tag', default=None, help='output tag override (required with --mags)')
+    args = ap.parse_args()
+    global MAGS, MODELS
+    if args.mags:
+        assert args.tag, '--mags changes the cache schema; pass an explicit --tag'
+        MAGS = tuple(float(x) for x in args.mags.split(','))
+    if args.models:
+        keep = set(args.models.split(','))
+        MODELS = [m for m in MODELS if m[0] in keep]
+    tag = args.tag if args.tag else ((f'_r{args.rvis}' if args.rvis != 8 else '') +
+                                     ('_star' if args.donor_conc else ''))
+    cache_path = OUTD / f'injection_cache{tag}.json'
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     mer = load_mer(str(MER))
     stems = sorted(p.name.replace('_euclid.npz', '')
                    for p in EUCLID.glob('tile_*_patch_25_euclid.npz'))[:N_TILES]
-    print(f'injection on {len(stems)} held-out patch-25 tiles, conf={CONF}, modes=all/vis/nisp')
+    cache = json.load(open(cache_path)) if cache_path.exists() else {}
+    print(f'injection on {len(stems)} held-out patch-25 tiles, conf={CONF}, rvis={args.rvis}, '
+          f'modes=all/vis/nisp ({len(cache)} model-tile pairs cached)')
     results = {}
     for name, kind, ckpt in MODELS:
         print(f'\n=== {name} ===', flush=True)
-        det = load_model(kind, ckpt, device)
-        rec = eval_injection(det, stems, mer, str(EUCLID), str(RUBIN), device,
-                             modes=('all', 'vis', 'nisp'), target_mags=MAGS, conf=CONF)
+        det = None
+        for stem in stems:
+            key = f'{name}|{stem}'
+            if key in cache:
+                continue
+            if det is None:
+                det = load_model(kind, ckpt, device)
+            r1 = eval_injection(det, [stem], mer, str(EUCLID), str(RUBIN), device,
+                                modes=('all', 'vis', 'nisp'), target_mags=MAGS, conf=CONF,
+                                rvis=args.rvis, donor_mag=(19.5, args.donor_faint),
+                                donor_conc=args.donor_conc)
+            cache[key] = {mode: {str(mg): r1[mode][mg] for mg in MAGS} for mode in r1}
+            json.dump(cache, open(cache_path, 'w'))
+            print(f'  {stem}', flush=True)
+        # aggregate this model's tiles from the cache
+        rec = {mode: {mg: [0, 0] for mg in MAGS} for mode in ('all', 'vis', 'nisp')}
+        for stem in stems:
+            tile = cache.get(f'{name}|{stem}')
+            if not tile:
+                continue
+            for mode in rec:
+                for mg in MAGS:
+                    r, n = tile[mode][str(mg)]
+                    rec[mode][mg][0] += r; rec[mode][mg][1] += n
         curves, depths = {}, {}
         for mode in ('all', 'vis', 'nisp'):
             m, c = rec_to_curve(rec[mode], MAGS)
             curves[mode] = {'mag': m.tolist(), 'comp': c.tolist()}
             depths[mode] = depth50(m, c)
             print(f'  {mode:5s}: ' + ' '.join(f'{cc:4.0f}' for cc in c) + f'   50%depth={depths[mode]}')
-        gain = (depths['all'] - depths['vis']) if (depths['all'] and depths['vis']) else None
+        gain = (round(depths['all'] - depths['vis'], 2) if (depths['all'] and depths['vis']) else None)
         print(f'  --> depth all={depths["all"]} vis={depths["vis"]} nisp={depths["nisp"]} | fusion gain(all-vis)={gain}')
-        results[name] = {'curves': curves, 'depth50': depths, 'fusion_gain_mag': gain}
-        del det
-        if device.type == 'cuda':
-            torch.cuda.empty_cache()
-    out = OUTD / 'injection_metrics.json'
+        results[name] = {'curves': curves, 'depth50': depths, 'fusion_gain_mag': gain, 'rvis': args.rvis,
+                         'donor_conc': args.donor_conc, 'donor_mag': [19.5, args.donor_faint]}
+        if det is not None:
+            del det
+            if device.type == 'cuda':
+                torch.cuda.empty_cache()
+    out = OUTD / f'injection_metrics{tag}.json'
     json.dump(results, open(out, 'w'), indent=1)
     print(f'\nsaved -> {out}')
     print('\n=== DEPTH SUMMARY (50% point-source) ===')
