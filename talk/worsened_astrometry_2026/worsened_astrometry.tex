@@ -30,6 +30,13 @@
     \insertframetitle\hfill{\normalfont\small\insertframenumber/\inserttotalframenumber}%
   \end{beamercolorbox}}
 
+% slightly smaller body fonts than the 10pt defaults (size9.clo unavailable)
+\makeatletter
+\renewcommand\normalsize{\@setfontsize\normalsize{9.3}{11.2}}
+\renewcommand\small{\@setfontsize\small{8.6}{10.2}}
+\renewcommand\footnotesize{\@setfontsize\footnotesize{8.0}{9.4}}
+\makeatother
+
 \newcommand{\jaisp}{\textsc{Jaisp}}
 \newcommand{\mas}{\ensuremath{\,\mathrm{mas}}}
 
@@ -52,7 +59,7 @@
       \includegraphics[width=\textwidth]{worseners_panel1.png}
     \column{0.52\textwidth}
       \begin{itemize}
-        \item The head improves the population (raw $\sim$48\mas{} $\to$ 13.4\mas{} median), but 9\% of all measurements end up \alert{farther} from VIS than they started.
+        \item The head improves the population (raw $\sim$48\mas{} $\to$ 13.4\mas{} median, all bands; panel: i band), but 9\% of all measurements end up \alert{farther} from VIS than they started.
         \item Two candidate explanations: (a) those sources were lucky before, and the small raw offset was chance; (b) the model fails on those sources specifically.
       \end{itemize}
   \end{columns}
@@ -94,7 +101,7 @@
   \end{tabular}
   \end{center}
   \vspace{0.2em}
-  {\footnotesize The null shuffles flags within (band, raw offset, S/N) classes, preserving all rates and the VIS-induced raw correlations (hence chance $k\geq2$ is 68, not 0). Robust to the cuts (S/N$>$10: 200 vs 8; all nine bands: 153 vs 12) and to the flag definition, which is a purity dial: from ``above 1:1'' to ``$2\times$ and $+15$\mas'' the $k\geq3$ excess stays 50--180 while the chance background collapses from 214 to 1; the fiducial choice gives $\sim$95\% purity.\par}
+  {\footnotesize The null shuffles flags within (band, raw offset, S/N) classes, preserving all rates and the VIS-induced raw correlations (hence chance $k\geq2$ is 68, not 0). Robust to the cuts (S/N$>$10: 200 vs 8; all nine bands: 153 vs 12) and to the flag definition: the excess exists at every threshold. Tightening just cleans the list of chance interlopers (fiducial: 113 flagged, only $\sim$6 innocent), making it clean enough to study source by source.\par}
 \end{frame}
 
 % --------------------------------------------------------------
@@ -105,7 +112,7 @@
     \item \textbf{(1) The VIS reference?} A bad $\mathrm{pos}_{\rm VIS}$ would worsen all bands at once, a plain measurement error. Gaia says no: for the offender stars the VIS labels sit \textbf{7.0\mas} from the PM-propagated Gaia position, better than the survey average.
     \item \textbf{(2) The WCS?} A solution error is smooth in sky position: it cannot single out one star and spare its neighbours. Offenders show \textbf{no sky clustering} (nearest-offender distance $62''$ vs $66''\pm5''$ for random draws), and the failure \textbf{persists in NISP} (59\% of offenders worsened in all NISP bands), whose astrometric solution is independent of Rubin's.
     \item \textbf{(3) The source itself?} Proper motion correlates with nothing ($\rho=0.01$ against residuals); high-PM stars are actually the head's success cases (it bridges the epochs).
-    \item \textbf{(4) The head's representation} carries positive fingerprints, not just survival by elimination: corrections \textbf{larger than the disagreement they correct} ($|c|\sim28$\mas{} vs raw $\sim$11\mas), directions coherent across all nine bands and \textbf{both instruments} (one wrong belief applied everywhere), and against Gaia the head sits at \textbf{22.9\mas} where every classical measurement of the same stars sits at 5--7\mas.
+    \item \textbf{(4) The head's representation} carries positive fingerprints, not just survival by elimination: corrections \textbf{larger than the disagreement they correct}, directions coherent across all nine bands and \textbf{both instruments} (one wrong belief applied everywhere), and Gaia places the head far from truth where every classical measurement of the same stars is at the floor (numbers on the next slides).
   \end{itemize}
   \vspace{0.3em}
   \textbf{The two-stage verdict:} repetition proves the cause is source-attached and shared; elimination plus fingerprints prove it is the head. The 113 are 0.3\% of the catalog, identifiable one by one.
@@ -123,12 +130,10 @@
       {\footnotesize Population: the 3{,}185 sources with $\geq2$ bright (S/N$>$20) Rubin bands, the only ones the $k$ statistic can score, out of 37{,}796 in the catalog; N labels are the per-bin denominators of that eligible population, and rate $\times$ N summed over bins and classes recovers the 113.}
       \vspace{0.6em}
 
-      Mechanisms tested and \alert{ruled out}, each with a measurement:
+      Further mechanisms tested and \alert{ruled out} (beyond the WCS and proper motion of the previous slide):
       {\footnotesize
       \begin{itemize}
-        \item proper motion ($\rho=0.01$ with residuals)
-        \item tile-edge context (paired test: $+0.1$\mas)
-        \item WCS patches (no sky clustering)
+        \item tile-edge context (paired same-source test: $+0.1$\mas)
         \item companions within $2''$ (13\% vs 20\% control)
         \item VIS saturation (onset $\approx$17, masked not clipped; offender cores pristine)
       \end{itemize}}
@@ -233,20 +238,12 @@
 \end{frame}
 
 % --------------------------------------------------------------
-\begin{frame}{Takeaways and next steps}
-  \textbf{Takeaways}
+\begin{frame}{Takeaways}
   \begin{itemize}
-    \item Above the 1:1 line is two populations: $\sim$77\% benign regression to the corrected floor, $\sim$23\% real failures concentrated in bright point sources (0.3\% of the catalog).
+    \item Above the 1:1 line sit two populations: mostly benign regression to the corrected floor (about three quarters of worsened sources), plus real failures concentrated in bright point sources, 0.3\% of the catalog under the fiducial flag.
     \item Gaia certifies the mechanism: the head, not the labels; a brightness-dependent centroid-convention divergence on healthy stellar profiles, with PM, edges, WCS, companions, and saturation all measured and eliminated.
     \item The calibrated-$\sigma$ router is never worse than either estimator: head performance at the faint end, classical parity on bright stars, zero cost.
     \item The head improves astrometry where classical methods are noise limited and defers where they are systematics limited. That is the paper sentence.
-  \end{itemize}
-  \vspace{0.5em}
-  \textbf{Next steps}
-  \begin{itemize}
-    \item Gaia-supervised head retrain targeting parity ($\sim$5\mas): decides whether the router's bright-star branch is temporary or permanent.
-    \item Residual directions vs local ePSF asymmetry: separates PSF-wings physics from training-rarity statistics.
-    \item Confirm the TILE102043549 VIS-frame feature against a dense external Gaia sample; flag in the released field FITS.
   \end{itemize}
 \end{frame}
 
