@@ -1,0 +1,253 @@
+% ====================================================================
+% JAISP internal seminar deck -- Worsened astrometry: diagnosis and cure
+% Build:  pdflatex worsened_astrometry.tex  (run twice; latexmk broken)
+% Figures pulled from ../../io/_nb23_outputs and ../../io/_nb24_outputs
+% ====================================================================
+\documentclass[aspectratio=169,10pt]{beamer}
+
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{amsmath,amssymb}
+\graphicspath{{figures/}{../../io/_nb23_outputs/}{../../io/_nb24_outputs/}{../../paper/figures/}}
+
+\usetheme{default}
+\usecolortheme{seagull}
+\setbeamertemplate{navigation symbols}{}
+\setbeamertemplate{itemize items}[circle]
+\setbeamertemplate{itemize subitem}[circle]
+
+\definecolor{jaispblue}{RGB}{20,60,110}
+\definecolor{jaispteal}{RGB}{0,120,130}
+\definecolor{jaispaccent}{RGB}{190,70,25}
+\setbeamercolor{frametitle}{fg=white,bg=jaispblue}
+\setbeamercolor{title}{fg=jaispblue}
+\setbeamercolor{structure}{fg=jaispblue}
+\setbeamercolor{alerted text}{fg=jaispaccent}
+\setbeamerfont{frametitle}{series=\bfseries,size=\large}
+\setbeamertemplate{frametitle}{%
+  \vspace*{0.25em}%
+  \begin{beamercolorbox}[wd=\paperwidth,sep=0.5em]{frametitle}%
+    \insertframetitle\hfill{\normalfont\small\insertframenumber/\inserttotalframenumber}%
+  \end{beamercolorbox}}
+
+\newcommand{\jaisp}{\textsc{Jaisp}}
+\newcommand{\mas}{\ensuremath{\,\mathrm{mas}}}
+
+\title{Why Astrometry Is Degraded for a Subset of Objects:\\
+  \Large Diagnosis and Cure in \jaisp{}}
+\author{}
+\institute{}
+\date{July 2026 \quad (internal, ECDFS Q1 production head)}
+
+\begin{document}
+
+\begin{frame}[plain]
+  \titlepage
+\end{frame}
+
+% --------------------------------------------------------------
+\begin{frame}{The mystery: sources above the 1:1 line}
+  \begin{columns}
+    \column{0.46\textwidth}
+      \includegraphics[width=\textwidth]{worseners_panel1.png}
+    \column{0.52\textwidth}
+      \begin{itemize}
+        \item The head improves the population (raw $\sim$48\mas{} $\to$ 13.4\mas{} median), but 9\% of all measurements end up \alert{farther} from VIS than they started.
+        \item Two candidate explanations: (a) those sources were lucky before, and the small raw offset was chance; (b) the model fails on those sources specifically.
+      \end{itemize}
+  \end{columns}
+\end{frame}
+
+% --------------------------------------------------------------
+\begin{frame}{Most of it is chance: regression to the corrected floor}
+  \begin{center}
+    \includegraphics[width=0.78\textwidth]{worseners_panels23.png}
+  \end{center}
+  \vspace{-0.5em}
+  {\small
+  \begin{itemize}
+    \item Left: the same pattern in every S/N slice, each observed curve below its own re-measurement expectation (dashed, $P(\mathrm{worse})=e^{-\mathrm{raw}^2/2\sigma^2}$); pooled over bands, shared photons preserve lucky agreement more often than chance predicts.
+    \item Only the \alert{bright} slice grows a tail at large raw offsets, where chance predicts zero. Right: worseners sit right of the improved because the selection forces it (res $>$ raw truncates the floor distribution from below); the truncated-floor prediction is 21.6\mas{} median versus 17.8 observed. Only the excess beyond ${\sim}40$\mas{} escapes any chance model.
+  \end{itemize}}
+\end{frame}
+
+% --------------------------------------------------------------
+\begin{frame}{Can repetition across bands be chance? Setting up the bookkeeping}
+  \small
+  For one source, per band $b$: fit the classical centroid, form $\mathrm{raw}_b = \mathrm{pos}_b - \mathrm{pos}_{\rm VIS}$; the head predicts a correction $c_b$ from one shared representation; $\mathrm{resid}_b = \mathrm{raw}_b - c_b$. ``Strongly worsened in $b$'' $=$ $|\mathrm{resid}_b| > 1.5\,|\mathrm{raw}_b|$ and worse by $>10$\mas. Rate: 5.6\% of bright measurements.
+  \vspace{0.4em}
+  \begin{itemize}
+    \item \textbf{Independent between bands:} the centroid-fit noise of each band image (different exposures, different photons). If this alone drove worsening, hits on the same source would be independent coin flips: $P(3\ \mathrm{hits}) \approx 0.056^3 \times 10\ \mathrm{triples} \times 3185\ \mathrm{sources} \approx 5$.
+    \item \textbf{Shared for one source:} (1) the VIS reference position, subtracted from every band; (2) the local WCS terms (Rubin bands share Rubin's solution, NISP its own); (3) the source itself (proper motion, colour gradients); (4) the head's shared representation, feeding all nine corrections.
+  \end{itemize}
+  \vspace{0.2em}
+  \begin{center}
+  \begin{tabular}{lcc}
+    \toprule
+    strongly worsened in $\geq k$ Rubin bands & observed & chance (permutation null) \\
+    \midrule
+    $k\geq2$ & 181 & $68\pm7$ \\
+    $k\geq3$ & 113 & $5\pm2$ \\
+    $k\geq4$ & 61 & $0.2$ \\
+    $k\geq5$ & 23 & $0.0$ \\
+    \bottomrule
+  \end{tabular}
+  \end{center}
+  \vspace{0.2em}
+  {\footnotesize The null shuffles flags within (band, raw offset, S/N) classes, preserving all rates and the VIS-induced raw correlations (hence chance $k\geq2$ is 68, not 0). Robust to the cuts (S/N$>$10: 200 vs 8; all nine bands: 153 vs 12) and to the flag definition, which is a purity dial: from ``above 1:1'' to ``$2\times$ and $+15$\mas'' the $k\geq3$ excess stays 50--180 while the chance background collapses from 214 to 1; the fiducial choice gives $\sim$95\% purity.\par}
+\end{frame}
+
+% --------------------------------------------------------------
+\begin{frame}{Which shared cause? Three eliminated by measurement, one convicted}
+  \small
+  \textbf{Stage 1 established a source-attached, band-shared cause, not yet necessarily the head.} Four things are shared; each gets a measurement:
+  \begin{itemize}
+    \item \textbf{(1) The VIS reference?} A bad $\mathrm{pos}_{\rm VIS}$ would worsen all bands at once, a plain measurement error. Gaia says no: for the offender stars the VIS labels sit \textbf{7.0\mas} from the PM-propagated Gaia position, better than the survey average.
+    \item \textbf{(2) The WCS?} A solution error is smooth in sky position: it cannot single out one star and spare its neighbours. Offenders show \textbf{no sky clustering} (nearest-offender distance $62''$ vs $66''\pm5''$ for random draws), and the failure \textbf{persists in NISP} (59\% of offenders worsened in all NISP bands), whose astrometric solution is independent of Rubin's.
+    \item \textbf{(3) The source itself?} Proper motion correlates with nothing ($\rho=0.01$ against residuals); high-PM stars are actually the head's success cases (it bridges the epochs).
+    \item \textbf{(4) The head's representation} carries positive fingerprints, not just survival by elimination: corrections \textbf{larger than the disagreement they correct} ($|c|\sim28$\mas{} vs raw $\sim$11\mas), directions coherent across all nine bands and \textbf{both instruments} (one wrong belief applied everywhere), and against Gaia the head sits at \textbf{22.9\mas} where every classical measurement of the same stars sits at 5--7\mas.
+  \end{itemize}
+  \vspace{0.3em}
+  \textbf{The two-stage verdict:} repetition proves the cause is source-attached and shared; elimination plus fingerprints prove it is the head. The 113 are 0.3\% of the catalog, identifiable one by one.
+\end{frame}
+
+% --------------------------------------------------------------
+\begin{frame}{Who fails: bright point sources, and nothing else}
+  \begin{columns}
+    \column{0.5\textwidth}
+      \includegraphics[width=\textwidth]{nb23_star_brightness_ramp.png}
+    \column{0.48\textwidth}
+      Offender rate for stars ramps 2\% $\to$ \alert{14\%} from VIS 24 to VIS 17; extended sources stay flat.
+      \vspace{0.3em}
+
+      {\footnotesize Population: the 3{,}185 sources with $\geq2$ bright (S/N$>$20) Rubin bands, the only ones the $k$ statistic can score, out of 37{,}796 in the catalog; N labels are the per-bin denominators of that eligible population, and rate $\times$ N summed over bins and classes recovers the 113.}
+      \vspace{0.6em}
+
+      Mechanisms tested and \alert{ruled out}, each with a measurement:
+      {\footnotesize
+      \begin{itemize}
+        \item proper motion ($\rho=0.01$ with residuals)
+        \item tile-edge context (paired test: $+0.1$\mas)
+        \item WCS patches (no sky clustering)
+        \item companions within $2''$ (13\% vs 20\% control)
+        \item VIS saturation (onset $\approx$17, masked not clipped; offender cores pristine)
+      \end{itemize}}
+  \end{columns}
+\end{frame}
+
+% --------------------------------------------------------------
+\begin{frame}{Gaia adjudicates: the head is wrong, the labels are fine}
+  \begin{columns}
+    \column{0.52\textwidth}
+      \includegraphics[width=\textwidth]{nb23_offender_mechanism.png}
+    \column{0.46\textwidth}
+      Against PM-propagated Gaia DR3 (epoch 2024.83), per star:
+      \vspace{0.4em}
+      \begin{center}
+      \begin{tabular}{lcc}
+        \toprule
+        & VIS label & head \\
+        \midrule
+        offender stars ($k\geq3$) & \alert{7.0\mas} & 22.9\mas \\
+        all Gaia stars & 9.5\mas & 12.2\mas \\
+        \bottomrule
+      \end{tabular}
+      \end{center}
+      \vspace{0.5em}
+      Left: offenders receive corrections \alert{larger than the raw disagreement} ($|c|\!\sim\!28$\mas{} vs raw $\sim$11\mas), coherently in every band: the head asserts a center the classical centroids contradict.
+      \vspace{0.4em}
+
+      Reading: a brightness-dependent divergence between the Gaussian-fit convention and the head's feature-encoded center (PSF wings, training rarity, $\sigma_{\rm label}=5$\mas{} loss floor).
+  \end{columns}
+\end{frame}
+
+% --------------------------------------------------------------
+\begin{frame}{The cure: route by uncertainty, do not gate by magnitude}
+  \begin{columns}
+    \column{0.46\textwidth}
+      \includegraphics[width=\textwidth]{nb24_sigma_reliability.png}
+    \column{0.52\textwidth}
+      Two estimators of the same VIS-convention position: classical (error scale $\sigma_{\rm cl}$ from S/N and class) and head-corrected (the head's own $\sigma_{\rm pred}$).
+      \vspace{0.4em}
+      \begin{equation*}
+        \mathrm{combined} = (1-w)\,\mathrm{raw} + w\,\mathrm{resid},
+      \end{equation*}
+      \begin{equation*}
+        w = \frac{\sigma_{\rm cl}^2 - \rho\,\sigma_{\rm cl}\sigma_h}{\sigma_{\rm cl}^2 + \sigma_h^2 - 2\rho\,\sigma_{\rm cl}\sigma_h}
+      \end{equation*}
+      \begin{itemize}
+        \item $\sigma_{\rm pred}$ is nearly perfectly calibrated in bulk ($\alpha=0.99$); the over-confidence lives only in the offender tail.
+        \item The correlation matters: head and classical errors share photons ($\rho\approx0.8$ extended, $0.5$ stars); naive inverse variance costs 2\mas{} at the faint end, the correlation-aware weight costs nothing.
+        \item All calibrations fit on half the tiles; all results from the other half.
+      \end{itemize}
+  \end{columns}
+\end{frame}
+
+% --------------------------------------------------------------
+\begin{frame}{Where the weight moves: the two error bars, side by side}
+  \begin{center}
+    \includegraphics[width=0.80\textwidth]{nb24_sigma_cl_vs_h.png}
+  \end{center}
+  \vspace{-0.5em}
+  {\small
+  \begin{itemize}
+    \item Extended sources: classical centroiding is morphology limited ($\sigma_{\rm cl}\gtrsim20$\mas{} at every S/N); the curves \alert{never cross}, so galaxies are pure head.
+    \item Stars: crossing at S/N $\approx$ 108 (VIS $\approx$ 18.2); the weight (gray) slides 1 $\to$ 0 across VIS 20 $\to$ 17. The magnitude gate is \alert{derived from the uncertainties}, not imposed.
+    \item $\sigma_h$ \alert{rises} for bright stars: the uncertainty channel partially knows the head struggles there; the offenders are the tail where that self-awareness fails.
+  \end{itemize}}
+\end{frame}
+
+% --------------------------------------------------------------
+\begin{frame}{Result: best of both estimators, everywhere}
+  \begin{center}
+    \includegraphics[width=0.92\textwidth]{nb24_gaia_circles_router.png}
+  \end{center}
+  \vspace{-0.3em}
+  \begin{center}
+  \begin{tabular}{lccc}
+    \toprule
+    median radial offset [mas] & classical & head & router \\
+    \midrule
+    all sources & 50.6 & 14.6 & \alert{14.7} \\
+    bright stars, vs Gaia truth & \alert{5.2} & 12.8 & \alert{5.4} \\
+    faint (S/N $<$ 10) & 64.9 & 18.5 & \alert{18.5} \\
+    \bottomrule
+  \end{tabular}
+  \end{center}
+  \vspace{0.3em}
+  Bright stars made worse than classical: 38\% (head) $\to$ 16\% (router), with the large-amplitude halo gone.
+\end{frame}
+
+% --------------------------------------------------------------
+\begin{frame}{The concordance field does not care, and one real discovery}
+  \begin{columns}
+    \column{0.44\textwidth}
+      \includegraphics[width=\textwidth]{nb24_field_hgp_raw_head_router.png}
+    \column{0.54\textwidth}
+      \begin{itemize}
+        \item Refit the field (HGP super-tight, PINN) on router residuals: median change \alert{0.16\mas}, an order of magnitude below the field amplitude. The robust fit had already absorbed the 113 outliers; Figure 10 and the FITS products stand.
+        \item The $\sim$15\mas{} lobe at lower right is \alert{real}: coherent in 8 of 9 bands relative to VIS, normal anchor coverage, both solvers agree, and it sits within MER tile TILE102043549. Eight rulers agree and one does not: a localized feature of the \alert{VIS solution}.
+        \item By construction no VIS-trained correction can remove it; the released raw-field FITS is precisely the map that carries it.
+      \end{itemize}
+  \end{columns}
+\end{frame}
+
+% --------------------------------------------------------------
+\begin{frame}{Takeaways and next steps}
+  \textbf{Takeaways}
+  \begin{itemize}
+    \item Above the 1:1 line is two populations: $\sim$77\% benign regression to the corrected floor, $\sim$23\% real failures concentrated in bright point sources (0.3\% of the catalog).
+    \item Gaia certifies the mechanism: the head, not the labels; a brightness-dependent centroid-convention divergence on healthy stellar profiles, with PM, edges, WCS, companions, and saturation all measured and eliminated.
+    \item The calibrated-$\sigma$ router is never worse than either estimator: head performance at the faint end, classical parity on bright stars, zero cost.
+    \item The head improves astrometry where classical methods are noise limited and defers where they are systematics limited. That is the paper sentence.
+  \end{itemize}
+  \vspace{0.5em}
+  \textbf{Next steps}
+  \begin{itemize}
+    \item Gaia-supervised head retrain targeting parity ($\sim$5\mas): decides whether the router's bright-star branch is temporary or permanent.
+    \item Residual directions vs local ePSF asymmetry: separates PSF-wings physics from training-rarity statistics.
+    \item Confirm the TILE102043549 VIS-frame feature against a dense external Gaia sample; flag in the released field FITS.
+  \end{itemize}
+\end{frame}
+
+\end{document}
