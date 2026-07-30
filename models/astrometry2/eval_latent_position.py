@@ -307,7 +307,7 @@ def evaluate(args):
     # Per-source anchor records (for PINN / field-solver consumption)
     # Keyed by band; values are flat arrays across tiles.
     anchors = {
-        b: {'ra': [], 'dec': [], 'raw': [], 'head_resid': [], 'tiles': [], 'snr': []}
+        b: {'ra': [], 'dec': [], 'raw': [], 'head_resid': [], 'tiles': [], 'snr': [], 'sigma': []}
         for b in all_bands
     }
     n_tiles = 0
@@ -505,6 +505,7 @@ def evaluate(args):
                 )
 
             pred_offset = out['pred_offset_arcsec'].cpu().numpy()
+            pred_sigma = np.exp(out['log_sigma'].cpu().numpy())  # arcsec
             residual = offset_valid - pred_offset
             head_radial = np.sqrt((residual ** 2).sum(axis=1))
 
@@ -565,6 +566,7 @@ def evaluate(args):
             anchors[band_name]['dec'].append(decs.astype(np.float32))
             anchors[band_name]['raw'].append(offset_valid.astype(np.float32))
             anchors[band_name]['head_resid'].append((offset_valid - pred_offset).astype(np.float32))
+            anchors[band_name]['sigma'].append(pred_sigma.astype(np.float32))
             anchors[band_name]['snr'].append(snr_valid.astype(np.float32))
             anchors[band_name]['tiles'].append(np.full(n_keep, tile_id, dtype='U64'))
 
@@ -672,6 +674,7 @@ def evaluate(args):
             cache[f'{key}_dec']  = np.concatenate(a['dec'])
             cache[f'{key}_raw']  = np.concatenate(a['raw'])
             cache[f'{key}_head_resid'] = np.concatenate(a['head_resid'])
+            cache[f'{key}_sigma'] = np.concatenate(a['sigma'])
             cache[f'{key}_snr']  = np.concatenate(a['snr'])
             cache[f'{key}_tiles'] = np.concatenate(a['tiles'])
         anchor_path = Path(args.save_anchors)
