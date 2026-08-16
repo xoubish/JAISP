@@ -69,6 +69,7 @@ def main():
                     help="min donor VIS concentration f(<0.3'')/f(<1.5''); 0.65 = star-like donors")
     ap.add_argument('--donor-faint', type=float, default=21.5, help='faint bound of donor pool')
     ap.add_argument('--mags', default=None, help='comma-separated target mags (default: module MAGS)')
+    ap.add_argument('--n-per-mag', type=int, default=10, help='injections per target mag per tile')
     ap.add_argument('--models', default=None, help='comma-separated model names to run (default: all)')
     ap.add_argument('--tag', default=None, help='output tag override (required with --mags)')
     args = ap.parse_args()
@@ -102,7 +103,7 @@ def main():
             r1 = eval_injection(det, [stem], mer, str(EUCLID), str(RUBIN), device,
                                 modes=('all', 'vis', 'nisp'), target_mags=MAGS, conf=CONF,
                                 rvis=args.rvis, donor_mag=(19.5, args.donor_faint),
-                                donor_conc=args.donor_conc)
+                                donor_conc=args.donor_conc, n_per_mag=args.n_per_mag)
             cache[key] = {mode: {str(mg): r1[mode][mg] for mg in MAGS} for mode in r1}
             json.dump(cache, open(cache_path, 'w'))
             print(f'  {stem}', flush=True)
