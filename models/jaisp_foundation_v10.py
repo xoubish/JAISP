@@ -114,6 +114,21 @@ class InformationMap(nn.Module):
 # Per-band stem
 # ============================================================
 
+def compress_snr(x, mode: str = "clamp"):
+    """Dynamic-range control for image/rms inputs and reconstruction targets.
+
+    'clamp'   : hard clamp to [-10, 100] — v4..v10 behaviour. Erases bright-star
+                cores above per-pixel S/N 100 (nb23 bright-worsener mechanism).
+    'asinh50' : 50*asinh(x/50) — linear below ~50, logarithmic above (v11);
+                monotone and smooth, bright cores keep sub-pixel structure.
+    """
+    if mode == "clamp":
+        return x.clamp(-10.0, 100.0)
+    if mode == "asinh50":
+        return 50.0 * torch.asinh(x / 50.0)
+    raise ValueError(f"unknown input_compression mode: {mode!r}")
+
+
 class BandStem(nn.Module):
     """Per-band CNN stem.
 
@@ -121,10 +136,12 @@ class BandStem(nn.Module):
     is used instead of BatchNorm to handle batch_size=1 cleanly.
     """
 
-    def __init__(self, out_channels: int = 64, clamp_min: float = -10.0, clamp_max: float = 100.0):
+    def __init__(self, out_channels: int = 64, clamp_min: float = -10.0, clamp_max: float = 100.0,
+                 compression: str = "clamp"):
         super().__init__()
         self.clamp_min = float(clamp_min)
         self.clamp_max = float(clamp_max)
+        self.compression = str(compression)
         self.net = nn.Sequential(
             nn.Conv2d(1, 32, 5, padding=2),
             nn.GroupNorm(4, 32),
@@ -136,7 +153,7 @@ class BandStem(nn.Module):
 
     def forward(self, image: torch.Tensor, rms: torch.Tensor) -> torch.Tensor:
         x = image / (rms + 1e-10)
-        x = x.clamp(self.clamp_min, self.clamp_max)
+        x = compress_snr(x, self.compression)
         return self.net(x)
 
 
@@ -452,9 +469,11 @@ class JAISPMixedEncoderV10(nn.Module):
         fused_pixel_scale_arcsec: float = 0.4,
         stream_branch_depths: Optional[Dict[str, int]] = None,
         rubin_concat: bool = True,
+        input_compression: str = "clamp",
     ):
         super().__init__()
         self.band_names = list(band_names)
+        self.input_compression = str(input_compression)
         self.stem_ch = stem_ch
         self.hidden_ch = hidden_ch
         self.fused_pixel_scale_arcsec = float(fused_pixel_scale_arcsec)
@@ -464,7 +483,8 @@ class JAISPMixedEncoderV10(nn.Module):
             stream_branch_depths = compute_stream_depths(fused_pixel_scale_arcsec)
         self.stream_branch_depths = dict(stream_branch_depths)
 
-        self.stems = nn.ModuleDict({b: BandStem(stem_ch) for b in band_names})
+        self.stems = nn.ModuleDict(
+            {b: BandStem(stem_ch, compression=input_compression) for b in band_names})
         self.info_maps = nn.ModuleDict({b: InformationMap() for b in band_names})
 
         self.stream_fusers = nn.ModuleDict({
@@ -648,11 +668,13 @@ class JAISPFoundationV10(nn.Module):
         charbonnier_eps: float = 1e-3,
         core_l2_weight: float = 0.5,
         core_info_threshold: float = 0.5,
+        input_compression: str = "clamp",
     ):
         super().__init__()
         self.band_names = list(band_names)
         self.band_to_idx = {b: i for i, b in enumerate(self.band_names)}
         self.rubin_concat = bool(rubin_concat)
+        self.input_compression = str(input_compression)
 
         self.loss_type = str(loss_type).lower()
         if self.loss_type not in ("l1", "charbonnier"):
@@ -673,6 +695,7 @@ class JAISPFoundationV10(nn.Module):
             fused_pixel_scale_arcsec=fused_pixel_scale_arcsec,
             stream_branch_depths=stream_depths,
             rubin_concat=self.rubin_concat,
+            input_compression=self.input_compression,
         )
 
         num_bands = len(self.band_names)
@@ -749,7 +772,7 @@ class JAISPFoundationV10(nn.Module):
             target_image.shape[-2:], skip_maps=skip_maps,
         )
 
-        target_norm = (target_image / (target_rms + 1e-10)).clamp(-10.0, 100.0)
+        target_norm = compress_snr(target_image / (target_rms + 1e-10), self.input_compression)
         info_w = self.encoder.info_maps[target_band](target_image, target_rms)
         pixel_diff = pred - target_norm
 

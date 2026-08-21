@@ -58,6 +58,7 @@ def load_foundation(
     charbonnier_eps     = float(cfg.get('charbonnier_eps', 1e-3))
     core_l2_weight      = float(cfg.get('core_l2_weight', 0.0))
     core_info_threshold = float(cfg.get('core_info_threshold', 0.5))
+    input_compression   = str(cfg.get('input_compression', 'clamp'))
     common_kwargs = dict(
         band_names=cfg.get('band_names', ALL_BANDS),
         stem_ch=cfg.get('stem_ch', 64),
@@ -80,6 +81,7 @@ def load_foundation(
             charbonnier_eps=charbonnier_eps,
             core_l2_weight=core_l2_weight,
             core_info_threshold=core_info_threshold,
+            input_compression=input_compression,
             **common_kwargs,
         )
     else:
@@ -104,7 +106,9 @@ def load_foundation(
             p.requires_grad = False
 
     if use_v10_class:
-        if loss_type == 'charbonnier' or core_l2_weight > 0:
+        if input_compression != 'clamp':
+            version = 'v11'
+        elif loss_type == 'charbonnier' or core_l2_weight > 0:
             version = 'v10'
         elif rubin_concat:
             version = 'v9'
@@ -114,5 +118,5 @@ def load_foundation(
         version = 'v7'
     print(f'Loaded {version} foundation (fused_scale={fused_scale}, '
           f'rubin_concat={rubin_concat}, loss={loss_type}, '
-          f'core_l2={core_l2_weight}) from {checkpoint_path}')
+          f'core_l2={core_l2_weight}, compression={input_compression}) from {checkpoint_path}')
     return model

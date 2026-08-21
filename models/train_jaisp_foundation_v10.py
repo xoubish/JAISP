@@ -197,6 +197,7 @@ class JAISPTrainerV10:
         charbonnier_eps: float = 1e-3,
         core_l2_weight: float = 0.2,
         core_info_threshold: float = 0.5,
+        input_compression: str = "clamp",
         # Optimisation
         batch_size: int = 1,
         num_workers: int = 4,
@@ -335,6 +336,7 @@ class JAISPTrainerV10:
                 charbonnier_eps=charbonnier_eps,
                 core_l2_weight=core_l2_weight,
                 core_info_threshold=core_info_threshold,
+                input_compression=input_compression,
             ).to(self.device)
         if self.distributed:
             self.model = DDP(
@@ -369,6 +371,7 @@ class JAISPTrainerV10:
                     "charbonnier_eps": charbonnier_eps,
                     "core_l2_weight": core_l2_weight,
                     "core_info_threshold": core_info_threshold,
+            "input_compression": input_compression,
                     "lr": lr, "weight_decay": weight_decay,
                     "epochs": epochs, "warmup_epochs": warmup_epochs,
                     "accum_steps": accum_steps,
@@ -979,6 +982,9 @@ def build_argparser() -> argparse.ArgumentParser:
     p.add_argument("--charbonnier_eps", type=float, default=1e-3)
     p.add_argument("--core_l2_weight", type=float, default=0.2)
     p.add_argument("--core_info_threshold", type=float, default=0.5)
+    p.add_argument("--input_compression", type=str, default="clamp",
+                   choices=["clamp", "asinh50"],
+                   help="v11: 'asinh50' replaces the hard S/N clamp with smooth compression")
     # Optimisation
     p.add_argument("--batch_size", type=int, default=1)
     p.add_argument("--num_workers", type=int, default=4)
