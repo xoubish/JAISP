@@ -129,6 +129,17 @@ def compress_snr(x, mode: str = "clamp"):
     raise ValueError(f"unknown input_compression mode: {mode!r}")
 
 
+def decompress_snr(y, mode: str = "clamp"):
+    """Inverse of compress_snr where it exists. 'clamp' is not invertible above
+    the cap — identity is returned, which is exactly what makes raw-space
+    diagnostics reveal the information destroyed by clamping."""
+    if mode == "clamp":
+        return y
+    if mode == "asinh50":
+        return 50.0 * torch.sinh(y / 50.0)
+    raise ValueError(f"unknown input_compression mode: {mode!r}")
+
+
 class BandStem(nn.Module):
     """Per-band CNN stem.
 

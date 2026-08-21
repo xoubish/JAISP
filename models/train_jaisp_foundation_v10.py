@@ -69,6 +69,7 @@ from jaisp_foundation_v10 import (  # noqa: E402
     JAISPFoundationV10,
     create_optimizer,
     create_scheduler,
+    decompress_snr,
 )
 from jaisp_dataset_v10 import (  # noqa: E402
     JAISPDatasetV10,
@@ -664,6 +665,89 @@ class JAISPTrainerV10:
         per_band_norm = self._reduce_band_losses(band_norm_losses) if band_norm_losses else {}
         return {"loss": avg_loss, "per_band": per_band, "per_band_norm": per_band_norm}
 
+    # --- stratified diagnostics (nb23 clamp lesson: averages hide regimes) ---
+
+    SNR_BIN_EDGES = (2.0, 10.0, 50.0, 100.0, 500.0)
+
+    @torch.no_grad()
+    def _accumulate_diagnostics(self, diag, eval_model, tgt, out) -> None:
+        """Input audit + reconstruction error stratified by raw per-pixel S/N,
+        in compressed space (the objective) and raw space (the science)."""
+        if diag.get("_warned"):
+            return
+        mode = getattr(eval_model, "input_compression", "clamp")
+        img = tgt["image"].float(); rms = tgt["rms"].float()
+        snr_raw = (img / (rms + 1e-10)).flatten()
+        pred = out["pred"].float().flatten()
+        tnorm = out["target_norm"].float().flatten()
+        ok = torch.isfinite(snr_raw) & torch.isfinite(pred) & torch.isfinite(tnorm)
+        snr_raw, pred, tnorm = snr_raw[ok], pred[ok], tnorm[ok]
+        if snr_raw.numel() == 0:
+            return
+        diag["frac"].append((float((snr_raw > 100.0).float().mean()),
+                             float((snr_raw > 50.0).float().mean())))
+        if len(diag["hist"]) < 20:
+            from jaisp_foundation_v10 import compress_snr
+            idx = torch.randint(0, snr_raw.numel(), (min(20000, snr_raw.numel()),),
+                                device=snr_raw.device)
+            diag["hist"].append(compress_snr(snr_raw[idx], mode).cpu().numpy())
+        err_c = (pred - tnorm).abs()
+        err_r = (decompress_snr(pred, mode) - snr_raw).abs()
+        edges = (-float("inf"),) + self.SNR_BIN_EDGES + (float("inf"),)
+        for i in range(len(edges) - 1):
+            m = (snr_raw > edges[i]) & (snr_raw <= edges[i + 1])
+            if m.any():
+                key = f"snr_{edges[i]:g}_{edges[i+1]:g}"
+                c, r, n = diag["bins"].setdefault(key, [0.0, 0.0, 0])
+                diag["bins"][key] = [c + float(err_c[m].sum()),
+                                     r + float(err_r[m].sum()), n + int(m.sum())]
+        loss_val = float(out["loss"])
+        if len(diag["worst"]) < 6 or loss_val > diag["worst"][-1][0]:
+            t2 = out["target_norm"][0, 0].float().cpu().numpy()
+            p2 = out["pred"][0, 0].float().cpu().numpy()
+            cy, cx = np.unravel_index(np.nanargmax(t2), t2.shape)
+            h = 32
+            sl = (slice(max(0, cy - h), cy + h), slice(max(0, cx - h), cx + h))
+            diag["worst"].append((loss_val, t2[sl].copy(), p2[sl].copy()))
+            diag["worst"].sort(key=lambda w: -w[0])
+            diag["worst"] = diag["worst"][:6]
+
+    def _log_diagnostics(self, diag) -> None:
+        if not self.use_wandb or not diag.get("bins"):
+            return
+        log_d = {}
+        if diag["frac"]:
+            fr = np.array(diag["frac"])
+            log_d["diag/frac_pixels_snr_gt100"] = float(fr[:, 0].mean())
+            log_d["diag/frac_pixels_snr_gt50"] = float(fr[:, 1].mean())
+        if diag["hist"]:
+            log_d["diag/stem_input_hist"] = wandb.Histogram(
+                np.concatenate(diag["hist"]), num_bins=128)
+        for key, (c, r, n) in diag["bins"].items():
+            if n > 0:
+                log_d[f"diag/recon_err_compressed_{key}"] = c / n
+                log_d[f"diag/recon_err_rawspace_{key}"] = r / n
+        if diag["worst"]:
+            import matplotlib
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as plt
+            fig, axes = plt.subplots(2, len(diag["worst"]),
+                                     figsize=(2.2 * len(diag["worst"]), 4.6))
+            if len(diag["worst"]) == 1:
+                axes = axes.reshape(2, 1)
+            for k, (lv, t2, p2) in enumerate(diag["worst"]):
+                vmax = np.nanpercentile(t2, 99.5)
+                for row, arr in ((0, t2), (1, p2)):
+                    axes[row, k].imshow(arr, origin="lower", cmap="gray_r",
+                                        vmin=-3, vmax=max(vmax, 5))
+                    axes[row, k].set_xticks([]); axes[row, k].set_yticks([])
+                axes[0, k].set_title(f"loss {lv:.0f}", fontsize=8)
+            axes[0, 0].set_ylabel("truth"); axes[1, 0].set_ylabel("pred")
+            plt.tight_layout()
+            log_d["diag/worst_val_reconstructions"] = wandb.Image(fig)
+            plt.close(fig)
+        wandb.log(log_d)
+
     # --- validation ---------------------------------------------------
 
     @torch.no_grad()
@@ -674,6 +758,7 @@ class JAISPTrainerV10:
         eval_model = self._raw_model()
         eval_model.eval()
         val_losses = []
+        diag = {"hist": [], "bins": {}, "worst": [], "frac": []}
         val_rng = np.random.RandomState(0)
         n_seen = 0
         for sample_list in self.val_loader:
@@ -690,9 +775,19 @@ class JAISPTrainerV10:
                             tgt["band"], tgt["image"], tgt["rms"],
                         )
                     val_losses.append(float(out["loss"]))
+                    try:
+                        self._accumulate_diagnostics(diag, eval_model, tgt, out)
+                    except Exception as exc:
+                        if not diag.get("_warned"):
+                            print(f"[diag] disabled after error: {exc}")
+                            diag["_warned"] = True
                 n_seen += 1
             if n_seen >= 50:
                 break
+        try:
+            self._log_diagnostics(diag)
+        except Exception as exc:
+            print(f"[diag] logging failed: {exc}")
         return float(np.mean(val_losses)) if val_losses else float("inf")
 
     # --- visualization ------------------------------------------------
