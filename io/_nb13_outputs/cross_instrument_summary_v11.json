@@ -1,0 +1,71 @@
+{
+ "checkpoint": "/home/shemmati/Work/Projects/JAISP/models/checkpoints/jaisp_v11_q1_soft/checkpoint_best.pt",
+ "tag": "v11",
+ "fused_scale": 0.4,
+ "n_tiles": 60,
+ "n_sources": 767,
+ "kfold": 6,
+ "target_floor": -0.5,
+ "standardized": true,
+ "alpha_cv": true,
+ "n_kept": {
+  "rubin_u": 203,
+  "rubin_g": 440,
+  "rubin_r": 456,
+  "rubin_i": 414,
+  "rubin_z": 362,
+  "rubin_y": 273,
+  "euclid_VIS": 766,
+  "euclid_Y": 749,
+  "euclid_J": 742,
+  "euclid_H": 748
+ },
+ "diag2b_source_ridge_r2": {
+  "rubin_u": 0.8139317758487618,
+  "rubin_g": 0.9137246409649298,
+  "rubin_r": 0.914134168663104,
+  "rubin_i": 0.9237816569004146,
+  "rubin_z": 0.917731511098435,
+  "rubin_y": 0.876213370540941,
+  "euclid_VIS": 0.7292120874797132,
+  "euclid_Y": 0.851205972487167,
+  "euclid_J": 0.8870911632143744,
+  "euclid_H": 0.8591833561109228
+ },
+ "diag2b_source_mlp_r2": {
+  "rubin_u": 0.8656598379214605,
+  "rubin_g": 0.9229074362665415,
+  "rubin_r": 0.9501282625521222,
+  "rubin_i": 0.9535487856095036,
+  "rubin_z": 0.9330484808112184,
+  "rubin_y": 0.8829876979192098,
+  "euclid_VIS": 0.7976420496900877,
+  "euclid_Y": 0.9049722372243801,
+  "euclid_J": 0.9316180118670067,
+  "euclid_H": 0.9251617584377527
+ },
+ "diag2b_source_ridge_sd": {
+  "rubin_u": 0.07005591239213509,
+  "rubin_g": 0.019138344672327043,
+  "rubin_r": 0.023510685923904415,
+  "rubin_i": 0.028899168019975115,
+  "rubin_z": 0.015154765550086468,
+  "rubin_y": 0.051840996762625394,
+  "euclid_VIS": 0.06213266369487897,
+  "euclid_Y": 0.08237165508359076,
+  "euclid_J": 0.07143055221521483,
+  "euclid_H": 0.12021369668626308
+ },
+ "diag2b_source_mlp_sd": {
+  "rubin_u": 0.07365469958820657,
+  "rubin_g": 0.03140826214505782,
+  "rubin_r": 0.02348237802267972,
+  "rubin_i": 0.023526883607260164,
+  "rubin_z": 0.03217542007378137,
+  "rubin_y": 0.06898886009089358,
+  "euclid_VIS": 0.049450063946748314,
+  "euclid_Y": 0.05650221962648042,
+  "euclid_J": 0.06572195650379906,
+  "euclid_H": 0.058908880305017584
+ }
+}

@@ -29,8 +29,10 @@ CKPT, TAG = sys.argv[1], sys.argv[2]
 DEV_ARG = sys.argv[3] if len(sys.argv) > 3 else 'cuda:0'
 device = torch.device(DEV_ARG)
 
-foundation = load_foundation(str(REPO/'models/checkpoints/jaisp_v10_q1_long/checkpoint_best.pt'),
-                             device=torch.device('cpu'))
+hck0 = torch.load(CKPT, map_location='cpu', weights_only=False)
+_found_path = hck0.get('config', {}).get('foundation_checkpoint',
+                                         'models/checkpoints/jaisp_v10_q1_long/checkpoint_best.pt')
+foundation = load_foundation(str(REPO/_found_path), device=torch.device('cpu'))
 enc = FrozenEncoder(foundation).to(device).eval()
 hck = torch.load(CKPT, map_location='cpu', weights_only=False)
 cfg = hck['config']; sd = hck['head_state_dict']
