@@ -8,6 +8,16 @@
 \usepackage{graphicx}
 \usepackage{booktabs}
 \usepackage{amsmath,amssymb}
+\usepackage{tikz}
+% SUPERSEDED banner for the interim-mitigation (router) slides
+\newcommand{\supersededbanner}{%
+  \begin{tikzpicture}[remember picture,overlay]
+    \node[anchor=north, yshift=-8.2mm, minimum width=\paperwidth, minimum height=4mm,
+          fill=red!12, draw=none, inner sep=1.5pt]
+      at (current page.north)
+      {\scriptsize\bfseries\color{red!70!black}
+       JULY 2026: INTERIM MITIGATION --- superseded by the v11 foundation fix (slides 12--16)};
+  \end{tikzpicture}\vspace{1.4em}}
 \graphicspath{{figures/}{../../io/_nb23_outputs/}{../../io/_nb24_outputs/}{../../paper/figures/}}
 
 \usetheme{default}
@@ -44,7 +54,7 @@
   \Large Diagnosis and Cure in \jaisp{}}
 \author{}
 \institute{}
-\date{July 2026 \quad (internal, ECDFS Q1 production head)}
+\date{July 2026, updated August 2026 \quad (internal, ECDFS Q1)}
 
 \begin{document}
 
@@ -162,12 +172,13 @@
       Left: offenders receive corrections \alert{larger than the raw disagreement} ($|c|\!\sim\!28$\mas{} vs raw $\sim$11\mas), coherently in every band: the head asserts a center the classical centroids contradict.
       \vspace{0.4em}
 
-      Reading: a brightness-dependent divergence between the Gaussian-fit convention and the head's feature-encoded center (PSF wings, training rarity, $\sigma_{\rm label}=5$\mas{} loss floor).
+      Reading (as of July): a brightness-dependent divergence between the Gaussian-fit convention and the head's feature-encoded center. \textit{The actual mechanism was found in August --- slides ahead.}
   \end{columns}
 \end{frame}
 
 % --------------------------------------------------------------
 \begin{frame}{The cure: route by uncertainty, do not gate by magnitude}
+  \supersededbanner
   \begin{columns}
     \column{0.46\textwidth}
       \includegraphics[width=\textwidth]{nb24_sigma_reliability.png}
@@ -190,6 +201,7 @@
 
 % --------------------------------------------------------------
 \begin{frame}{Where the weight moves: the two error bars, side by side}
+  \supersededbanner
   \begin{center}
     \includegraphics[width=0.80\textwidth]{nb24_sigma_cl_vs_h.png}
   \end{center}
@@ -204,6 +216,7 @@
 
 % --------------------------------------------------------------
 \begin{frame}{Result: best of both estimators, everywhere}
+  \supersededbanner
   \begin{center}
     \includegraphics[width=0.92\textwidth]{nb24_gaia_circles_router.png}
   \end{center}
@@ -237,13 +250,95 @@
   \end{columns}
 \end{frame}
 
+
+% ==============================================================
+% AUGUST 2026: THE MECHANISM, THE FIX, AND CLOSURE (v11)
+% ==============================================================
+\begin{frame}{August: the trail --- displacements follow one instrument-locked axis}
+  \begin{columns}
+    \column{0.46\textwidth}
+      \includegraphics[width=\textwidth]{nb23_offender_directions.png}
+    \column{0.52\textwidth}
+      \begin{itemize}
+        \item Offender displacements are \alert{elongated along a single sky axis} (PA $\approx160^\circ$, both signs, no net direction); controls are isotropic.
+        \item The axis \alert{rotates with the Euclid instrument} between ECDFS and EDF-S (spike phases $28.9^\circ\to49.7^\circ$).
+        \item Published VIS geometry (strut angles + four-corner CCD readout) predicts the readout axis \alert{1.9$^\circ$} from the measured one, with zero tuned parameters --- in both fields, one parity.
+        \item Yet a signed flux stack shows \alert{no trailed light} (CTI ruled out), and rotating a star's own pixels rotates its displacement: the cause lives in the images as the network sees them.
+      \end{itemize}
+  \end{columns}
+\end{frame}
+
+% --------------------------------------------------------------
+\begin{frame}{The mechanism: a hard S/N clamp erases bright-star cores}
+  \begin{center}
+    \includegraphics[width=0.95\textwidth]{nb23_clamp_onset.png}
+  \end{center}
+  \vspace{-0.4em}
+  {\small
+  \begin{itemize}
+    \item Every input enters the foundation as \texttt{(image/rms).clamp(-10, 100)} --- unchanged since v4. Above per-pixel S/N 100 a star's core is a \alert{featureless plateau}; the reconstruction targets are clamped identically, so \alert{no loss ever saw the missing information}.
+    \item Causal test: scale a real star's flux $\times$50 --- the head places the \emph{same star} to 1--2\mas{} for peak S/N 10--90, and the displacement \alert{switches on exactly above S/N $\approx$ 100} (a threshold, not a trend), reaching the archived 11--26\mas{} at native flux.
+    \item Rotating the star's local image $180^\circ$ flips the displacement (median $\cos=+0.91$): the direction is written in the clamped plateau's elongated boundary.
+  \end{itemize}}
+\end{frame}
+
+% --------------------------------------------------------------
+\begin{frame}{The fix is one line, then retrain: v11}
+  \begin{center}
+    \includegraphics[width=0.95\textwidth]{nb30_v11_gate.png}
+  \end{center}
+  \vspace{-0.4em}
+  {\small
+  \begin{itemize}
+    \item \texttt{clamp(-10,100)} $\to$ \texttt{50*asinh(x/50)} in stems \emph{and} reconstruction targets; foundation retrained from scratch, identical recipe (\texttt{jaisp\_v11\_q1\_soft}).
+    \item Gate: reconstruction parity in bulk (bright-pixel $r$ 0.9412 vs 0.9419); the v10 error \alert{wall above S/N 100} is gone (left); frozen centroid probe on bright stars \alert{14.1 $\to$ 9.6\mas} (middle); photometry decodability up.
+    \item The position head is retrained \alert{unchanged} --- no side-channel, no reweighting. The architecture was never the problem; its inputs were.
+  \end{itemize}}
+\end{frame}
+
+% --------------------------------------------------------------
+\begin{frame}{Closure: the census rerun --- v10 and v11 side by side}
+  \begin{center}
+    \includegraphics[width=\textwidth]{nb23_v11_closure.png}
+  \end{center}
+  \vspace{-0.4em}
+  {\small
+  \begin{itemize}
+    \item The star--brightness ramp is \alert{flat} (2--4\% at all magnitudes, indistinguishable from galaxies; was 2 $\to$ 14.4\%).
+    \item The S/N $\gtrsim$ 100 upturn is \alert{reversed}: the v11 head sits at 5--7\mas{} where classical raw is 10--14 --- it now adds value on bright stars. General Gaia stars: head at label parity (10.8 vs 9.5\mas).
+    \item Faint-end headline untouched (raw 47.9 $\to$ 13.3\mas, 91\% improved --- identical to v10). Under v11 the router no longer improves any regime: the interim mitigation is \alert{retired by the cure}.
+  \end{itemize}}
+\end{frame}
+
+% --------------------------------------------------------------
+\begin{frame}{The original mystery is closed --- and it was hiding a smaller one}
+  \small
+  \textbf{Decomposition of the 113 repeat offenders:}
+  \begin{center}
+  \begin{tabular}{lll}
+    \toprule
+    $\sim$46 clamp-driven bright stars & \alert{cured by v11} & (the ramp, the upturn, the axis) \\
+    $\sim$67 source-specific cases & \alert{survive both foundations} & (the new open question) \\
+    \bottomrule
+  \end{tabular}
+  \end{center}
+  \vspace{0.4em}
+  The survivors: the \emph{same sources} under two independently trained foundations, same signature (raw $\sim$10\mas, coherent $\sim$30\mas{} head displacement; Gaia still against the head, 29.5 vs 9.6\mas{} for the 8 Gaia stars among them). Not brightness-selected, not resolved blends (12\% vs 20\% control), not extended.
+  \vspace{0.4em}
+  \begin{itemize}
+    \item Cause is outside the foundation: in the data or labels of these specific sources, or in what both trainings share (label pipeline, tiles). Suspects: \alert{sub-arcsecond pairs below MER's deblending limit}; convention-ambiguous profiles with unstable training labels.
+    \item 0.2\% of the catalog; the uncertainty router continues to cover them in the meantime.
+  \end{itemize}
+\end{frame}
+
 % --------------------------------------------------------------
 \begin{frame}{Takeaways}
   \begin{itemize}
-    \item Above the 1:1 line sit two populations: mostly benign regression to the corrected floor (about three quarters of worsened sources), plus real failures concentrated in bright point sources, 0.3\% of the catalog under the fiducial flag.
-    \item Gaia certifies the mechanism: the head, not the labels; a brightness-dependent centroid-convention divergence on healthy stellar profiles, with PM, edges, WCS, companions, and saturation all measured and eliminated.
-    \item The calibrated-$\sigma$ router is never worse than either estimator: head performance at the faint end, classical parity on bright stars, zero cost.
-    \item The head improves astrometry where classical methods are noise limited and defers where they are systematics limited. That is the paper sentence.
+    \item Above the 1:1 line sit two populations: mostly benign regression to the corrected floor, plus real failures concentrated in bright point sources --- diagnosed by \alert{repetition across bands}, not by any average metric.
+    \item The mechanism was one line of preprocessing: a hard per-pixel S/N clamp that erased bright-star cores --- invisible to every loss curve because the targets were clamped too. \alert{Audit your input transforms; stratify metrics by regime.}
+    \item Correlational forensics narrowed the suspects; \alert{causal interventions} (flux sweep, rotation) convicted. The fix is soft compression + retrain (v11): ramp flat, upturn reversed, faint-end headline untouched, detection deeper.
+    \item The interim uncertainty router did its job and is retired by the cure; 67 source-specific cases remain --- the next investigation.
+    \item The paper sentence, updated: the head improves astrometry where classical methods are noise limited, and now \alert{matches or beats them} where they are systematics limited.
   \end{itemize}
 \end{frame}
 
