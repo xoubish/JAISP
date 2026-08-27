@@ -16,7 +16,7 @@
           fill=red!12, draw=none, inner sep=1.5pt]
       at (current page.north)
       {\scriptsize\bfseries\color{red!70!black}
-       JULY 2026: INTERIM MITIGATION --- superseded by the v11 foundation fix (slides 12--17)};
+       JULY 2026: INTERIM MITIGATION --- superseded by the v11 foundation fix (slides 13--18)};
   \end{tikzpicture}\vspace{1.4em}}
 \graphicspath{{figures/}{../../io/_nb23_outputs/}{../../io/_nb24_outputs/}{../../paper/figures/}}
 
@@ -85,6 +85,20 @@
   \begin{itemize}
     \item Left: the same pattern in every S/N slice, each observed curve below its own re-measurement expectation (dashed, $P(\mathrm{worse})=e^{-\mathrm{raw}^2/2\sigma^2}$); pooled over bands, shared photons preserve lucky agreement more often than chance predicts.
     \item Only the \alert{bright} slice grows a tail at large raw offsets, where chance predicts zero. Right: worseners sit right of the improved because the selection forces it (res $>$ raw truncates the floor distribution from below); the truncated-floor prediction is 21.6\mas{} median versus 17.8 observed. Only the excess beyond ${\sim}40$\mas{} escapes any chance model.
+  \end{itemize}}
+\end{frame}
+
+% --------------------------------------------------------------
+\begin{frame}{Flash-forward: the same panel under v11 --- and why it hides the disease}
+  \begin{center}
+    \includegraphics[width=0.74\textwidth]{worseners_panels23_v11.png}
+  \end{center}
+  \vspace{-0.5em}
+  {\footnotesize
+  \begin{itemize}
+    \item After the fix (v11, slides ahead) this projection looks \alert{nearly identical} --- because the S/N$>$30 slice \alert{dilutes} the clamped stars (S/N$\gtrsim$100) with many unclamped ones. Cut the same plot at \alert{S/N$>$100}, raw 10--16\mas{} --- exactly where the affected stars live --- and the fix is dramatic: worsened \alert{48\% $\to$ 11\%}.
+    \item The tail beyond raw $\sim$60\mas{} that escapes chance is \alert{neither} the clamp population \alert{nor} the later survivors (both live at small raw): it is 9 isolated $k{=}0$ large-amplitude flukes (res $\sim$100\mas{} in \emph{both} versions; likely matching/blend errors).
+    \item Lesson: marginal projections have wildly different sensitivity to the same population --- which is why the next slide counts \alert{repetition across bands} instead.
   \end{itemize}}
 \end{frame}
 
