@@ -16,7 +16,7 @@
           fill=red!12, draw=none, inner sep=1.5pt]
       at (current page.north)
       {\scriptsize\bfseries\color{red!70!black}
-       JULY 2026: INTERIM MITIGATION --- superseded by the v11 foundation fix (slides 12--16)};
+       JULY 2026: INTERIM MITIGATION --- superseded by the v11 foundation fix (slides 12--17)};
   \end{tikzpicture}\vspace{1.4em}}
 \graphicspath{{figures/}{../../io/_nb23_outputs/}{../../io/_nb24_outputs/}{../../paper/figures/}}
 
@@ -69,7 +69,7 @@
       \includegraphics[width=\textwidth]{worseners_panel1.png}
     \column{0.52\textwidth}
       \begin{itemize}
-        \item The head improves the population (raw $\sim$48\mas{} $\to$ 13.4\mas{} median, all bands; panel: i band), but 9\% of all measurements end up \alert{farther} from VIS than they started.
+        \item The head (\alert{v10 production}) improves the population (raw $\sim$48\mas{} $\to$ 13.4\mas{} median, all bands; panel: i band), but 9\% of all measurements end up \alert{farther} from VIS than they started.
         \item Two candidate explanations: (a) those sources were lucky before, and the small raw offset was chance; (b) the model fails on those sources specifically.
       \end{itemize}
   \end{columns}
@@ -78,7 +78,7 @@
 % --------------------------------------------------------------
 \begin{frame}{Most of it is chance: regression to the corrected floor}
   \begin{center}
-    \includegraphics[width=0.78\textwidth]{worseners_panels23.png}
+    \includegraphics[width=0.78\textwidth]{worseners_panels23.png}\\{\scriptsize v10 production head}
   \end{center}
   \vspace{-0.5em}
   {\small
@@ -91,7 +91,7 @@
 % --------------------------------------------------------------
 \begin{frame}{Can repetition across bands be chance? Setting up the bookkeeping}
   \small
-  For one source, per band $b$: fit the classical centroid, form $\mathrm{raw}_b = \mathrm{pos}_b - \mathrm{pos}_{\rm VIS}$; the head predicts a correction $c_b$ from one shared representation; $\mathrm{resid}_b = \mathrm{raw}_b - c_b$. ``Strongly worsened in $b$'' $=$ $|\mathrm{resid}_b| > 1.5\,|\mathrm{raw}_b|$ and worse by $>10$\mas. Rate: 5.6\% of bright measurements.
+  For one source, per band $b$: fit the classical centroid, form $\mathrm{raw}_b = \mathrm{pos}_b - \mathrm{pos}_{\rm VIS}$; the head (v10) predicts a correction $c_b$ from one shared representation; $\mathrm{resid}_b = \mathrm{raw}_b - c_b$. ``Strongly worsened in $b$'' $=$ $|\mathrm{resid}_b| > 1.5\,|\mathrm{raw}_b|$ and worse by $>10$\mas. Rate: 5.6\% of bright measurements.
   \vspace{0.4em}
   \begin{itemize}
     \item \textbf{Independent between bands:} the centroid-fit noise of each band image (different exposures, different photons). If this alone drove worsening, hits on the same source would be independent coin flips: $P(3\ \mathrm{hits}) \approx 0.056^3 \times 10\ \mathrm{triples} \times 3185\ \mathrm{sources} \approx 5$.
@@ -125,7 +125,7 @@
     \item \textbf{(4) The head's representation} carries positive fingerprints, not just survival by elimination: corrections \textbf{larger than the disagreement they correct}, directions coherent across all nine bands and \textbf{both instruments} (one wrong belief applied everywhere), and Gaia places the head far from truth where every classical measurement of the same stars is at the floor (numbers on the next slides).
   \end{itemize}
   \vspace{0.3em}
-  \textbf{The two-stage verdict:} repetition proves the cause is source-attached and shared; elimination plus fingerprints prove it is the head. The 113 are 0.3\% of the catalog, identifiable one by one.
+  \textbf{The two-stage verdict:} repetition proves the cause is source-attached and shared; elimination plus fingerprints prove it is the head. The 113 are 0.3\% of the catalog, identifiable one by one. {\footnotesize (All measurements on this slide: v10 production head.)}
 \end{frame}
 
 % --------------------------------------------------------------
@@ -134,7 +134,7 @@
     \column{0.5\textwidth}
       \includegraphics[width=\textwidth]{nb23_star_brightness_ramp.png}
     \column{0.48\textwidth}
-      Offender rate for stars ramps 2\% $\to$ \alert{14\%} from VIS 24 to VIS 17; extended sources stay flat.
+      Offender rate (\alert{v10 production head}) for stars ramps 2\% $\to$ \alert{14\%} from VIS 24 to VIS 17; extended sources stay flat.
       \vspace{0.3em}
 
       {\footnotesize Population: the 3{,}185 sources with $\geq2$ bright (S/N$>$20) Rubin bands, the only ones the $k$ statistic can score, out of 37{,}796 in the catalog; N labels are the per-bin denominators of that eligible population, and rate $\times$ N summed over bins and classes recovers the 113.}
@@ -161,7 +161,7 @@
       \begin{center}
       \begin{tabular}{lcc}
         \toprule
-        & VIS label & head \\
+        & VIS label & head (v10) \\
         \midrule
         offender stars ($k\geq3$) & \alert{7.0\mas} & 22.9\mas \\
         all Gaia stars & 9.5\mas & 12.2\mas \\
@@ -243,7 +243,7 @@
       \includegraphics[width=\textwidth]{nb24_field_hgp_raw_head_router.png}
     \column{0.54\textwidth}
       \begin{itemize}
-        \item Refit the field (HGP super-tight, PINN) on router residuals: median change \alert{0.16\mas}, an order of magnitude below the field amplitude. The robust fit had already absorbed the 113 outliers; Figure 10 and the FITS products stand.
+        \item Refit the field (HGP super-tight, PINN) on router residuals (v10-era archives): median change \alert{0.16\mas}, an order of magnitude below the field amplitude. The robust fit had already absorbed the 113 outliers; Figure 10 and the FITS products stand.
         \item The $\sim$15\mas{} lobe at lower right is \alert{real}: coherent in 8 of 9 bands relative to VIS, normal anchor coverage, both solvers agree, and it sits within MER tile TILE102043549. Eight rulers agree and one does not: a localized feature of the \alert{VIS solution}.
         \item By construction no VIS-trained correction can remove it; the released raw-field FITS is precisely the map that carries it.
       \end{itemize}
@@ -257,7 +257,7 @@
 \begin{frame}{August: the trail --- displacements follow one instrument-locked axis}
   \begin{columns}
     \column{0.46\textwidth}
-      \includegraphics[width=\textwidth]{nb23_offender_directions.png}
+      \includegraphics[width=\textwidth]{nb23_offender_directions.png}\\{\scriptsize v10 archive (ECDFS)}
     \column{0.52\textwidth}
       \begin{itemize}
         \item Offender displacements are \alert{elongated along a single sky axis} (PA $\approx160^\circ$, both signs, no net direction); controls are isotropic.
@@ -271,14 +271,28 @@
 % --------------------------------------------------------------
 \begin{frame}{The mechanism: a hard S/N clamp erases bright-star cores}
   \begin{center}
-    \includegraphics[width=0.95\textwidth]{nb23_clamp_onset.png}
+    \includegraphics[width=0.95\textwidth]{nb23_clamp_onset.png}\\{\scriptsize causal interventions on the v10 production model}
   \end{center}
   \vspace{-0.4em}
   {\small
   \begin{itemize}
     \item Every input enters the foundation as \texttt{(image/rms).clamp(-10, 100)} --- unchanged since v4. Above per-pixel S/N 100 a star's core is a \alert{featureless plateau}; the reconstruction targets are clamped identically, so \alert{no loss ever saw the missing information}.
     \item Causal test: scale a real star's flux $\times$50 --- the head places the \emph{same star} to 1--2\mas{} for peak S/N 10--90, and the displacement \alert{switches on exactly above S/N $\approx$ 100} (a threshold, not a trend), reaching the archived 11--26\mas{} at native flux.
-    \item Rotating the star's local image $180^\circ$ flips the displacement (median $\cos=+0.91$): the direction is written in the clamped plateau's elongated boundary.
+    \item Rotating the star's local image $180^\circ$ flips the displacement (median $\cos=+0.91$): each star's error is deterministic, written in its own pixels.
+  \end{itemize}}
+\end{frame}
+
+% --------------------------------------------------------------
+\begin{frame}{Why an axis from a scalar cut? The shape of what survives}
+  \begin{center}
+    \includegraphics[width=0.92\textwidth]{clamp_mask_stack.png}
+  \end{center}
+  \vspace{-0.6em}
+  {\footnotesize
+  \begin{itemize}
+    \item The clamp is isotropic, but the surviving information is not: per star the S/N=100 plateau (left, red) is a ragged blob, yet the \alert{stack of 131 masks} (middle) is measurably elliptical --- \alert{axis ratio 1.085} (CI [1.05, 1.20]), \alert{major axis PA $142^\circ\pm15^\circ$}, consistent with the offender displacement axis ($160^\circ\pm9^\circ$) and the instrument frame.
+    \item An elongated boundary constrains the centroid weakly along its major axis: errors along one axis, both signs, no net drift --- the measured $m{=}2$-without-$m{=}1$ signature; the flux stack shows \alert{no trailed light} (CTI ruled out).
+    \item Under v11 the same elongation is still in the images --- with the core restored, the head stops leaning on the boundary and the axis signal vanishes. {\footnotesize Per-star sign mechanism (subpixel phase?) untested.}
   \end{itemize}}
 \end{frame}
 
