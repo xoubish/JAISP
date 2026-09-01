@@ -217,16 +217,35 @@ def evaluate(args):
     # Load model — use bottleneck_window from head checkpoint (won't auto-scale)
     head_ckpt = torch.load(args.head_checkpoint, map_location='cpu', weights_only=False)
     head_cfg = head_ckpt.get('config', {})
-    bn_win = head_cfg.get('bottleneck_window', 5) or 5
+    if 'variant' in head_cfg:
+        # train_latent_position_v2 checkpoints: window was auto-scaled (0 = auto)
+        bn_win = head_cfg.get('bottleneck_window', 0) or 0
+    else:
+        bn_win = head_cfg.get('bottleneck_window', 5) or 5
 
     frozen_encoder, head = load_latent_position_head(
         args.foundation_checkpoint, device=device,
         bottleneck_window=bn_win,
         stem_window=head_cfg.get('stem_window', 17) or 17,
     )
+    if head_ckpt.get('head_class') in ('BandAwareHead', 'BoundedBandAwareHead', 'AnchoredHead'):
+        import astrometry2.train_latent_position_v2 as tlp2
+        head_cls = getattr(tlp2, head_ckpt['head_class'])
+        head = head_cls(
+            hidden_ch=head.bn_conv[1].in_channels,
+            stem_ch=head.stem_conv[0].in_channels,
+            bottleneck_out=head.bn_conv[1].out_channels,
+            stem_out=head.stem_conv[2].out_channels,
+            mlp_hidden=128,
+            bottleneck_window=head.bottleneck_window,
+            stem_window=head.stem_window,
+            fused_pixel_scale=head.fused_pixel_scale,
+            vis_pixel_scale=head.vis_pixel_scale,
+        ).to(device)
     head.load_state_dict(head_ckpt['head_state_dict'])
     head.eval()
-    print(f'Loaded head from {args.head_checkpoint} (epoch {head_ckpt.get("epoch", "?")})')
+    print(f'Loaded head from {args.head_checkpoint} '
+          f'(epoch {head_ckpt.get("epoch", "?")}, class {type(head).__name__}, bn_win={head.bottleneck_window})')
 
     # Optional PSF model for centroiding / inference-time sub-pixel polish.
     psf_field = None
@@ -290,6 +309,14 @@ def evaluate(args):
             print(f'  detector foundation: {det_foundation_ckpt}')
 
     pairs = discover_tile_pairs(args.rubin_dir, args.euclid_dir)
+
+    if getattr(args, 'only_patches', None):
+
+        _ids = {x.strip() for x in args.only_patches.split(',') if x.strip()}
+
+        pairs = [q for q in pairs if q[0].rsplit('_patch_', 1)[-1] in _ids]
+
+        print(f'Restricted to patches {sorted(_ids)}: {len(pairs)} tiles')
     if args.max_tiles > 0:
         pairs = pairs[:args.max_tiles]
     print(f'Evaluating on {len(pairs)} tiles')
@@ -494,6 +521,20 @@ def evaluate(args):
             for i in range(n_keep):
                 pix2sky[i] = local_vis_pixel_to_sky_matrix(vwcs, band_pos_valid[i])
 
+            head_kwargs = {}
+            _hcls = type(head).__name__
+            if _hcls in ('BandAwareHead', 'BoundedBandAwareHead', 'AnchoredHead'):
+                from astrometry2.train_latent_position_v2 import (
+                    LAM as _LAM, FWHM_MAS as _FWHM, classical_sigma_px as _csp)
+                _short = band_name.split('_', 1)[1] if band_name.startswith('rubin_') else band_name
+                head_kwargs['lam'] = torch.full(
+                    (n_keep,), _LAM[_short], device=device, dtype=torch.float32)
+                if _hcls == 'BoundedBandAwareHead':
+                    head_kwargs['bound_px'] = torch.from_numpy(
+                        3. * _csp(_FWHM[_short], snr_valid)).float().to(device)
+                elif _hcls == 'AnchoredHead':
+                    head_kwargs['vis_img'] = torch.from_numpy(
+                        vis_img)[None, None].float().to(device)
             with torch.no_grad():
                 out = head(
                     enc_out['bottleneck'],
@@ -502,6 +543,7 @@ def evaluate(args):
                     torch.from_numpy(pix2sky).to(device),
                     enc_out['fused_hw'],
                     vis_hw,
+                    **head_kwargs,
                 )
 
             pred_offset = out['pred_offset_arcsec'].cpu().numpy()
@@ -684,6 +726,120 @@ def evaluate(args):
         print(f'Saved {total} anchors to {anchor_path}')
 
     _make_figure(band_results, all_bands, all_raw, all_hd, all_snr, out_dir)
+    _make_raw_vs_head_figure(anchors, all_bands, out_dir,
+                             mer_cat=getattr(args, 'mer_compact_cat', None),
+                             hsize_cat=getattr(args, 'hsize_cat', None))
+
+
+def _make_raw_vs_head_figure(anchors, all_bands, out_dir, mer_cat=None, hsize_cat=None):
+    """nb31-style raw-vs-head 2D-histogram diagnostic (density, S/N, and — when
+    the MER compact catalogs are available — VIS mag and size). Saved as
+    raw_vs_head_4panel.png; never fatal."""
+    try:
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+        import matplotlib.patheffects as pe
+        from matplotlib.colors import LogNorm
+        from scipy.stats import binned_statistic_2d
+        from scipy.spatial import cKDTree
+
+        raw = []; res = []; snr = []; ra = []; dec = []
+        for b in all_bands:
+            a = anchors[b]
+            if not a['ra']:
+                continue
+            raw.append(np.linalg.norm(np.concatenate(a['raw']), axis=1) * 1000.)
+            res.append(np.linalg.norm(np.concatenate(a['head_resid']), axis=1) * 1000.)
+            snr.append(np.concatenate(a['snr']))
+            ra.append(np.concatenate(a['ra'])); dec.append(np.concatenate(a['dec']))
+        raw = np.concatenate(raw); res = np.concatenate(res)
+        snr = np.concatenate(snr); ra = np.concatenate(ra); dec = np.concatenate(dec)
+        m = (raw > 0) & (res > 0) & np.isfinite(raw) & np.isfinite(res)
+        raw, res, snr, ra, dec = raw[m], res[m], snr[m], ra[m], dec[m]
+        cosd = np.cos(np.deg2rad(np.median(dec)))
+
+        panels = [(None, 'source count (log)'), (snr, 'median S/N')]
+        for cat_path, cols, scale, label in [
+            (mer_cat, ('ra', 'dec', 'mag_vis'), 1.0, 'median VIS mag'),
+            (hsize_cat, ('ra', 'dec', 'semimajor_axis'), 0.1, 'median size (semimajor) [arcsec]'),
+        ]:
+            if not cat_path or not Path(cat_path).exists():
+                continue
+            from astropy.io import fits as _fits
+            cd = _fits.open(cat_path)[1].data
+            t = cKDTree(np.column_stack([np.asarray(cd[cols[0]], float) * cosd,
+                                         np.asarray(cd[cols[1]], float)]))
+            dist, idx = t.query(np.column_stack([ra * cosd, dec]), k=1)
+            vals = np.where(dist * 3600 < 0.5,
+                            np.asarray(cd[cols[2]], float)[idx] * scale, np.nan)
+            panels.append((vals, label))
+
+        LO, HI, NB, Nmin = 0.5, 250., 55, 10
+        edges = np.geomspace(LO, HI, NB + 1)
+        ncol = 2 if len(panels) <= 2 else 2
+        nrow = int(np.ceil(len(panels) / 2))
+        fig, axes = plt.subplots(nrow, ncol, figsize=(14, 6.3 * nrow))
+        axes = np.atleast_1d(axes).ravel()
+        for ax, (C, lab) in zip(axes, panels):
+            if C is None:
+                cnt = binned_statistic_2d(raw, res, None, 'count', bins=[edges, edges]).statistic
+                grid = np.ma.masked_where(cnt < Nmin, cnt)
+                im = ax.pcolormesh(edges, edges, grid.T, cmap='cividis', norm=LogNorm())
+                frac = (res < raw).mean()
+                ax.text(0.04, 0.96, f'{frac:.0%} below 1:1 (head improves)\n'
+                        f'median {np.median(raw):.0f} $\\rightarrow$ {np.median(res):.0f} mas, '
+                        f'N={len(raw):,}', transform=ax.transAxes, va='top', fontsize=10,
+                        bbox=dict(boxstyle='round', fc='white', ec='0.6', alpha=0.9))
+            else:
+                mm = np.isfinite(C)
+                med = binned_statistic_2d(raw[mm], res[mm], C[mm], 'median',
+                                          bins=[edges, edges]).statistic
+                cnt = binned_statistic_2d(raw[mm], res[mm], None, 'count',
+                                          bins=[edges, edges]).statistic
+                grid = np.ma.masked_where(cnt < Nmin, med)
+                vmin, vmax = np.nanpercentile(grid.compressed(), [2, 98])
+                im = ax.pcolormesh(edges, edges, grid.T, cmap='cividis', vmin=vmin, vmax=vmax)
+            cb = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.02)
+            cb.ax.text(0.5, 0.5, lab, transform=cb.ax.transAxes, rotation=90,
+                       ha='center', va='center', fontsize=10, color='white',
+                       path_effects=[pe.withStroke(linewidth=2.2, foreground='black', alpha=0.6)])
+            ax.plot([LO, HI], [LO, HI], 'k--', lw=1, alpha=0.6)
+            ax.set_xscale('log'); ax.set_yscale('log')
+            ax.set_xlim(LO, HI); ax.set_ylim(LO, HI); ax.set_aspect('equal')
+            ax.set_xlabel('Raw offset [mas]'); ax.set_ylabel('Residual (head) offset [mas]')
+        for ax in axes[len(panels):]:
+            ax.axis('off')
+        fig.tight_layout()
+        fig.savefig(out_dir / 'raw_vs_head_4panel.png', dpi=130, bbox_inches='tight')
+        plt.close(fig)
+        print(f'Saved raw-vs-head diagnostic to {out_dir / "raw_vs_head_4panel.png"}')
+        log_figure_to_head_run(out_dir / 'raw_vs_head_4panel.png', out_dir)
+    except Exception as exc:
+        print(f'[warn] raw-vs-head figure failed: {exc}')
+
+
+def log_figure_to_head_run(png_path, out_dir):
+    """Attach the raw-vs-head diagnostic to the head's own W&B training run.
+
+    The run id is auto-detected from the head checkpoint directory's wandb/
+    subfolder (run-<stamp>-<id>); resumed with resume='allow' and finished
+    immediately. Never fatal."""
+    try:
+        import wandb
+        head_dir = Path(out_dir).parent
+        runs = sorted((head_dir / 'wandb').glob('run-*-*'))
+        if not runs:
+            print('[warn] no wandb run dir next to head checkpoint; figure not logged')
+            return
+        run_id = runs[-1].name.rsplit('-', 1)[-1]
+        run = wandb.init(project='JAISP-LatentPosition', id=run_id, resume='allow',
+                         dir=str(head_dir))
+        run.log({'eval/raw_vs_head_4panel': wandb.Image(str(png_path))})
+        run.finish()
+        print(f'Logged raw-vs-head figure to W&B run {run_id}')
+    except Exception as exc:
+        print(f'[warn] W&B figure upload failed: {exc}')
 
 
 def _make_figure(band_results, all_bands, all_raw, all_hd, all_snr, out_dir):
@@ -822,6 +978,15 @@ def main():
     p.add_argument('--detector-conf-threshold', type=float, default=0.30,
                    help='Confidence threshold for the neural detector. '
                         'Only used with --detector-checkpoint. Default 0.30.')
+    p.add_argument('--mer-compact-cat', type=str,
+                   default='data/edf_s_ood/catalogs_compact/mer_FINAL_q1_ECDFS_footprint.fits',
+                   help='MER compact catalog for the VIS-mag panel of the '
+                        'raw-vs-head diagnostic (skipped if missing).')
+    p.add_argument('--hsize-cat', type=str,
+                   default='data/edf_s_ood/catalogs_compact/mer_q1_ECDFS_Hsize.fits',
+                   help='MER H-size catalog for the size panel (skipped if missing).')
+    p.add_argument('--only-patches', type=str, default=None,
+                   help='Comma-separated patch ids: evaluate only these patches.')
     p.add_argument('--max-tiles', type=int, default=0,
                    help='Limit evaluated tile pairs for smoke tests. 0 = all tiles.')
     p.add_argument('--device', type=str, default='')
