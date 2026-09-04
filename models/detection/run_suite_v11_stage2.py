@@ -32,7 +32,11 @@ if which in ('deep', 'subthresh', 'deepstem', 'extended'):
                      ('stem_mer', 'stem', V11 / 'stem_mer.pt')]
         sys.argv = ['inject_eval.py', '--rvis', '30', '--donor-faint', '22.5']
     else:
-        ie.MODELS = [('cn_vis_sep', 'centernet', V11 / 'centernet_vis_sep.pt')]
+        # BOTH models: inject_eval dumps only the models it runs, so a single-model
+        # rerun on the same tag SILENTLY DROPS the other model from the metrics json
+        # (cache keeps everything; this bit us 2026-09-02).
+        ie.MODELS = [('cn_vis_sep', 'centernet', V11 / 'centernet_vis_sep.pt'),
+                     ('stem_mer', 'stem', V11 / 'stem_mer.pt')]
         mags = '27.0,27.5' if which == 'deep' else '28.0,28.5,29.0,35.0'
         sys.argv = ['inject_eval.py', '--rvis', '30', '--donor-conc', '0.65',
                     '--donor-faint', '22.5', '--mags', mags, '--tag', f'_r30_star_{which}']
@@ -98,7 +102,11 @@ for si, stem in enumerate(stems):
 mag = np.concatenate(mag_all); hit = np.concatenate(hit_all); snr = np.concatenate(snr_all)
 fin = np.isfinite(mag)
 mag, hit, snr = mag[fin], hit[fin], snr[fin]
-cen, comp, _ = completeness_curve(mag, hit, medges)
+# recovery on equal-count bins (12) so every point carries the same statistics;
+# the histogram stays on the fixed reference medges (quantile-binned hist is flat)
+_inr = (mag >= medges[0]) & (mag <= medges[-1])
+qedges = np.unique(np.quantile(mag[_inr], np.linspace(0, 1, 13)))
+cen, comp, _ = completeness_curve(mag, hit, qedges)
 snr_comp = [100 * hit[(snr >= a) & (snr < b)].mean() if ((snr >= a) & (snr < b)).sum() >= 20 else np.nan
             for a, b in zip(snr_edges[:-1], snr_edges[1:])]
 hist, _ = np.histogram(mag, bins=medges)

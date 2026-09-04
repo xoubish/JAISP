@@ -1,4 +1,5 @@
 {
+ "stack": "v11 (jaisp_v11_q1_soft) + anchored head (patchval25)",
  "rung1": {
   "vis_crb": 7.978807832407927,
   "allband_crb": 3.40217889371967
@@ -8,12 +9,13 @@
  },
  "estimators": {
   "classical": 8.056596755981445,
-  "head": 7.687481880187988,
+  "anchored_head": 8.370237350463867,
+  "anchor_alone": 9.024209976196289,
   "joint_fit": 3.42273018072063,
   "iv_combo": 3.3965793907087267
  },
  "rung3": {
-  "mean_offdiag_rho": 0.40835536608258743,
-  "rubin_block_rho": 0.9190262156355018
+  "mean_offdiag_rho": 0.4282878889817604,
+  "rubin_block_rho": 0.9248206729404299
  }
 }
