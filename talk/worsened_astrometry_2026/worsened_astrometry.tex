@@ -1,7 +1,7 @@
 % ====================================================================
 % JAISP internal seminar deck -- Worsened astrometry: diagnosis and cure
 % Build:  pdflatex worsened_astrometry.tex  (run twice; latexmk broken)
-% Figures pulled from ../../io/_nb23_outputs and ../../io/_nb24_outputs
+% Figures pulled from ../../io/_nb23_outputs, _nb24_outputs, _nb31_outputs, _nb32_outputs (copies in figures/)
 % ====================================================================
 \documentclass[aspectratio=169,10pt]{beamer}
 
@@ -18,7 +18,7 @@
       {\scriptsize\bfseries\color{red!70!black}
        JULY 2026: INTERIM MITIGATION --- superseded by the v11 foundation fix (slides 13--18)};
   \end{tikzpicture}\vspace{1.4em}}
-\graphicspath{{figures/}{../../io/_nb23_outputs/}{../../io/_nb24_outputs/}{../../paper/figures/}}
+\graphicspath{{figures/}{../../io/_nb23_outputs/}{../../io/_nb24_outputs/}{../../io/_nb31_outputs/}{../../io/_nb32_outputs/}{../../paper/figures/}}
 
 \usetheme{default}
 \usecolortheme{seagull}
@@ -54,7 +54,7 @@
   \Large Diagnosis and Cure in \jaisp{}}
 \author{}
 \institute{}
-\date{July 2026, updated August 2026 \quad (internal, ECDFS Q1)}
+\date{July 2026, updated August and September 2026 \quad (internal, ECDFS Q1)}
 
 \begin{document}
 
@@ -355,18 +355,111 @@
   \vspace{0.4em}
   \begin{itemize}
     \item Cause is outside the foundation: in the data or labels of these specific sources, or in what both trainings share (label pipeline, tiles). Suspects: \alert{sub-arcsecond pairs below MER's deblending limit}; convention-ambiguous profiles with unstable training labels.
-    \item 0.2\% of the catalog; the uncertainty router continues to cover them in the meantime.
+    \item 0.2\% of the catalog; the uncertainty router covered them in the meantime. \alert{Resolved in September --- next slides.}
   \end{itemize}
+\end{frame}
+
+% ==============================================================
+% SEPTEMBER 2026: THE SURVIVORS ARE A GALAXY POPULATION; THE ANCHORED HEAD
+% ==============================================================
+\begin{frame}{September: the survivors are a real population --- and it was there in v10 too}
+  \begin{columns}
+    \column{0.50\textwidth}
+      \includegraphics[width=\textwidth]{nb31_coherence_null.png}\\{\scriptsize v11 plain head, 790 tiles, 37.9k sources (io/31)}
+    \column{0.48\textwidth}
+      {\footnotesize
+      \begin{itemize}
+        \item Count in how many bands a source is \emph{materially} worsened (res $>$ raw$+10$\mas{} and $>20$\mas). The $k\le2$ bins match the chance null built from empirical per-(band, S/N) rates: the bulk of the 8.9\% worsened measurements is luck.
+        \item At $k\ge3$: \alert{604 sources (1.6\%) vs $23\pm5$ by chance} ($\times26$; $\times400$ at $k\ge4$). Within a source the residual vector points the same way in every band (median pairwise $\cos=0.997$): one deterministic wrong position per source.
+        \item Isotropic across sources, no tile clustering, no sky pattern: nothing instrumental survives in v11. The cause lives in each source's own pixels.
+        \item Rerun on v10: \alert{622 sources, 80\% the same objects}. Hidden at S/N $\approx13$, where one worsened band looks like chance; the bright-tail selection of July was dominated by the clamp instead.
+      \end{itemize}}
+  \end{columns}
+\end{frame}
+
+% --------------------------------------------------------------
+\begin{frame}{Who they are: extended galaxies, where the head is precise but biased}
+  \begin{columns}
+    \column{0.50\textwidth}
+      \includegraphics[width=\textwidth]{nb31_population_props.png}
+    \column{0.48\textwidth}
+      {\footnotesize
+      \begin{itemize}
+        \item vs S/N-matched controls: galaxies in both (point-like 1\%), but \alert{brighter (VIS 23.1 vs 23.4) and larger (0.32$''$ vs 0.28$''$)} at the same S/N; $\times1.7$ excess of sub-arcsecond MER companions (7.6\% vs 4.5\% within $1''$). The head's own $\sigma$ is elevated (18 vs 11\mas): it partially knows.
+        \item Against the VIS light itself (peak, and $0.75''$ flux centroid): the head sits \alert{2--2.6$\times$ farther than the label} on worseners, isolated and paired alike (50 vs 23\mas{} to the peak); on controls head and label are equivalent. Band-to-band the head is the tighter estimator everywhere (13 vs 31\mas{} RMS).
+        \item Reading: \alert{precise but biased} --- one reproducible $\sim$40\mas{} offset per source matching no natural photometric center; on chromatic sources it lies along the color axis, toward the blue/clumpy light. The \alert{tight core of 315 sources (0.8\%)}, 89\% persistent across v10/v11, is the true model-bias population.
+      \end{itemize}}
+  \end{columns}
+\end{frame}
+
+% --------------------------------------------------------------
+\begin{frame}{Fix candidates: loss-based fixes fail, the anchored head wins}
+  \begin{center}
+    \includegraphics[width=0.50\textwidth]{nb31_fix_verdict.png}
+  \end{center}
+  \vspace{-1.0em}
+  {\footnotesize
+  \begin{center}
+  \begin{tabular}{lcccccc}
+    \toprule
+    head & overall med & faint med & coherent ($k\ge3$, null) & tight core & $\cap$ plain 315 & control RMS \\
+    \midrule
+    plain      & 14.4 & 18.8 & 604 (22) & 315 & ---  & 9.9 \\
+    biaspen (loss)    & 15.1 & 19.7 & 542 (18) & 297 & 260 & 10.5 \\
+    bandaware (arch.) & 9.7  & 10.9 & 1113 (89) & 662 & 283 & 6.8 \\
+    hinge (loss)      & 9.6  & 10.8 & 1061 (82) & 639 & 282 & 6.9 \\
+    \textbf{anchored} & \textbf{7.2} & \textbf{8.6} & \textbf{235 (2)} & \textbf{37} & \textbf{6} & 7.7 \\
+    \bottomrule
+  \end{tabular}
+  \end{center}
+  \begin{itemize}
+    \item Identical rows scored for every head, no worsener ever a training signal (medians in mas). \alert{Anchored:} an iterated Gaussian-weighted VIS centroid computed in the forward pass, with its photon-noise $\sigma$; the network adds only a residual bounded at a few$\times$ that noise. Tight core \alert{315 $\to$ 37 (6 of the original survive)}, every global metric better at once. Three loss-based fixes failed (NLL, biaspen, hinge): the failure is representational, not an optimization artifact.
+  \end{itemize}}
+\end{frame}
+
+% --------------------------------------------------------------
+\begin{frame}{The anchored head: gains are global, not tail surgery}
+  \begin{center}
+    \includegraphics[width=0.88\textwidth]{nb31_full_population_plain_vs_anchored.png}
+  \end{center}
+  \vspace{-0.6em}
+  {\footnotesize
+  \begin{itemize}
+    \item Anchored sits below plain at \alert{every} raw offset and every quantile: p50 \alert{14.4 $\to$ 7.2}\mas, p90 79 $\to$ 45, faint tercile 19.7 $\to$ 8.5, bright 9.4 $\to$ 5.3. Worsened fraction 8.9 $\to$ 4.6\% (material 3.2 $\to$ 1.8\%); improves on raw for 95.4\% of measurements.
+    \item The faint end, where no worsener was ever flagged, improves the most: there the bound is open and the learned residual does the work. On bright stars the anchor pins the head to the classical floor.
+    \item Right: the v10 upturn above S/N 100 (clamp) vs v11; the anchored gain on top is head design, not foundation version.
+    \item Adoption gates passed (2026-08-31): \alert{EDF-S with no retraining} median 6.4\mas{} (plain 13.9); \alert{patch-disjoint} retrain 6.9\mas{} vs 9.2 random-split --- no overlap leakage. Adopted as production 2026-09-01; retrained on v11 detector labels 2026-09-06 (\texttt{latent\_position\_v11\_anchored\_v11labels}), the archive behind paper Figs.\ 7, 8, 11.
+  \end{itemize}}
+\end{frame}
+
+% --------------------------------------------------------------
+\begin{frame}{The external ruler and the error bars: Gaia recheck and $\sigma$ calibration}
+  \begin{columns}
+    \column{0.56\textwidth}
+      \includegraphics[width=\textwidth]{nb32_gaia_three_estimators.png}
+    \column{0.42\textwidth}
+      \includegraphics[width=\textwidth]{nb32_sigma_calibration.png}
+  \end{columns}
+  \vspace{-0.2em}
+  {\small
+  \begin{itemize}
+    \item Gaia DR3, PM-propagated; the Q1 coadds' effective epoch re-derived as \alert{$t_{\rm eff}=2024.34$} by all three estimators (the 2024.83 value belonged to the older coadds).
+    \item Bright stars ($G<19.5$): \alert{anchored = classical}, 7.6\mas{} median offset for both, scatter about the tie 6.8 vs 6.2. The plain head pays a visible Gaia penalty (10.1 / 9.8): its convention bias is real to an external ruler. Amortization now costs nothing on stars.
+    \item The 7.8\mas{} Dec split between the classical tie ($-4.1$) and the head tie ($+3.7$) is the concordance field (common component 6.9\mas), not a pathology: classical Rubin centroids live in the Rubin frame, the heads in the VIS convention, Gaia sits between.
+    \item $\sigma_{\rm pred}$: anchored is \alert{uniformly conservative, factor 0.79 flat in S/N} --- one global rescale calibrates it (90\% coverage 91\%). Plain $\sigma$ was miscalibrated in shape with a heavy tail (90\% coverage 74\%). The router has at most $\sim$0.5\mas{} left to collect: retired.
+  \end{itemize}}
 \end{frame}
 
 % --------------------------------------------------------------
 \begin{frame}{Takeaways}
+  \small
   \begin{itemize}
     \item Above the 1:1 line sit two populations: mostly benign regression to the corrected floor, plus real failures concentrated in bright point sources --- diagnosed by \alert{repetition across bands}, not by any average metric.
     \item The mechanism was one line of preprocessing: a hard per-pixel S/N clamp that erased bright-star cores --- invisible to every loss curve because the targets were clamped too. \alert{Audit your input transforms; stratify metrics by regime.}
     \item Correlational forensics narrowed the suspects; \alert{causal interventions} (flux sweep, rotation) convicted. The fix is soft compression + retrain (v11): ramp flat, upturn reversed, faint-end headline untouched, detection deeper.
-    \item The interim uncertainty router did its job and is retired by the cure; 67 source-specific cases remain --- the next investigation.
-    \item The paper sentence, updated: the head improves astrometry where classical methods are noise limited, and now \alert{matches or beats them} where they are systematics limited.
+    \item The interim uncertainty router did its job and is retired by the cure. The 67 survivors were the visible tip of a \alert{1.6\% extended-galaxy population} where the learned center disagrees reproducibly with the classical convention --- present in v10 too, hidden at S/N $\approx13$, invisible to loss-based fixes.
+    \item The cure for that one is architectural: the \alert{anchored head} computes the convention centroid in its forward pass and learns only a bounded residual. Tight core 315 $\to$ 37, medians halved at every S/N, Gaia parity on bright stars, calibrated $\sigma$; gates passed on EDF-S and patch-disjoint. Production since 2026-09-01.
+    \item The paper sentence, updated: the head improves astrometry where classical methods are noise limited, and \alert{matches them} where they are systematics limited --- a single estimator for both regimes.
   \end{itemize}
 \end{frame}
 
