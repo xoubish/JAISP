@@ -9,15 +9,6 @@
 \usepackage{booktabs}
 \usepackage{amsmath,amssymb}
 \usepackage{tikz}
-% SUPERSEDED banner for the interim-mitigation (router) slides
-\newcommand{\supersededbanner}{%
-  \begin{tikzpicture}[remember picture,overlay]
-    \node[anchor=north, yshift=-8.2mm, minimum width=\paperwidth, minimum height=4mm,
-          fill=red!12, draw=none, inner sep=1.5pt]
-      at (current page.north)
-      {\scriptsize\bfseries\color{red!70!black}
-       JULY 2026: INTERIM MITIGATION --- superseded by the v11 foundation fix (slides 13--18)};
-  \end{tikzpicture}\vspace{1.4em}}
 \graphicspath{{figures/}{../../io/_nb23_outputs/}{../../io/_nb24_outputs/}{../../io/_nb31_outputs/}{../../io/_nb32_outputs/}{../../paper/figures/}}
 
 \usetheme{default}
@@ -85,20 +76,6 @@
   \begin{itemize}
     \item Left: the same pattern in every S/N slice, each observed curve below its own re-measurement expectation (dashed, $P(\mathrm{worse})=e^{-\mathrm{raw}^2/2\sigma^2}$); pooled over bands, shared photons preserve lucky agreement more often than chance predicts.
     \item Only the \alert{bright} slice grows a tail at large raw offsets, where chance predicts zero. Right: worseners sit right of the improved because the selection forces it (res $>$ raw truncates the floor distribution from below); the truncated-floor prediction is 21.6\mas{} median versus 17.8 observed. Only the excess beyond ${\sim}40$\mas{} escapes any chance model.
-  \end{itemize}}
-\end{frame}
-
-% --------------------------------------------------------------
-\begin{frame}{Flash-forward: the same panel under v11 --- and why it hides the disease}
-  \begin{center}
-    \includegraphics[width=0.74\textwidth]{worseners_panels23_v11.png}
-  \end{center}
-  \vspace{-0.5em}
-  {\footnotesize
-  \begin{itemize}
-    \item After the fix (v11, slides ahead) this projection looks \alert{nearly identical} --- because the S/N$>$30 slice \alert{dilutes} the clamped stars (S/N$\gtrsim$100) with many unclamped ones. Cut the same plot at \alert{S/N$>$100}, raw 10--16\mas{} --- exactly where the affected stars live --- and the fix is dramatic: worsened \alert{48\% $\to$ 11\%}.
-    \item The tail beyond raw $\sim$60\mas{} that escapes chance is \alert{neither} the clamp population \alert{nor} the later survivors (both live at small raw): it is 9 isolated $k{=}0$ large-amplitude flukes (res $\sim$100\mas{} in \emph{both} versions; likely matching/blend errors).
-    \item Lesson: marginal projections have wildly different sensitivity to the same population --- which is why the next slide counts \alert{repetition across bands} instead.
   \end{itemize}}
 \end{frame}
 
@@ -183,71 +160,11 @@
       \end{tabular}
       \end{center}
       \vspace{0.5em}
-      Left: offenders receive corrections \alert{larger than the raw disagreement} ($|c|\!\sim\!28$\mas{} vs raw $\sim$11\mas), coherently in every band: the head asserts a center the classical centroids contradict.
-      \vspace{0.4em}
+      {\footnotesize Left: offenders receive corrections \alert{larger than the raw disagreement} ($|c|\!\sim\!28$\mas{} vs raw $\sim$11\mas), coherently in every band: the head asserts a center the classical centroids contradict.
+      \vspace{0.3em}
 
-      Reading (as of July): a brightness-dependent divergence between the Gaussian-fit convention and the head's feature-encoded center. \textit{The actual mechanism was found in August --- slides ahead.}
+      July reading: a brightness-dependent divergence between the Gaussian-fit convention and the head's center. Interim mitigation: an uncertainty-weighted \alert{router} between head and classical positions (bright stars back at the classical 5\mas{} floor). \textit{The mechanism was found in August --- slides ahead.}}
   \end{columns}
-\end{frame}
-
-% --------------------------------------------------------------
-\begin{frame}{The cure: route by uncertainty, do not gate by magnitude}
-  \supersededbanner
-  \begin{columns}
-    \column{0.46\textwidth}
-      \includegraphics[width=\textwidth]{nb24_sigma_reliability.png}
-    \column{0.52\textwidth}
-      Two estimators of the same VIS-convention position: classical (error scale $\sigma_{\rm cl}$ from S/N and class) and head-corrected (the head's own $\sigma_{\rm pred}$).
-      \vspace{0.4em}
-      \begin{equation*}
-        \mathrm{combined} = (1-w)\,\mathrm{raw} + w\,\mathrm{resid},
-      \end{equation*}
-      \begin{equation*}
-        w = \frac{\sigma_{\rm cl}^2 - \rho\,\sigma_{\rm cl}\sigma_h}{\sigma_{\rm cl}^2 + \sigma_h^2 - 2\rho\,\sigma_{\rm cl}\sigma_h}
-      \end{equation*}
-      \begin{itemize}
-        \item $\sigma_{\rm pred}$ is nearly perfectly calibrated in bulk ($\alpha=0.99$); the over-confidence lives only in the offender tail.
-        \item The correlation matters: head and classical errors share photons ($\rho\approx0.8$ extended, $0.5$ stars); naive inverse variance costs 2\mas{} at the faint end, the correlation-aware weight costs nothing.
-        \item All calibrations fit on half the tiles; all results from the other half.
-      \end{itemize}
-  \end{columns}
-\end{frame}
-
-% --------------------------------------------------------------
-\begin{frame}{Where the weight moves: the two error bars, side by side}
-  \supersededbanner
-  \begin{center}
-    \includegraphics[width=0.80\textwidth]{nb24_sigma_cl_vs_h.png}
-  \end{center}
-  \vspace{-0.5em}
-  {\small
-  \begin{itemize}
-    \item Extended sources: classical centroiding is morphology limited ($\sigma_{\rm cl}\gtrsim20$\mas{} at every S/N); the curves \alert{never cross}, so galaxies are pure head.
-    \item Stars: crossing at S/N $\approx$ 108 (VIS $\approx$ 18.2); the weight (gray) slides 1 $\to$ 0 across VIS 20 $\to$ 17. The magnitude gate is \alert{derived from the uncertainties}, not imposed.
-    \item $\sigma_h$ \alert{rises} for bright stars: the uncertainty channel partially knows the head struggles there; the offenders are the tail where that self-awareness fails.
-  \end{itemize}}
-\end{frame}
-
-% --------------------------------------------------------------
-\begin{frame}{Result: best of both estimators, everywhere}
-  \supersededbanner
-  \begin{center}
-    \includegraphics[width=0.92\textwidth]{nb24_gaia_circles_router.png}
-  \end{center}
-  \vspace{-0.3em}
-  \begin{center}
-  \begin{tabular}{lccc}
-    \toprule
-    median radial offset [mas] & classical & head & router \\
-    \midrule
-    all sources & 50.6 & 14.6 & \alert{14.7} \\
-    bright stars, vs Gaia truth & \alert{5.2} & 12.8 & \alert{5.4} \\
-    faint (S/N $<$ 10) & 64.9 & 18.5 & \alert{18.5} \\
-    \bottomrule
-  \end{tabular}
-  \end{center}
-  \vspace{0.3em}
-  Bright stars made worse than classical: 38\% (head) $\to$ 16\% (router), with the large-amplitude halo gone.
 \end{frame}
 
 % --------------------------------------------------------------
@@ -257,7 +174,7 @@
       \includegraphics[width=\textwidth]{nb24_field_hgp_raw_head_router.png}
     \column{0.54\textwidth}
       \begin{itemize}
-        \item Refit the field (HGP super-tight, PINN) on router residuals (v10-era archives): median change \alert{0.16\mas}, an order of magnitude below the field amplitude. The robust fit had already absorbed the 113 outliers; Figure 10 and the FITS products stand.
+        \item Refit the field (HGP super-tight, PINN) on the router's residuals (v10-era archives): median change \alert{0.16\mas}, an order of magnitude below the field amplitude. The robust fit had already absorbed the 113 outliers; Figure 10 and the FITS products stand.
         \item The $\sim$15\mas{} lobe at lower right is \alert{real}: coherent in 8 of 9 bands relative to VIS, normal anchor coverage, both solvers agree, and it sits within MER tile TILE102043549. Eight rulers agree and one does not: a localized feature of the \alert{VIS solution}.
         \item By construction no VIS-trained correction can remove it; the released raw-field FITS is precisely the map that carries it.
       \end{itemize}
@@ -297,16 +214,16 @@
 \end{frame}
 
 % --------------------------------------------------------------
-\begin{frame}{Why an axis from a scalar cut? The shape of what survives}
+\begin{frame}{Why an axis? The clamp is isotropic, what survives it is not}
   \begin{center}
-    \includegraphics[width=0.92\textwidth]{clamp_mask_stack.png}
+    \includegraphics[width=\textwidth]{clamp_mechanism.png}
   \end{center}
-  \vspace{-0.6em}
+  \vspace{-0.8em}
   {\footnotesize
   \begin{itemize}
-    \item The clamp is isotropic, but the surviving information is not: per star the S/N=100 plateau (left, red) is a ragged blob, yet the \alert{stack of 131 masks} (middle) is measurably elliptical --- \alert{axis ratio 1.085} (CI [1.05, 1.20]), \alert{major axis PA $142^\circ\pm15^\circ$}, consistent with the offender displacement axis ($160^\circ\pm9^\circ$) and the instrument frame.
-    \item An elongated boundary constrains the centroid weakly along its major axis: errors along one axis, both signs, no net drift --- the measured $m{=}2$-without-$m{=}1$ signature; the flux stack shows \alert{no trailed light} (CTI ruled out).
-    \item Under v11 the same elongation is still in the images --- with the core restored, the head stops leaning on the boundary and the axis signal vanishes. {\footnotesize Per-star sign mechanism (subpixel phase?) untested.}
+    \item Above S/N 100 the core is a plateau, so the head infers the center from the \alert{plateau boundary} and wings. The VIS PSF is slightly elongated in the instrument frame, so that boundary (red contour, a) is an ellipse: per star a ragged blob, but the \alert{stack of 318 plateau masks} (d) has axis ratio 1.11 with major axis PA $144^\circ$, matching the offender displacement axis (e; $m{=}2$ axis $160^\circ\pm9^\circ$, covariance axis $172^\circ$). Panels b and c show the same star as the network saw it before and after the fix.
+    \item An elongated boundary constrains the centroid well across its short axis and \alert{weakly along its long axis}: errors along one axis, both signs, no net drift. A mildly elliptical boundary gives a strongly anisotropic error. No trailed light in the flux stack (CTI ruled out).
+    \item Controls are isotropic because they are \alert{not clamped}: stars below S/N 100 keep their cores, galaxies never reach it. Every clamped star draws from the same mechanism; the flag selects the large-amplitude tail. Under v11 the elongation is still in the images, but with the core restored the head stops leaning on the boundary and the axis vanishes. {\scriptsize Per-star sign untested.}
   \end{itemize}}
 \end{frame}
 
@@ -369,7 +286,7 @@
     \column{0.48\textwidth}
       {\footnotesize
       \begin{itemize}
-        \item Count in how many bands a source is \emph{materially} worsened (res $>$ raw$+10$\mas{} and $>20$\mas). The $k\le2$ bins match the chance null built from empirical per-(band, S/N) rates: the bulk of the 8.9\% worsened measurements is luck.
+        \item Count in how many bands a source is \emph{worsened by more than 10\mas} (head residual $>$ raw$+10$\mas{} and $>20$\mas; ``any worsening'' = residual $>$ raw). The $k\le2$ bins match the chance null built from empirical per-(band, S/N) rates: the bulk of the 8.9\% worsened measurements is luck.
         \item At $k\ge3$: \alert{604 sources (1.6\%) vs $23\pm5$ by chance} ($\times26$; $\times400$ at $k\ge4$). Within a source the residual vector points the same way in every band (median pairwise $\cos=0.997$): one deterministic wrong position per source.
         \item Isotropic across sources, no tile clustering, no sky pattern: nothing instrumental survives in v11. The cause lives in each source's own pixels.
         \item Rerun on v10: \alert{622 sources, 80\% the same objects}. Hidden at S/N $\approx13$, where one worsened band looks like chance; the bright-tail selection of July was dominated by the clamp instead.
@@ -390,6 +307,22 @@
         \item Reading: \alert{precise but biased} --- one reproducible $\sim$40\mas{} offset per source matching no natural photometric center; on chromatic sources it lies along the color axis, toward the blue/clumpy light. The \alert{tight core of 315 sources (0.8\%)}, 89\% persistent across v10/v11, is the true model-bias population.
       \end{itemize}}
   \end{columns}
+\end{frame}
+
+% --------------------------------------------------------------
+\begin{frame}{A convention bias, seen: nine bands, two definitions of the center}
+  \begin{center}
+    \includegraphics[width=0.86\textwidth]{nb31_gal_chromatic_row1.png}\\
+    {\scriptsize VIS stamps $4''$ wide, $1''$ inset. Dots: classical per-band centroids colored by wavelength ($u$ blue $\to$ $H$ red); magenta: chromatic axis; red $\times$: plain-head position; white $+$: VIS label. Tight-core members, plain v11 head (io/31).}
+  \end{center}
+  \vspace{-0.3em}
+  {\footnotesize
+  \begin{itemize}
+    \item Everything here is \alert{sub-pixel}: both estimators put the source ``at the center'' to within half a VIS pixel; the disagreement is tens of mas.
+    \item The classical centroids drift \alert{systematically with wavelength}: the nine dots trace a short ellipse along the magenta axis. A structured galaxy has no unique center; each band and each rule defines one.
+    \item The head's red cross sits in \alert{one fixed spot, tight across all nine bands}, displaced 30--50\mas{} from the label, typically toward the blue, clumpy end of the axis. Precise, repeatable, and off the label's definition: that is the convention bias.
+    \item Neither position is ``wrong''. The head learned a morphology- and color-weighted center; the label is the VIS Gaussian-weighted centroid we score against. The anchored head removes the disagreement by \alert{computing the label's rule} in its forward pass.
+  \end{itemize}}
 \end{frame}
 
 % --------------------------------------------------------------
@@ -420,12 +353,12 @@
 % --------------------------------------------------------------
 \begin{frame}{The anchored head: gains are global, not tail surgery}
   \begin{center}
-    \includegraphics[width=0.88\textwidth]{nb31_full_population_plain_vs_anchored.png}
+    \includegraphics[width=0.88\textwidth]{nb31_full_population_plain_vs_anchored_talk.png}
   \end{center}
   \vspace{-0.6em}
   {\footnotesize
   \begin{itemize}
-    \item Anchored sits below plain at \alert{every} raw offset and every quantile: p50 \alert{14.4 $\to$ 7.2}\mas, p90 79 $\to$ 45, faint tercile 19.7 $\to$ 8.5, bright 9.4 $\to$ 5.3. Worsened fraction 8.9 $\to$ 4.6\% (material 3.2 $\to$ 1.8\%); improves on raw for 95.4\% of measurements.
+    \item Anchored sits below plain at \alert{every} raw offset and every quantile: p50 \alert{14.4 $\to$ 7.2}\mas, p90 79 $\to$ 45, faint tercile 19.7 $\to$ 8.5, bright 9.4 $\to$ 5.3. Any worsening 8.9 $\to$ 4.6\% of measurements; worsened by more than 10\mas{} 3.2 $\to$ 1.8\%; improves on raw for 95.4\%.
     \item The faint end, where no worsener was ever flagged, improves the most: there the bound is open and the learned residual does the work. On bright stars the anchor pins the head to the classical floor.
     \item Right: the v10 upturn above S/N 100 (clamp) vs v11; the anchored gain on top is head design, not foundation version.
     \item Adoption gates passed (2026-08-31): \alert{EDF-S with no retraining} median 6.4\mas{} (plain 13.9); \alert{patch-disjoint} retrain 6.9\mas{} vs 9.2 random-split --- no overlap leakage. Adopted as production 2026-09-01; retrained on v11 detector labels 2026-09-06 (\texttt{latent\_position\_v11\_anchored\_v11labels}), the archive behind paper Figs.\ 7, 8, 11.
