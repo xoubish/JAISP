@@ -1,0 +1,214 @@
+{
+  "field": "ECDFS_patch25",
+  "n_tiles": 4,
+  "rows": {
+    "baseline": {
+      "0.15": {
+        "recovered": {
+          "vis_bright": 320,
+          "vis_all": 767,
+          "nir_only": 91,
+          "full_clean": 858,
+          "full_including_flagged": 875
+        },
+        "totals": {
+          "vis_bright": 357,
+          "vis_all": 831,
+          "nir_only": 292,
+          "full_clean": 1123,
+          "full_including_flagged": 1230
+        },
+        "n_det": 1172,
+        "n_matched": 873,
+        "n_det_footprint": 1172,
+        "n_matched_footprint": 873,
+        "completeness_percent": {
+          "vis_bright": 89.63585434173669,
+          "vis_all": 92.29843561973526,
+          "nir_only": 31.164383561643834,
+          "full_clean": 76.40249332146037,
+          "full_including_flagged": 71.13821138211382
+        },
+        "purity_percent": 74.48805460750853,
+        "purity_unrestricted_percent": 74.48805460750853
+      },
+      "0.2": {
+        "recovered": {
+          "vis_bright": 313,
+          "vis_all": 744,
+          "nir_only": 58,
+          "full_clean": 802,
+          "full_including_flagged": 817
+        },
+        "totals": {
+          "vis_bright": 357,
+          "vis_all": 831,
+          "nir_only": 292,
+          "full_clean": 1123,
+          "full_including_flagged": 1230
+        },
+        "n_det": 1006,
+        "n_matched": 810,
+        "n_det_footprint": 1006,
+        "n_matched_footprint": 810,
+        "completeness_percent": {
+          "vis_bright": 87.6750700280112,
+          "vis_all": 89.53068592057761,
+          "nir_only": 19.863013698630137,
+          "full_clean": 71.41585040071237,
+          "full_including_flagged": 66.42276422764228
+        },
+        "purity_percent": 80.5168986083499,
+        "purity_unrestricted_percent": 80.5168986083499
+      },
+      "0.25": {
+        "recovered": {
+          "vis_bright": 303,
+          "vis_all": 711,
+          "nir_only": 36,
+          "full_clean": 747,
+          "full_including_flagged": 761
+        },
+        "totals": {
+          "vis_bright": 357,
+          "vis_all": 831,
+          "nir_only": 292,
+          "full_clean": 1123,
+          "full_including_flagged": 1230
+        },
+        "n_det": 885,
+        "n_matched": 754,
+        "n_det_footprint": 885,
+        "n_matched_footprint": 754,
+        "completeness_percent": {
+          "vis_bright": 84.87394957983193,
+          "vis_all": 85.5595667870036,
+          "nir_only": 12.32876712328767,
+          "full_clean": 66.51825467497774,
+          "full_including_flagged": 61.86991869918699
+        },
+        "purity_percent": 85.19774011299435,
+        "purity_unrestricted_percent": 85.19774011299435
+      },
+      "0.3": {
+        "recovered": {
+          "vis_bright": 299,
+          "vis_all": 687,
+          "nir_only": 21,
+          "full_clean": 708,
+          "full_including_flagged": 720
+        },
+        "totals": {
+          "vis_bright": 357,
+          "vis_all": 831,
+          "nir_only": 292,
+          "full_clean": 1123,
+          "full_including_flagged": 1230
+        },
+        "n_det": 805,
+        "n_matched": 712,
+        "n_det_footprint": 805,
+        "n_matched_footprint": 712,
+        "completeness_percent": {
+          "vis_bright": 83.75350140056022,
+          "vis_all": 82.67148014440433,
+          "nir_only": 7.191780821917808,
+          "full_clean": 63.04541406945681,
+          "full_including_flagged": 58.53658536585366
+        },
+        "purity_percent": 88.4472049689441,
+        "purity_unrestricted_percent": 88.4472049689441
+      },
+      "0.35": {
+        "recovered": {
+          "vis_bright": 290,
+          "vis_all": 647,
+          "nir_only": 8,
+          "full_clean": 655,
+          "full_including_flagged": 661
+        },
+        "totals": {
+          "vis_bright": 357,
+          "vis_all": 831,
+          "nir_only": 292,
+          "full_clean": 1123,
+          "full_including_flagged": 1230
+        },
+        "n_det": 728,
+        "n_matched": 655,
+        "n_det_footprint": 728,
+        "n_matched_footprint": 655,
+        "completeness_percent": {
+          "vis_bright": 81.23249299719888,
+          "vis_all": 77.85800240673886,
+          "nir_only": 2.73972602739726,
+          "full_clean": 58.325912733748886,
+          "full_including_flagged": 53.739837398373986
+        },
+        "purity_percent": 89.97252747252747,
+        "purity_unrestricted_percent": 89.97252747252747
+      },
+      "0.4": {
+        "recovered": {
+          "vis_bright": 277,
+          "vis_all": 616,
+          "nir_only": 6,
+          "full_clean": 622,
+          "full_including_flagged": 628
+        },
+        "totals": {
+          "vis_bright": 357,
+          "vis_all": 831,
+          "nir_only": 292,
+          "full_clean": 1123,
+          "full_including_flagged": 1230
+        },
+        "n_det": 682,
+        "n_matched": 622,
+        "n_det_footprint": 682,
+        "n_matched_footprint": 622,
+        "completeness_percent": {
+          "vis_bright": 77.59103641456582,
+          "vis_all": 74.12755716004814,
+          "nir_only": 2.0547945205479454,
+          "full_clean": 55.3873552983081,
+          "full_including_flagged": 51.05691056910569
+        },
+        "purity_percent": 91.20234604105572,
+        "purity_unrestricted_percent": 91.20234604105572
+      },
+      "0.5": {
+        "recovered": {
+          "vis_bright": 241,
+          "vis_all": 540,
+          "nir_only": 5,
+          "full_clean": 545,
+          "full_including_flagged": 550
+        },
+        "totals": {
+          "vis_bright": 357,
+          "vis_all": 831,
+          "nir_only": 292,
+          "full_clean": 1123,
+          "full_including_flagged": 1230
+        },
+        "n_det": 588,
+        "n_matched": 545,
+        "n_det_footprint": 588,
+        "n_matched_footprint": 545,
+        "completeness_percent": {
+          "vis_bright": 67.50700280112045,
+          "vis_all": 64.98194945848375,
+          "nir_only": 1.7123287671232876,
+          "full_clean": 48.53072128227961,
+          "full_including_flagged": 44.71544715447155
+        },
+        "purity_percent": 92.68707482993197,
+        "purity_unrestricted_percent": 92.68707482993197
+      }
+    }
+  },
+  "primary_threshold": 0.3,
+  "completeness": "tile-pooled; 0.5 arcsec; clean unless stated; NIR has no magnitude cut",
+  "purity": "full MER including flagged; EDF-S restricted to existing VIS-reference footprint"
+}

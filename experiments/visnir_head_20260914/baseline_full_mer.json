@@ -1,0 +1,2185 @@
+{
+  "ECDFS_patch25": {
+    "inputs": {
+      "catalog": "data/edf_s_ood/catalogs_compact/mer_FINAL_q1_ECDFS_footprint.fits",
+      "detections": "data/detection_labels/centernet_q1_790_vissep_v11_thresh03.pt",
+      "euclid": "data/euclid_tiles_all_q1",
+      "gaia": "data/gaia_ecdfs_astrometry_cache.npz",
+      "filter": "*_patch_25_euclid.npz",
+      "expected_vis_bright": 93.9
+    },
+    "export_config": {
+      "encoder_ckpt": "models/checkpoints/jaisp_v11_q1_soft/checkpoint_best.pt",
+      "centernet_ckpt": "checkpoints/q1_detection_v11/centernet_vis_sep.pt",
+      "model_type": "centernet",
+      "conf_threshold": 0.3,
+      "nms_kernel": 7,
+      "spike_veto_width": 0.0,
+      "spike_veto_radius": 0,
+      "spike_veto_min_star_area": 20,
+      "bright_rescue": false,
+      "bright_rescue_nsig": 2.5,
+      "bright_rescue_min_area": 45,
+      "bright_rescue_min_radius": 5.0,
+      "bright_rescue_min_peak_snr": 8.0,
+      "bright_rescue_match_scale": 1.5,
+      "bright_rescue_match_min": 8.0,
+      "bright_rescue_match_max": 35.0,
+      "bright_rescue_max_per_tile": 32,
+      "bright_rescue_score": 0.95,
+      "n_tiles": 790,
+      "n_errors": 0,
+      "n_vetoed": 0,
+      "n_bright_rescue": 0
+    },
+    "n_tiles": 108,
+    "n_tiles_used": 108,
+    "tile_pooled": {
+      "vis_clean_mag_lt_24p5": {
+        "recovered": 9123,
+        "total": 9713,
+        "percent": 93.9256666323484
+      },
+      "vis_clean_all_magnitudes": {
+        "recovered": 22563,
+        "total": 24992,
+        "percent": 90.28088988476313
+      },
+      "nir_only_clean_all_magnitudes": {
+        "recovered": 1449,
+        "total": 9183,
+        "percent": 15.779157138190135
+      },
+      "full_clean_all_magnitudes": {
+        "recovered": 24012,
+        "total": 34175,
+        "percent": 70.2618873445501
+      },
+      "full_including_flagged_all_magnitudes": {
+        "recovered": 24319,
+        "total": 35714,
+        "percent": 68.093744749958
+      },
+      "flagged_all_magnitudes": {
+        "recovered": 307,
+        "total": 1539,
+        "percent": 19.94801819363223
+      }
+    },
+    "unique_objects_any_tile": {
+      "vis_clean_mag_lt_24p5": {
+        "recovered": 2554,
+        "total": 2670,
+        "percent": 95.65543071161049
+      },
+      "vis_clean_all_magnitudes": {
+        "recovered": 6483,
+        "total": 6878,
+        "percent": 94.25705146845013
+      },
+      "nir_only_clean_all_magnitudes": {
+        "recovered": 584,
+        "total": 2513,
+        "percent": 23.2391563867887
+      },
+      "full_clean_all_magnitudes": {
+        "recovered": 7067,
+        "total": 9391,
+        "percent": 75.25290171440741
+      },
+      "full_including_flagged_all_magnitudes": {
+        "recovered": 7181,
+        "total": 9843,
+        "percent": 72.9553997764909
+      },
+      "flagged_all_magnitudes": {
+        "recovered": 114,
+        "total": 452,
+        "percent": 25.221238938053098
+      }
+    },
+    "unmasked_detection_check": {
+      "vis_clean_mag_lt_24p5": {
+        "recovered": 9128,
+        "total": 9713,
+        "percent": 93.97714403376918
+      },
+      "vis_clean_all_magnitudes": {
+        "recovered": 22568,
+        "total": 24992,
+        "percent": 90.30089628681178
+      },
+      "nir_only_clean_all_magnitudes": {
+        "recovered": 1449,
+        "total": 9183,
+        "percent": 15.779157138190135
+      },
+      "full_clean_all_magnitudes": {
+        "recovered": 24017,
+        "total": 34175,
+        "percent": 70.27651792245794
+      },
+      "full_including_flagged_all_magnitudes": {
+        "recovered": 24324,
+        "total": 35714,
+        "percent": 68.10774486195889
+      },
+      "flagged_all_magnitudes": {
+        "recovered": 307,
+        "total": 1539,
+        "percent": 19.94801819363223
+      }
+    },
+    "detection_mask_boundary_changed_matches": 5,
+    "cached_score_checks": [
+      {
+        "tile": "tile_x00000_y00000_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 178,
+        "actual": 178
+      },
+      {
+        "tile": "tile_x00000_y00256_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 197,
+        "actual": 197
+      },
+      {
+        "tile": "tile_x00000_y00512_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 233,
+        "actual": 233
+      },
+      {
+        "tile": "tile_x00000_y00768_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 166,
+        "actual": 166
+      },
+      {
+        "tile": "tile_x00000_y01024_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 164,
+        "actual": 164
+      },
+      {
+        "tile": "tile_x00000_y01280_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 218,
+        "actual": 218
+      },
+      {
+        "tile": "tile_x00000_y01536_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 215,
+        "actual": 215
+      },
+      {
+        "tile": "tile_x00000_y01792_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 186,
+        "actual": 186
+      },
+      {
+        "tile": "tile_x00000_y02048_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 202,
+        "actual": 202
+      },
+      {
+        "tile": "tile_x00000_y02304_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 244,
+        "actual": 244
+      },
+      {
+        "tile": "tile_x00000_y02560_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 213,
+        "actual": 213
+      },
+      {
+        "tile": "tile_x00000_y02816_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 208,
+        "actual": 208
+      },
+      {
+        "tile": "tile_x00256_y00000_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 205,
+        "actual": 205
+      },
+      {
+        "tile": "tile_x00256_y00256_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 223,
+        "actual": 223
+      },
+      {
+        "tile": "tile_x00256_y00512_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 230,
+        "actual": 230
+      },
+      {
+        "tile": "tile_x00256_y00768_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 229,
+        "actual": 229
+      },
+      {
+        "tile": "tile_x00256_y01024_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 221,
+        "actual": 221
+      },
+      {
+        "tile": "tile_x00256_y01280_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 211,
+        "actual": 211
+      },
+      {
+        "tile": "tile_x00256_y01536_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 234,
+        "actual": 234
+      },
+      {
+        "tile": "tile_x00256_y01792_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 218,
+        "actual": 218
+      },
+      {
+        "tile": "tile_x00256_y02048_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 214,
+        "actual": 214
+      },
+      {
+        "tile": "tile_x00256_y02304_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 280,
+        "actual": 280
+      },
+      {
+        "tile": "tile_x00256_y02560_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 262,
+        "actual": 262
+      },
+      {
+        "tile": "tile_x00256_y02816_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 246,
+        "actual": 246
+      },
+      {
+        "tile": "tile_x00512_y00000_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 213,
+        "actual": 213
+      },
+      {
+        "tile": "tile_x00512_y00256_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 249,
+        "actual": 249
+      },
+      {
+        "tile": "tile_x00512_y00512_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 239,
+        "actual": 239
+      },
+      {
+        "tile": "tile_x00512_y00768_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 239,
+        "actual": 239
+      },
+      {
+        "tile": "tile_x00512_y01024_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 250,
+        "actual": 250
+      },
+      {
+        "tile": "tile_x00512_y01280_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 268,
+        "actual": 268
+      },
+      {
+        "tile": "tile_x00512_y01536_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 288,
+        "actual": 288
+      },
+      {
+        "tile": "tile_x00512_y01792_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 233,
+        "actual": 233
+      },
+      {
+        "tile": "tile_x00512_y02048_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 233,
+        "actual": 233
+      },
+      {
+        "tile": "tile_x00512_y02304_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 279,
+        "actual": 279
+      },
+      {
+        "tile": "tile_x00512_y02560_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 251,
+        "actual": 251
+      },
+      {
+        "tile": "tile_x00512_y02816_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 244,
+        "actual": 244
+      },
+      {
+        "tile": "tile_x00768_y00000_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 231,
+        "actual": 231
+      },
+      {
+        "tile": "tile_x00768_y00256_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 268,
+        "actual": 268
+      },
+      {
+        "tile": "tile_x00768_y00512_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 263,
+        "actual": 263
+      },
+      {
+        "tile": "tile_x00768_y00768_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 221,
+        "actual": 221
+      },
+      {
+        "tile": "tile_x00768_y01024_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 232,
+        "actual": 232
+      },
+      {
+        "tile": "tile_x00768_y01280_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 281,
+        "actual": 281
+      },
+      {
+        "tile": "tile_x00768_y01536_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 310,
+        "actual": 310
+      },
+      {
+        "tile": "tile_x00768_y01792_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 253,
+        "actual": 253
+      },
+      {
+        "tile": "tile_x00768_y02048_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 215,
+        "actual": 215
+      },
+      {
+        "tile": "tile_x00768_y02304_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 214,
+        "actual": 214
+      },
+      {
+        "tile": "tile_x00768_y02560_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 213,
+        "actual": 213
+      },
+      {
+        "tile": "tile_x00768_y02816_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 239,
+        "actual": 239
+      },
+      {
+        "tile": "tile_x01024_y00000_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 246,
+        "actual": 246
+      },
+      {
+        "tile": "tile_x01024_y00256_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 254,
+        "actual": 254
+      },
+      {
+        "tile": "tile_x01024_y00512_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 249,
+        "actual": 249
+      },
+      {
+        "tile": "tile_x01024_y00768_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 220,
+        "actual": 220
+      },
+      {
+        "tile": "tile_x01024_y01024_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 205,
+        "actual": 205
+      },
+      {
+        "tile": "tile_x01024_y01280_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 229,
+        "actual": 229
+      },
+      {
+        "tile": "tile_x01024_y01536_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 274,
+        "actual": 274
+      },
+      {
+        "tile": "tile_x01024_y01792_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 269,
+        "actual": 269
+      },
+      {
+        "tile": "tile_x01024_y02048_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 238,
+        "actual": 238
+      },
+      {
+        "tile": "tile_x01024_y02304_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 196,
+        "actual": 196
+      },
+      {
+        "tile": "tile_x01024_y02560_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 205,
+        "actual": 205
+      },
+      {
+        "tile": "tile_x01024_y02816_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 217,
+        "actual": 217
+      },
+      {
+        "tile": "tile_x01280_y00000_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 229,
+        "actual": 229
+      },
+      {
+        "tile": "tile_x01280_y00256_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 264,
+        "actual": 264
+      },
+      {
+        "tile": "tile_x01280_y00512_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 262,
+        "actual": 262
+      },
+      {
+        "tile": "tile_x01280_y00768_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 217,
+        "actual": 217
+      },
+      {
+        "tile": "tile_x01280_y01024_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 184,
+        "actual": 184
+      },
+      {
+        "tile": "tile_x01280_y01280_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 181,
+        "actual": 181
+      },
+      {
+        "tile": "tile_x01280_y01536_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 212,
+        "actual": 212
+      },
+      {
+        "tile": "tile_x01280_y01792_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 251,
+        "actual": 251
+      },
+      {
+        "tile": "tile_x01280_y02048_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 252,
+        "actual": 252
+      },
+      {
+        "tile": "tile_x01280_y02304_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 206,
+        "actual": 206
+      },
+      {
+        "tile": "tile_x01280_y02560_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 197,
+        "actual": 197
+      },
+      {
+        "tile": "tile_x01280_y02816_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 221,
+        "actual": 221
+      },
+      {
+        "tile": "tile_x01536_y00000_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 247,
+        "actual": 247
+      },
+      {
+        "tile": "tile_x01536_y00256_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 272,
+        "actual": 272
+      },
+      {
+        "tile": "tile_x01536_y00512_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 260,
+        "actual": 260
+      },
+      {
+        "tile": "tile_x01536_y00768_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 209,
+        "actual": 209
+      },
+      {
+        "tile": "tile_x01536_y01024_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 183,
+        "actual": 183
+      },
+      {
+        "tile": "tile_x01536_y01280_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 182,
+        "actual": 182
+      },
+      {
+        "tile": "tile_x01536_y01536_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 174,
+        "actual": 174
+      },
+      {
+        "tile": "tile_x01536_y01792_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 201,
+        "actual": 201
+      },
+      {
+        "tile": "tile_x01536_y02048_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 232,
+        "actual": 232
+      },
+      {
+        "tile": "tile_x01536_y02304_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 217,
+        "actual": 217
+      },
+      {
+        "tile": "tile_x01536_y02560_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 213,
+        "actual": 213
+      },
+      {
+        "tile": "tile_x01536_y02816_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 243,
+        "actual": 243
+      },
+      {
+        "tile": "tile_x01792_y00000_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 237,
+        "actual": 237
+      },
+      {
+        "tile": "tile_x01792_y00256_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 272,
+        "actual": 272
+      },
+      {
+        "tile": "tile_x01792_y00512_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 226,
+        "actual": 226
+      },
+      {
+        "tile": "tile_x01792_y00768_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 208,
+        "actual": 208
+      },
+      {
+        "tile": "tile_x01792_y01024_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 222,
+        "actual": 222
+      },
+      {
+        "tile": "tile_x01792_y01280_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 206,
+        "actual": 206
+      },
+      {
+        "tile": "tile_x01792_y01536_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 206,
+        "actual": 206
+      },
+      {
+        "tile": "tile_x01792_y01792_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 218,
+        "actual": 218
+      },
+      {
+        "tile": "tile_x01792_y02048_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 251,
+        "actual": 251
+      },
+      {
+        "tile": "tile_x01792_y02304_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 258,
+        "actual": 258
+      },
+      {
+        "tile": "tile_x01792_y02560_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 245,
+        "actual": 245
+      },
+      {
+        "tile": "tile_x01792_y02816_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 279,
+        "actual": 279
+      },
+      {
+        "tile": "tile_x02048_y00000_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 243,
+        "actual": 243
+      },
+      {
+        "tile": "tile_x02048_y00256_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 273,
+        "actual": 273
+      },
+      {
+        "tile": "tile_x02048_y00512_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 211,
+        "actual": 211
+      },
+      {
+        "tile": "tile_x02048_y00768_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 206,
+        "actual": 206
+      },
+      {
+        "tile": "tile_x02048_y01024_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 234,
+        "actual": 234
+      },
+      {
+        "tile": "tile_x02048_y01280_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 224,
+        "actual": 224
+      },
+      {
+        "tile": "tile_x02048_y01536_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 226,
+        "actual": 226
+      },
+      {
+        "tile": "tile_x02048_y01792_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 225,
+        "actual": 225
+      },
+      {
+        "tile": "tile_x02048_y02048_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 237,
+        "actual": 237
+      },
+      {
+        "tile": "tile_x02048_y02304_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 244,
+        "actual": 244
+      },
+      {
+        "tile": "tile_x02048_y02560_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 215,
+        "actual": 215
+      },
+      {
+        "tile": "tile_x02048_y02816_tract5063_patch_25",
+        "exact_match": true,
+        "expected": 235,
+        "actual": 235
+      }
+    ],
+    "mask_method": "Integer heatmap peaks recovered by rounding; validated against independent masked score cache where available",
+    "tiles": [
+      {
+        "tile": "tile_x00000_y00000_tract5063_patch_25",
+        "n_reference": 313,
+        "n_detections": 190,
+        "n_exported": 192,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x00000_y00256_tract5063_patch_25",
+        "n_reference": 304,
+        "n_detections": 207,
+        "n_exported": 208,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x00000_y00512_tract5063_patch_25",
+        "n_reference": 324,
+        "n_detections": 238,
+        "n_exported": 238,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x00000_y00768_tract5063_patch_25",
+        "n_reference": 289,
+        "n_detections": 170,
+        "n_exported": 170,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x00000_y01024_tract5063_patch_25",
+        "n_reference": 286,
+        "n_detections": 171,
+        "n_exported": 171,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x00000_y01280_tract5063_patch_25",
+        "n_reference": 314,
+        "n_detections": 222,
+        "n_exported": 222,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x00000_y01536_tract5063_patch_25",
+        "n_reference": 287,
+        "n_detections": 224,
+        "n_exported": 224,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x00000_y01792_tract5063_patch_25",
+        "n_reference": 273,
+        "n_detections": 192,
+        "n_exported": 192,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x00000_y02048_tract5063_patch_25",
+        "n_reference": 292,
+        "n_detections": 211,
+        "n_exported": 212,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x00000_y02304_tract5063_patch_25",
+        "n_reference": 349,
+        "n_detections": 257,
+        "n_exported": 258,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x00000_y02560_tract5063_patch_25",
+        "n_reference": 331,
+        "n_detections": 224,
+        "n_exported": 224,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x00000_y02816_tract5063_patch_25",
+        "n_reference": 320,
+        "n_detections": 215,
+        "n_exported": 215,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x00256_y00000_tract5063_patch_25",
+        "n_reference": 297,
+        "n_detections": 216,
+        "n_exported": 217,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x00256_y00256_tract5063_patch_25",
+        "n_reference": 299,
+        "n_detections": 235,
+        "n_exported": 235,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x00256_y00512_tract5063_patch_25",
+        "n_reference": 312,
+        "n_detections": 243,
+        "n_exported": 243,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x00256_y00768_tract5063_patch_25",
+        "n_reference": 321,
+        "n_detections": 234,
+        "n_exported": 234,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x00256_y01024_tract5063_patch_25",
+        "n_reference": 324,
+        "n_detections": 225,
+        "n_exported": 226,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x00256_y01280_tract5063_patch_25",
+        "n_reference": 320,
+        "n_detections": 216,
+        "n_exported": 217,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x00256_y01536_tract5063_patch_25",
+        "n_reference": 311,
+        "n_detections": 242,
+        "n_exported": 242,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x00256_y01792_tract5063_patch_25",
+        "n_reference": 295,
+        "n_detections": 227,
+        "n_exported": 227,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x00256_y02048_tract5063_patch_25",
+        "n_reference": 306,
+        "n_detections": 223,
+        "n_exported": 224,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x00256_y02304_tract5063_patch_25",
+        "n_reference": 382,
+        "n_detections": 288,
+        "n_exported": 289,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x00256_y02560_tract5063_patch_25",
+        "n_reference": 371,
+        "n_detections": 268,
+        "n_exported": 268,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x00256_y02816_tract5063_patch_25",
+        "n_reference": 327,
+        "n_detections": 251,
+        "n_exported": 251,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x00512_y00000_tract5063_patch_25",
+        "n_reference": 294,
+        "n_detections": 219,
+        "n_exported": 221,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x00512_y00256_tract5063_patch_25",
+        "n_reference": 325,
+        "n_detections": 256,
+        "n_exported": 257,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x00512_y00512_tract5063_patch_25",
+        "n_reference": 335,
+        "n_detections": 250,
+        "n_exported": 251,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x00512_y00768_tract5063_patch_25",
+        "n_reference": 326,
+        "n_detections": 247,
+        "n_exported": 247,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x00512_y01024_tract5063_patch_25",
+        "n_reference": 334,
+        "n_detections": 255,
+        "n_exported": 256,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x00512_y01280_tract5063_patch_25",
+        "n_reference": 360,
+        "n_detections": 276,
+        "n_exported": 277,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x00512_y01536_tract5063_patch_25",
+        "n_reference": 381,
+        "n_detections": 298,
+        "n_exported": 298,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x00512_y01792_tract5063_patch_25",
+        "n_reference": 329,
+        "n_detections": 241,
+        "n_exported": 241,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x00512_y02048_tract5063_patch_25",
+        "n_reference": 338,
+        "n_detections": 241,
+        "n_exported": 243,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x00512_y02304_tract5063_patch_25",
+        "n_reference": 384,
+        "n_detections": 286,
+        "n_exported": 288,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x00512_y02560_tract5063_patch_25",
+        "n_reference": 377,
+        "n_detections": 256,
+        "n_exported": 256,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x00512_y02816_tract5063_patch_25",
+        "n_reference": 341,
+        "n_detections": 249,
+        "n_exported": 249,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x00768_y00000_tract5063_patch_25",
+        "n_reference": 295,
+        "n_detections": 238,
+        "n_exported": 240,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x00768_y00256_tract5063_patch_25",
+        "n_reference": 352,
+        "n_detections": 273,
+        "n_exported": 274,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x00768_y00512_tract5063_patch_25",
+        "n_reference": 375,
+        "n_detections": 273,
+        "n_exported": 275,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x00768_y00768_tract5063_patch_25",
+        "n_reference": 339,
+        "n_detections": 230,
+        "n_exported": 231,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x00768_y01024_tract5063_patch_25",
+        "n_reference": 326,
+        "n_detections": 239,
+        "n_exported": 239,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x00768_y01280_tract5063_patch_25",
+        "n_reference": 378,
+        "n_detections": 290,
+        "n_exported": 290,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x00768_y01536_tract5063_patch_25",
+        "n_reference": 397,
+        "n_detections": 317,
+        "n_exported": 317,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x00768_y01792_tract5063_patch_25",
+        "n_reference": 340,
+        "n_detections": 257,
+        "n_exported": 257,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x00768_y02048_tract5063_patch_25",
+        "n_reference": 338,
+        "n_detections": 227,
+        "n_exported": 229,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x00768_y02304_tract5063_patch_25",
+        "n_reference": 331,
+        "n_detections": 223,
+        "n_exported": 225,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x00768_y02560_tract5063_patch_25",
+        "n_reference": 323,
+        "n_detections": 217,
+        "n_exported": 217,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x00768_y02816_tract5063_patch_25",
+        "n_reference": 328,
+        "n_detections": 243,
+        "n_exported": 243,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x01024_y00000_tract5063_patch_25",
+        "n_reference": 315,
+        "n_detections": 256,
+        "n_exported": 256,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x01024_y00256_tract5063_patch_25",
+        "n_reference": 342,
+        "n_detections": 261,
+        "n_exported": 261,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x01024_y00512_tract5063_patch_25",
+        "n_reference": 352,
+        "n_detections": 255,
+        "n_exported": 256,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x01024_y00768_tract5063_patch_25",
+        "n_reference": 331,
+        "n_detections": 229,
+        "n_exported": 230,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x01024_y01024_tract5063_patch_25",
+        "n_reference": 302,
+        "n_detections": 211,
+        "n_exported": 211,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x01024_y01280_tract5063_patch_25",
+        "n_reference": 334,
+        "n_detections": 236,
+        "n_exported": 236,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x01024_y01536_tract5063_patch_25",
+        "n_reference": 366,
+        "n_detections": 286,
+        "n_exported": 286,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x01024_y01792_tract5063_patch_25",
+        "n_reference": 351,
+        "n_detections": 278,
+        "n_exported": 278,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x01024_y02048_tract5063_patch_25",
+        "n_reference": 352,
+        "n_detections": 247,
+        "n_exported": 249,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x01024_y02304_tract5063_patch_25",
+        "n_reference": 313,
+        "n_detections": 206,
+        "n_exported": 208,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x01024_y02560_tract5063_patch_25",
+        "n_reference": 296,
+        "n_detections": 213,
+        "n_exported": 213,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x01024_y02816_tract5063_patch_25",
+        "n_reference": 330,
+        "n_detections": 227,
+        "n_exported": 227,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x01280_y00000_tract5063_patch_25",
+        "n_reference": 319,
+        "n_detections": 242,
+        "n_exported": 243,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x01280_y00256_tract5063_patch_25",
+        "n_reference": 348,
+        "n_detections": 273,
+        "n_exported": 273,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x01280_y00512_tract5063_patch_25",
+        "n_reference": 347,
+        "n_detections": 268,
+        "n_exported": 268,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x01280_y00768_tract5063_patch_25",
+        "n_reference": 310,
+        "n_detections": 226,
+        "n_exported": 227,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x01280_y01024_tract5063_patch_25",
+        "n_reference": 272,
+        "n_detections": 193,
+        "n_exported": 194,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x01280_y01280_tract5063_patch_25",
+        "n_reference": 279,
+        "n_detections": 191,
+        "n_exported": 191,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x01280_y01536_tract5063_patch_25",
+        "n_reference": 302,
+        "n_detections": 226,
+        "n_exported": 226,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x01280_y01792_tract5063_patch_25",
+        "n_reference": 365,
+        "n_detections": 259,
+        "n_exported": 259,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x01280_y02048_tract5063_patch_25",
+        "n_reference": 391,
+        "n_detections": 257,
+        "n_exported": 259,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x01280_y02304_tract5063_patch_25",
+        "n_reference": 321,
+        "n_detections": 214,
+        "n_exported": 216,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x01280_y02560_tract5063_patch_25",
+        "n_reference": 293,
+        "n_detections": 207,
+        "n_exported": 207,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x01280_y02816_tract5063_patch_25",
+        "n_reference": 344,
+        "n_detections": 231,
+        "n_exported": 231,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x01536_y00000_tract5063_patch_25",
+        "n_reference": 358,
+        "n_detections": 256,
+        "n_exported": 259,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x01536_y00256_tract5063_patch_25",
+        "n_reference": 365,
+        "n_detections": 286,
+        "n_exported": 286,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x01536_y00512_tract5063_patch_25",
+        "n_reference": 344,
+        "n_detections": 264,
+        "n_exported": 264,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x01536_y00768_tract5063_patch_25",
+        "n_reference": 310,
+        "n_detections": 219,
+        "n_exported": 220,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x01536_y01024_tract5063_patch_25",
+        "n_reference": 285,
+        "n_detections": 196,
+        "n_exported": 197,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x01536_y01280_tract5063_patch_25",
+        "n_reference": 262,
+        "n_detections": 188,
+        "n_exported": 188,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x01536_y01536_tract5063_patch_25",
+        "n_reference": 253,
+        "n_detections": 184,
+        "n_exported": 184,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x01536_y01792_tract5063_patch_25",
+        "n_reference": 311,
+        "n_detections": 209,
+        "n_exported": 209,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x01536_y02048_tract5063_patch_25",
+        "n_reference": 362,
+        "n_detections": 238,
+        "n_exported": 238,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x01536_y02304_tract5063_patch_25",
+        "n_reference": 329,
+        "n_detections": 222,
+        "n_exported": 222,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x01536_y02560_tract5063_patch_25",
+        "n_reference": 303,
+        "n_detections": 223,
+        "n_exported": 226,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x01536_y02816_tract5063_patch_25",
+        "n_reference": 346,
+        "n_detections": 250,
+        "n_exported": 253,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x01792_y00000_tract5063_patch_25",
+        "n_reference": 348,
+        "n_detections": 242,
+        "n_exported": 244,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x01792_y00256_tract5063_patch_25",
+        "n_reference": 364,
+        "n_detections": 284,
+        "n_exported": 284,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x01792_y00512_tract5063_patch_25",
+        "n_reference": 326,
+        "n_detections": 233,
+        "n_exported": 233,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x01792_y00768_tract5063_patch_25",
+        "n_reference": 331,
+        "n_detections": 215,
+        "n_exported": 217,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x01792_y01024_tract5063_patch_25",
+        "n_reference": 355,
+        "n_detections": 230,
+        "n_exported": 235,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x01792_y01280_tract5063_patch_25",
+        "n_reference": 315,
+        "n_detections": 214,
+        "n_exported": 216,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x01792_y01536_tract5063_patch_25",
+        "n_reference": 300,
+        "n_detections": 218,
+        "n_exported": 218,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x01792_y01792_tract5063_patch_25",
+        "n_reference": 308,
+        "n_detections": 227,
+        "n_exported": 227,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x01792_y02048_tract5063_patch_25",
+        "n_reference": 365,
+        "n_detections": 256,
+        "n_exported": 256,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x01792_y02304_tract5063_patch_25",
+        "n_reference": 375,
+        "n_detections": 265,
+        "n_exported": 265,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x01792_y02560_tract5063_patch_25",
+        "n_reference": 359,
+        "n_detections": 258,
+        "n_exported": 261,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x01792_y02816_tract5063_patch_25",
+        "n_reference": 381,
+        "n_detections": 290,
+        "n_exported": 293,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x02048_y00000_tract5063_patch_25",
+        "n_reference": 329,
+        "n_detections": 250,
+        "n_exported": 250,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x02048_y00256_tract5063_patch_25",
+        "n_reference": 368,
+        "n_detections": 282,
+        "n_exported": 282,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x02048_y00512_tract5063_patch_25",
+        "n_reference": 308,
+        "n_detections": 223,
+        "n_exported": 223,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x02048_y00768_tract5063_patch_25",
+        "n_reference": 321,
+        "n_detections": 214,
+        "n_exported": 215,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x02048_y01024_tract5063_patch_25",
+        "n_reference": 367,
+        "n_detections": 242,
+        "n_exported": 245,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x02048_y01280_tract5063_patch_25",
+        "n_reference": 346,
+        "n_detections": 233,
+        "n_exported": 236,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x02048_y01536_tract5063_patch_25",
+        "n_reference": 336,
+        "n_detections": 234,
+        "n_exported": 234,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x02048_y01792_tract5063_patch_25",
+        "n_reference": 324,
+        "n_detections": 235,
+        "n_exported": 235,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x02048_y02048_tract5063_patch_25",
+        "n_reference": 340,
+        "n_detections": 244,
+        "n_exported": 244,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x02048_y02304_tract5063_patch_25",
+        "n_reference": 354,
+        "n_detections": 252,
+        "n_exported": 252,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x02048_y02560_tract5063_patch_25",
+        "n_reference": 341,
+        "n_detections": 226,
+        "n_exported": 226,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x02048_y02816_tract5063_patch_25",
+        "n_reference": 357,
+        "n_detections": 246,
+        "n_exported": 246,
+        "skipped": false
+      }
+    ]
+  },
+  "EDF-S": {
+    "inputs": {
+      "catalog": "data/edf_s_ood/catalogs_compact/mer_FINAL_q1_TILE102021011_footprint.fits",
+      "detections": "data/detection_labels/centernet_q1_edfs_vissep_v11_thresh03.pt",
+      "euclid": "data/edf_s_ood/euclid_tiles_edfs_q1",
+      "gaia": "data/gaia_edfs_cache.npz",
+      "filter": "tile_*_euclid.npz",
+      "expected_vis_bright": 94.5
+    },
+    "export_config": {
+      "encoder_ckpt": "models/checkpoints/jaisp_v11_q1_soft/checkpoint_best.pt",
+      "centernet_ckpt": "checkpoints/q1_detection_v11/centernet_vis_sep.pt",
+      "model_type": "centernet",
+      "conf_threshold": 0.3,
+      "nms_kernel": 7,
+      "spike_veto_width": 0.0,
+      "spike_veto_radius": 0,
+      "spike_veto_min_star_area": 20,
+      "bright_rescue": false,
+      "bright_rescue_nsig": 2.5,
+      "bright_rescue_min_area": 45,
+      "bright_rescue_min_radius": 5.0,
+      "bright_rescue_min_peak_snr": 8.0,
+      "bright_rescue_match_scale": 1.5,
+      "bright_rescue_match_min": 8.0,
+      "bright_rescue_match_max": 35.0,
+      "bright_rescue_max_per_tile": 32,
+      "bright_rescue_score": 0.95,
+      "n_tiles": 72,
+      "n_errors": 0,
+      "n_vetoed": 0,
+      "n_bright_rescue": 0
+    },
+    "n_tiles": 72,
+    "n_tiles_used": 72,
+    "tile_pooled": {
+      "vis_clean_mag_lt_24p5": {
+        "recovered": 5145,
+        "total": 5446,
+        "percent": 94.47300771208226
+      },
+      "vis_clean_all_magnitudes": {
+        "recovered": 14661,
+        "total": 16430,
+        "percent": 89.23311016433354
+      },
+      "nir_only_clean_all_magnitudes": {
+        "recovered": 603,
+        "total": 5125,
+        "percent": 11.765853658536585
+      },
+      "full_clean_all_magnitudes": {
+        "recovered": 15264,
+        "total": 21555,
+        "percent": 70.81419624217119
+      },
+      "full_including_flagged_all_magnitudes": {
+        "recovered": 15408,
+        "total": 22768,
+        "percent": 67.67392832044976
+      },
+      "flagged_all_magnitudes": {
+        "recovered": 144,
+        "total": 1213,
+        "percent": 11.87139323990107
+      }
+    },
+    "unique_objects_any_tile": {
+      "vis_clean_mag_lt_24p5": {
+        "recovered": 1475,
+        "total": 1525,
+        "percent": 96.72131147540983
+      },
+      "vis_clean_all_magnitudes": {
+        "recovered": 4268,
+        "total": 4543,
+        "percent": 93.94673123486683
+      },
+      "nir_only_clean_all_magnitudes": {
+        "recovered": 267,
+        "total": 1454,
+        "percent": 18.363136176066025
+      },
+      "full_clean_all_magnitudes": {
+        "recovered": 4535,
+        "total": 5997,
+        "percent": 75.62114390528598
+      },
+      "full_including_flagged_all_magnitudes": {
+        "recovered": 4588,
+        "total": 6327,
+        "percent": 72.51461988304094
+      },
+      "flagged_all_magnitudes": {
+        "recovered": 53,
+        "total": 330,
+        "percent": 16.060606060606062
+      }
+    },
+    "unmasked_detection_check": {
+      "vis_clean_mag_lt_24p5": {
+        "recovered": 5147,
+        "total": 5446,
+        "percent": 94.50973191333088
+      },
+      "vis_clean_all_magnitudes": {
+        "recovered": 14663,
+        "total": 16430,
+        "percent": 89.24528301886792
+      },
+      "nir_only_clean_all_magnitudes": {
+        "recovered": 603,
+        "total": 5125,
+        "percent": 11.765853658536585
+      },
+      "full_clean_all_magnitudes": {
+        "recovered": 15266,
+        "total": 21555,
+        "percent": 70.82347483182556
+      },
+      "full_including_flagged_all_magnitudes": {
+        "recovered": 15410,
+        "total": 22768,
+        "percent": 67.68271257905833
+      },
+      "flagged_all_magnitudes": {
+        "recovered": 144,
+        "total": 1213,
+        "percent": 11.87139323990107
+      }
+    },
+    "detection_mask_boundary_changed_matches": 2,
+    "cached_score_checks": [],
+    "mask_method": "Integer heatmap peaks recovered by rounding; validated against independent masked score cache where available",
+    "tiles": [
+      {
+        "tile": "tile_x00000_y01536",
+        "n_reference": 78,
+        "n_detections": 248,
+        "n_exported": 249,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x00000_y01792",
+        "n_reference": 282,
+        "n_detections": 292,
+        "n_exported": 292,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x00000_y02048",
+        "n_reference": 400,
+        "n_detections": 272,
+        "n_exported": 275,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x00000_y02304",
+        "n_reference": 398,
+        "n_detections": 269,
+        "n_exported": 273,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x00000_y02560",
+        "n_reference": 438,
+        "n_detections": 297,
+        "n_exported": 299,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x00000_y02816",
+        "n_reference": 435,
+        "n_detections": 267,
+        "n_exported": 268,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x00256_y01536",
+        "n_reference": 82,
+        "n_detections": 249,
+        "n_exported": 252,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x00256_y01792",
+        "n_reference": 244,
+        "n_detections": 271,
+        "n_exported": 273,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x00256_y02048",
+        "n_reference": 339,
+        "n_detections": 263,
+        "n_exported": 266,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x00256_y02304",
+        "n_reference": 357,
+        "n_detections": 270,
+        "n_exported": 274,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x00256_y02560",
+        "n_reference": 386,
+        "n_detections": 285,
+        "n_exported": 286,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x00256_y02816",
+        "n_reference": 366,
+        "n_detections": 268,
+        "n_exported": 268,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x00512_y01536",
+        "n_reference": 81,
+        "n_detections": 259,
+        "n_exported": 264,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x00512_y01792",
+        "n_reference": 251,
+        "n_detections": 272,
+        "n_exported": 278,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x00512_y02048",
+        "n_reference": 367,
+        "n_detections": 277,
+        "n_exported": 278,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x00512_y02304",
+        "n_reference": 393,
+        "n_detections": 305,
+        "n_exported": 305,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x00512_y02560",
+        "n_reference": 387,
+        "n_detections": 292,
+        "n_exported": 292,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x00512_y02816",
+        "n_reference": 385,
+        "n_detections": 288,
+        "n_exported": 288,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x00768_y01536",
+        "n_reference": 62,
+        "n_detections": 271,
+        "n_exported": 274,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x00768_y01792",
+        "n_reference": 235,
+        "n_detections": 261,
+        "n_exported": 265,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x00768_y02048",
+        "n_reference": 372,
+        "n_detections": 273,
+        "n_exported": 274,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x00768_y02304",
+        "n_reference": 386,
+        "n_detections": 303,
+        "n_exported": 303,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x00768_y02560",
+        "n_reference": 401,
+        "n_detections": 310,
+        "n_exported": 310,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x00768_y02816",
+        "n_reference": 443,
+        "n_detections": 324,
+        "n_exported": 324,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x01024_y01536",
+        "n_reference": 74,
+        "n_detections": 270,
+        "n_exported": 271,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x01024_y01792",
+        "n_reference": 233,
+        "n_detections": 259,
+        "n_exported": 261,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x01024_y02048",
+        "n_reference": 366,
+        "n_detections": 285,
+        "n_exported": 287,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x01024_y02304",
+        "n_reference": 375,
+        "n_detections": 298,
+        "n_exported": 299,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x01024_y02560",
+        "n_reference": 430,
+        "n_detections": 316,
+        "n_exported": 317,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x01024_y02816",
+        "n_reference": 467,
+        "n_detections": 322,
+        "n_exported": 322,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x01280_y01536",
+        "n_reference": 72,
+        "n_detections": 267,
+        "n_exported": 271,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x01280_y01792",
+        "n_reference": 253,
+        "n_detections": 272,
+        "n_exported": 276,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x01280_y02048",
+        "n_reference": 386,
+        "n_detections": 287,
+        "n_exported": 290,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x01280_y02304",
+        "n_reference": 355,
+        "n_detections": 287,
+        "n_exported": 289,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x01280_y02560",
+        "n_reference": 354,
+        "n_detections": 273,
+        "n_exported": 276,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x01280_y02816",
+        "n_reference": 393,
+        "n_detections": 294,
+        "n_exported": 297,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x01536_y01536",
+        "n_reference": 66,
+        "n_detections": 285,
+        "n_exported": 287,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x01536_y01792",
+        "n_reference": 275,
+        "n_detections": 276,
+        "n_exported": 279,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x01536_y02048",
+        "n_reference": 423,
+        "n_detections": 291,
+        "n_exported": 293,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x01536_y02304",
+        "n_reference": 381,
+        "n_detections": 272,
+        "n_exported": 282,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x01536_y02560",
+        "n_reference": 366,
+        "n_detections": 224,
+        "n_exported": 231,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x01536_y02816",
+        "n_reference": 422,
+        "n_detections": 297,
+        "n_exported": 306,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x01792_y01536",
+        "n_reference": 77,
+        "n_detections": 299,
+        "n_exported": 300,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x01792_y01792",
+        "n_reference": 273,
+        "n_detections": 301,
+        "n_exported": 301,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x01792_y02048",
+        "n_reference": 413,
+        "n_detections": 281,
+        "n_exported": 281,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x01792_y02304",
+        "n_reference": 387,
+        "n_detections": 274,
+        "n_exported": 279,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x01792_y02560",
+        "n_reference": 401,
+        "n_detections": 279,
+        "n_exported": 285,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x01792_y02816",
+        "n_reference": 443,
+        "n_detections": 318,
+        "n_exported": 325,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x02048_y01536",
+        "n_reference": 76,
+        "n_detections": 287,
+        "n_exported": 294,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x02048_y01792",
+        "n_reference": 257,
+        "n_detections": 295,
+        "n_exported": 296,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x02048_y02048",
+        "n_reference": 397,
+        "n_detections": 283,
+        "n_exported": 289,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x02048_y02304",
+        "n_reference": 416,
+        "n_detections": 258,
+        "n_exported": 265,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x02048_y02560",
+        "n_reference": 430,
+        "n_detections": 298,
+        "n_exported": 302,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x02048_y02816",
+        "n_reference": 391,
+        "n_detections": 284,
+        "n_exported": 286,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x02304_y01536",
+        "n_reference": 66,
+        "n_detections": 288,
+        "n_exported": 292,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x02304_y01792",
+        "n_reference": 258,
+        "n_detections": 307,
+        "n_exported": 308,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x02304_y02048",
+        "n_reference": 400,
+        "n_detections": 300,
+        "n_exported": 307,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x02304_y02304",
+        "n_reference": 408,
+        "n_detections": 267,
+        "n_exported": 273,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x02304_y02560",
+        "n_reference": 413,
+        "n_detections": 296,
+        "n_exported": 298,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x02304_y02816",
+        "n_reference": 361,
+        "n_detections": 283,
+        "n_exported": 284,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x02560_y01536",
+        "n_reference": 64,
+        "n_detections": 271,
+        "n_exported": 273,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x02560_y01792",
+        "n_reference": 237,
+        "n_detections": 289,
+        "n_exported": 289,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x02560_y02048",
+        "n_reference": 376,
+        "n_detections": 307,
+        "n_exported": 307,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x02560_y02304",
+        "n_reference": 383,
+        "n_detections": 286,
+        "n_exported": 288,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x02560_y02560",
+        "n_reference": 386,
+        "n_detections": 292,
+        "n_exported": 295,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x02560_y02816",
+        "n_reference": 388,
+        "n_detections": 313,
+        "n_exported": 315,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x02816_y01536",
+        "n_reference": 65,
+        "n_detections": 270,
+        "n_exported": 271,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x02816_y01792",
+        "n_reference": 214,
+        "n_detections": 270,
+        "n_exported": 270,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x02816_y02048",
+        "n_reference": 362,
+        "n_detections": 300,
+        "n_exported": 300,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x02816_y02304",
+        "n_reference": 386,
+        "n_detections": 293,
+        "n_exported": 296,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x02816_y02560",
+        "n_reference": 381,
+        "n_detections": 283,
+        "n_exported": 286,
+        "skipped": false
+      },
+      {
+        "tile": "tile_x02816_y02816",
+        "n_reference": 400,
+        "n_detections": 318,
+        "n_exported": 320,
+        "skipped": false
+      }
+    ]
+  }
+}

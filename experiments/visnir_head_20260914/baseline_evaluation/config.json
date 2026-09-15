@@ -1,0 +1,10 @@
+{
+  "checkpoint": [
+    "baseline=checkpoints/q1_detection_v11/centernet_vis_sep.pt"
+  ],
+  "out": "experiments/visnir_head_20260914/baseline_evaluation",
+  "device": "cuda:0",
+  "field": "EDF-S",
+  "limit": 0,
+  "encoder": "/home/shemmati/Work/Projects/JAISP/models/checkpoints/jaisp_v11_q1_soft/checkpoint_best.pt"
+}

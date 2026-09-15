@@ -1,0 +1,52 @@
+{
+  "config": {
+    "threshold": 3.0,
+    "smooth_sigma_px": 2.1,
+    "merge_px": 5.0,
+    "minarea": 10,
+    "deblend_nthresh": 32,
+    "deblend_cont": 0.005,
+    "excluded_patches": [
+      25
+    ],
+    "catalog_supervision": false,
+    "stack": "sum(background_subtracted_image/variance)/sqrt(sum(1/variance))",
+    "error": "SEP local RMS after smoothing",
+    "tiles": [
+      "tile_x00000_y00000_tract5063_patch_14",
+      "tile_x00768_y00256_tract5063_patch_5",
+      "tile_x01280_y02816_tract5063_patch_5",
+      "tile_x02048_y02304_tract5063_patch_5"
+    ]
+  },
+  "tiles": {
+    "tile_x00000_y00000_tract5063_patch_14": {
+      "n_vis": 276,
+      "n_nir_extracted": 320,
+      "n_nir_added": 164,
+      "smoothed_noise": 0.13315577805042267,
+      "valid_fraction": 0.9203884751024632
+    },
+    "tile_x00768_y00256_tract5063_patch_5": {
+      "n_vis": 230,
+      "n_nir_extracted": 271,
+      "n_nir_added": 129,
+      "smoothed_noise": 0.12824629247188568,
+      "valid_fraction": 0.9492271006658406
+    },
+    "tile_x01280_y02816_tract5063_patch_5": {
+      "n_vis": 262,
+      "n_nir_extracted": 290,
+      "n_nir_added": 132,
+      "smoothed_noise": 0.13269853591918945,
+      "valid_fraction": 0.8439980732833159
+    },
+    "tile_x02048_y02304_tract5063_patch_5": {
+      "n_vis": 233,
+      "n_nir_extracted": 282,
+      "n_nir_added": 104,
+      "smoothed_noise": 0.13022440671920776,
+      "valid_fraction": 0.9280485355591563
+    }
+  }
+}

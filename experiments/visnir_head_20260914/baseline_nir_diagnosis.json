@@ -1,0 +1,13 @@
+{
+  "field": "ECDFS patch25",
+  "n_nir_reference_occurrences": 9183,
+  "nir_with_vis_sep_label_within_0p5_arcsec_percent": 13.372536208210825,
+  "nir_with_vis_sep_label_within_0p2_arcsec_percent": 9.64826309484918,
+  "nir_detection_matches_percent_by_radius_arcsec": {
+    "0.3": 13.753675269519766,
+    "0.5": 15.779157138190133,
+    "0.75": 17.695742132200806,
+    "1.0": 18.70848306653599
+  },
+  "notes": "NIR-only clean reference, same eligible tile-source occurrences as full-MER analysis. SEP targets generated with training recipe on held-out tiles. Matching-radius diagnostic uses unmasked exported detections; larger radii can include unrelated neighboring sources."
+}
