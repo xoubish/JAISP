@@ -1,0 +1,11 @@
+{
+  "closed_utc": "2026-09-15T21:32:35.398823+00:00",
+  "decision": "Reject the one tested rescoring rule; stop this experimental branch for paper finalization.",
+  "new_training_runs": 0,
+  "manuscript_edits_applied": false,
+  "paper_detector_replaced": false,
+  "next_manuscript_proposal": "Clarify in the abstract that 94% catalogue completeness applies to bright VIS-selected reference sources, not full MER.",
+  "paper_main_sha256": "a636074812cadf39951b777e4f13ac796d80dd356b34235519e3569bc63d4320",
+  "results_sha256": "bfd7d483e9c20f7008c585ef61acea6e5d5ffe225a00c7b1da80154931aeccb6",
+  "inspection_notebook": "models/detection2/notebooks/03_detection_rescoring.ipynb"
+}

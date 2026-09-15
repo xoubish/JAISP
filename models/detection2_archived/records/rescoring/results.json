@@ -1,0 +1,237 @@
+{
+  "candidate_count": 13650,
+  "reference_counts": {
+    "vis_bright": 2670,
+    "vis_all": 6878,
+    "nir_only": 2513,
+    "full_mer": 9391
+  },
+  "primary_target_agreement_percent": 87.22572888488128,
+  "operating_points": {
+    "primary": {
+      "target_agreement_percent": 87.22572888488128,
+      "models": {
+        "baseline": {
+          "threshold": 0.29986587166786194,
+          "detections": 9984,
+          "matched": 8709,
+          "agreement_percent": 87.2295673076923,
+          "completeness_percent": {
+            "vis_bright": 95.1310861423221,
+            "vis_all": 94.54783367257924,
+            "nir_only": 83.92359729407083,
+            "full_mer": 91.7048237674369
+          },
+          "recovered": {
+            "vis_bright": 2540,
+            "vis_all": 6503,
+            "nir_only": 2109,
+            "full_mer": 8612
+          }
+        },
+        "rescored": {
+          "threshold": 0.35496032092470675,
+          "detections": 9230,
+          "matched": 8051,
+          "agreement_percent": 87.22643553629469,
+          "completeness_percent": {
+            "vis_bright": 88.50187265917603,
+            "vis_all": 89.4446059901134,
+            "nir_only": 74.09470752089136,
+            "full_mer": 85.33702481098925
+          },
+          "recovered": {
+            "vis_bright": 2363,
+            "vis_all": 6152,
+            "nir_only": 1862,
+            "full_mer": 8014
+          }
+        }
+      },
+      "difference_pp": {
+        "vis_bright": -6.629213483146074,
+        "vis_all": -5.1032276824658425,
+        "nir_only": -9.828889773179469,
+        "full_mer": -6.367798956447658
+      }
+    },
+    "secondary_94": {
+      "target_agreement_percent": 94.0,
+      "models": {
+        "baseline": {
+          "threshold": 0.4068007171154022,
+          "detections": 8473,
+          "matched": 7965,
+          "agreement_percent": 94.00448483417915,
+          "completeness_percent": {
+            "vis_bright": 89.812734082397,
+            "vis_all": 89.25559755742948,
+            "nir_only": 71.82650218861917,
+            "full_mer": 84.59163028431477
+          },
+          "recovered": {
+            "vis_bright": 2398,
+            "vis_all": 6139,
+            "nir_only": 1805,
+            "full_mer": 7944
+          }
+        },
+        "rescored": {
+          "threshold": 1.2345579967084754,
+          "detections": 7846,
+          "matched": 7376,
+          "agreement_percent": 94.00968646444048,
+          "completeness_percent": {
+            "vis_bright": 85.28089887640449,
+            "vis_all": 84.71939517301541,
+            "nir_only": 62.35575009948269,
+            "full_mer": 78.73495900330103
+          },
+          "recovered": {
+            "vis_bright": 2277,
+            "vis_all": 5827,
+            "nir_only": 1567,
+            "full_mer": 7394
+          }
+        }
+      },
+      "difference_pp": {
+        "vis_bright": -4.5318352059925076,
+        "vis_all": -4.536202384414068,
+        "nir_only": -9.470752089136482,
+        "full_mer": -5.856671281013746
+      }
+    }
+  },
+  "paired_intervals": {
+    "4x4": {
+      "primary": {
+        "vis_bright": {
+          "ci95_percentile_pp": [
+            -8.071597272948617,
+            -5.425421502458591
+          ],
+          "valid_replicates": 2000
+        },
+        "vis_all": {
+          "ci95_percentile_pp": [
+            -6.012887539893121,
+            -4.300577880678675
+          ],
+          "valid_replicates": 2000
+        },
+        "nir_only": {
+          "ci95_percentile_pp": [
+            -12.025918095607956,
+            -7.86267125149744
+          ],
+          "valid_replicates": 2000
+        },
+        "full_mer": {
+          "ci95_percentile_pp": [
+            -7.31052249523546,
+            -5.646318910501199
+          ],
+          "valid_replicates": 2000
+        }
+      },
+      "secondary_94": {
+        "vis_bright": {
+          "ci95_percentile_pp": [
+            -5.640223279125089,
+            -3.0645823137782062
+          ],
+          "valid_replicates": 2000
+        },
+        "vis_all": {
+          "ci95_percentile_pp": [
+            -5.410534101405686,
+            -3.5600824130211435
+          ],
+          "valid_replicates": 2000
+        },
+        "nir_only": {
+          "ci95_percentile_pp": [
+            -12.570734659267076,
+            -6.953463703195345
+          ],
+          "valid_replicates": 2000
+        },
+        "full_mer": {
+          "ci95_percentile_pp": [
+            -6.982461825993818,
+            -4.757095262020395
+          ],
+          "valid_replicates": 2000
+        }
+      }
+    },
+    "3x3": {
+      "primary": {
+        "vis_bright": {
+          "ci95_percentile_pp": [
+            -7.686913679624034,
+            -5.735910127443646
+          ],
+          "valid_replicates": 2000
+        },
+        "vis_all": {
+          "ci95_percentile_pp": [
+            -6.072626080357883,
+            -4.2823167104907895
+          ],
+          "valid_replicates": 2000
+        },
+        "nir_only": {
+          "ci95_percentile_pp": [
+            -12.057701126650828,
+            -7.81640765210482
+          ],
+          "valid_replicates": 2000
+        },
+        "full_mer": {
+          "ci95_percentile_pp": [
+            -7.2885619652966005,
+            -5.703963234038316
+          ],
+          "valid_replicates": 2000
+        }
+      },
+      "secondary_94": {
+        "vis_bright": {
+          "ci95_percentile_pp": [
+            -5.723061094914543,
+            -3.159457455973389
+          ],
+          "valid_replicates": 2000
+        },
+        "vis_all": {
+          "ci95_percentile_pp": [
+            -5.598174007614139,
+            -3.607925413077023
+          ],
+          "valid_replicates": 2000
+        },
+        "nir_only": {
+          "ci95_percentile_pp": [
+            -12.175359285835926,
+            -7.3150136490411635
+          ],
+          "valid_replicates": 2000
+        },
+        "full_mer": {
+          "ci95_percentile_pp": [
+            -7.155409848633748,
+            -4.863057717049053
+          ],
+          "valid_replicates": 2000
+        }
+      }
+    }
+  },
+  "decision": "close_branch_keep_selected_detector",
+  "fallback_count": 657,
+  "baseline_archived_counts_reproduced": true,
+  "optimizer_updates": 0,
+  "protocol_sha256": "fcc7b3cfc09f46e21f7753ab3c9f6e420cd32473b5b613ce19761b037d7e142c"
+}

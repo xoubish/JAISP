@@ -1,0 +1,15 @@
+{
+  "prepared_metadata_sha256": "80a03388c72ae3ce45693549586a922a7b6f5c4663c731413a38e3609bf4401c",
+  "selected_checkpoint_sha256": "88075aed83fcf65683c7473a534fc31b032b69864ea1b1f4c36b560571596fe0",
+  "source_sha256": {
+    "/home/shemmati/Work/Projects/JAISP/models/detection2/decoder/model.py": "cbdfddffcd1d59f61bcea04580a49c296553ad78e663a4222dfd5926d1424fbf",
+    "/home/shemmati/Work/Projects/JAISP/models/detection2/decoder/report.py": "3a3e815e3a29ae39293eef6179cfab16e4268e989b173f8e0e09b62458d1e000",
+    "/home/shemmati/Work/Projects/JAISP/models/detection2/decoder/train.py": "eb78c2a3d29863c233e22e1ab0e54f8fa8f759e113a335d11746faeb88f3b8ac",
+    "/home/shemmati/Work/Projects/JAISP/models/detection2/decoder/prepare.py": "28f191ae069d5be4e2ea9411735f5eeab32a055b69dd7d18125f9659cf37bb14",
+    "/home/shemmati/Work/Projects/JAISP/models/detection2/decoder/monitor.py": "133d274ccd3cb7c7b0500c71d61625b731d73bb3c6069c5a37496c88e7402385",
+    "/home/shemmati/Work/Projects/JAISP/models/detection2/decoder/__init__.py": "ca2ffc31e1fa8c055986e3b5349254961ed7cc01bfbde834cdc54fbf7dcbcb3b",
+    "/home/shemmati/Work/Projects/JAISP/models/detection2/decoder/data.py": "5ae7fef058806dce56e4828d7f9453cc4832d491e6cffa020215f4a29769d24c",
+    "/home/shemmati/Work/Projects/JAISP/models/detection2/object_decoder.py": "1738df0db3a1ecf8ee02365d94e5ec27891885e4a82455767eb1bc428624fe50"
+  },
+  "world_size": 2
+}

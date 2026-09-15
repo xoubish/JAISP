@@ -1,0 +1,24 @@
+{
+  "created_utc": "2026-09-15T21:28:10.362626+00:00",
+  "scope": "One frozen-decoder scoring rule on the existing patch-25 development footprint. No training, score-weight tuning, candidate births, centroid changes, or automatic follow-up experiment.",
+  "decoder_sha256": "22b8b2d1fdc673035a0f6404a2b1dfb248793f5fb94c98d945fe9aa621446541",
+  "baseline_catalogue_sha256": "02433e84ac2a75b5f8f3f8e1b0daeec70ad02115398b290c175c9de580157f07",
+  "reference_sha256": "a578907119b9403a3391102b0d338f7fbec456b934be936897f32e88bd37f89b",
+  "geometry_sha256": "1e6b2ee4e884b262b659575a1502bd3e0ddec7f1218d1f3b82419b947a3320ce",
+  "source_sha256": {
+    "/home/shemmati/Work/Projects/JAISP/models/detection2/rescore/__init__.py": "0db6c5d204c93a9424d4e138f4fff90accf6d8c98bcd2e1fa5de4a33c3592e28",
+    "/home/shemmati/Work/Projects/JAISP/models/detection2/rescore/metrics.py": "bee447efef20f01173ef7b3591d11a773305773642feb5fd4c91480d28c75f18",
+    "/home/shemmati/Work/Projects/JAISP/models/detection2/rescore/run.py": "73e0a6ec1f14434edd1686f07eb657d4fa8c5208ebe5b66762e12a4172464ab0",
+    "/home/shemmati/Work/Projects/JAISP/models/detection2/rescore/score.py": "38a5191a55b10a52654e5a53619ce85983697c460b5e323198a735942fda6808"
+  },
+  "candidate_floor": 0.15,
+  "candidate_rule": "Existing standard-loss predictions strictly above 0.15, using their previously frozen sky ownership.",
+  "image_evidence": "E_ib = sum_valid[Huber(yhat_ib - component_ib - y_b) - Huber(yhat_ib - y_b)] / sqrt(sum_valid(component_ib^2)), with Huber delta 3 and denominator floor 1e-8. The full prediction background and all neighbours stay fixed.",
+  "scoring_rule": "score_i = log(p_i/(1-p_i)) + asinh(mean_b(E_ib)); p clipped to [1e-6,1-1e-6]. Equal weight for all ten bands; coefficient fixed at one before results.",
+  "fallback": "Evidence zero if a crop exceeds 128 context objects or has less than 80% valid pixels in any band; retain original detector ranking contribution and report all fallbacks.",
+  "calibration": "A ranking heuristic, not calibrated probability or independent-pixel likelihood. Full-image cached features see the image being scored. MER information does not enter candidate scoring.",
+  "comparison": "For each score ordering, select the largest whole-score prefix with at least 100 detections and agreement at or above the common target. Primary target equals baseline agreement at p>=0.30; secondary target 94%. These thresholds describe development PR curves; they are not deployable thresholds validated on another field.",
+  "uncertainty": "2000 paired spatial bootstrap replicates, 4x4 primary and 3x3 sensitivity. Reselect both equal-agreement thresholds in each replicate. Pointwise within-patch intervals, not uncertainty across seeds or fields.",
+  "decision_gate": "Pass only if primary NIR gain >=1 percentage point with 4x4 paired 95% lower bound >0 and no loss in full-MER completeness; secondary 94% agreement must also have no loss in NIR or full-MER completeness. Otherwise close this branch and keep the selected detector. No further score search.",
+  "inference_wall_limit_seconds": 900
+}

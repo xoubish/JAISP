@@ -1,0 +1,170 @@
+{
+  "archived_on": "2026-09-15",
+  "status": "closed_not_used_in_current_paper",
+  "archive_directory": "models/detection2_archived",
+  "compatibility_symlink": "models/detection2",
+  "generated_outputs": "runs/ is retained locally and excluded from Git",
+  "records": [
+    {
+      "record": "paired_detection/comparison.md",
+      "original_path": "models/detection2_archived/runs/unknown_regions_20260915_v1_12ep/full_validation/comparison.md",
+      "legacy_path": "models/detection2/runs/unknown_regions_20260915_v1_12ep/full_validation/comparison.md",
+      "bytes": 3128,
+      "sha256": "ec37bf5c127c810e44b9d1ab2db825bb6e84f2c7aafe9cd679018a397c352fc2"
+    },
+    {
+      "record": "paired_detection/results.json",
+      "original_path": "models/detection2_archived/runs/unknown_regions_20260915_v1_12ep/full_validation/results.json",
+      "legacy_path": "models/detection2/runs/unknown_regions_20260915_v1_12ep/full_validation/results.json",
+      "bytes": 231888,
+      "sha256": "72926055fb4f4e132e82ca5770dc5f2364f0d9e66b0c345470e08129145705ba"
+    },
+    {
+      "record": "paired_detection/protocol.json",
+      "original_path": "models/detection2_archived/runs/unknown_regions_20260915_v1_12ep/full_validation/protocol.json",
+      "legacy_path": "models/detection2/runs/unknown_regions_20260915_v1_12ep/full_validation/protocol.json",
+      "bytes": 12214,
+      "sha256": "9e70a10e1be46f985a6600d9f116c3318a4a4b0c3b4acfd6c32d2e53a6774c24"
+    },
+    {
+      "record": "paired_detection/wandb_run.json",
+      "original_path": "models/detection2_archived/runs/unknown_regions_20260915_v1_12ep/full_validation/wandb_run.json",
+      "legacy_path": "models/detection2/runs/unknown_regions_20260915_v1_12ep/full_validation/wandb_run.json",
+      "bytes": 94,
+      "sha256": "d6b1181d29daf10adbb343823038b6a7724cb1f3751b712f28d564ec0bc296bd"
+    },
+    {
+      "record": "paired_detection/report.json",
+      "original_path": "models/detection2_archived/runs/unknown_regions_20260915_v1_12ep/full_validation/report.json",
+      "legacy_path": "models/detection2/runs/unknown_regions_20260915_v1_12ep/full_validation/report.json",
+      "bytes": 152,
+      "sha256": "323f8fb4c3cf78d67c94ee5cd9a40e3ea52626c42394dbd8e448cc360db7f2af"
+    },
+    {
+      "record": "paired_detection/control_config.json",
+      "original_path": "models/detection2_archived/runs/unknown_regions_20260915_v1_12ep/control/config.json",
+      "legacy_path": "models/detection2/runs/unknown_regions_20260915_v1_12ep/control/config.json",
+      "bytes": 32439,
+      "sha256": "f8ea7bc9d2487ae1726f1cbed129073e1e2af0da18d939687200dd78a1a4eaf3"
+    },
+    {
+      "record": "paired_detection/control_source_hashes.json",
+      "original_path": "models/detection2_archived/runs/unknown_regions_20260915_v1_12ep/control/source_sha256.json",
+      "legacy_path": "models/detection2/runs/unknown_regions_20260915_v1_12ep/control/source_sha256.json",
+      "bytes": 2314,
+      "sha256": "09d10a9cd9b6f2ce2f8677bed613cb226a9232b09917c72bb104b7e0559bfcd6"
+    },
+    {
+      "record": "paired_detection/masked_config.json",
+      "original_path": "models/detection2_archived/runs/unknown_regions_20260915_v1_12ep/unknown/config.json",
+      "legacy_path": "models/detection2/runs/unknown_regions_20260915_v1_12ep/unknown/config.json",
+      "bytes": 32439,
+      "sha256": "751efc79d334cd6735ade8ec45921ac382bf7b72fadc1d4951feef595ba51d94"
+    },
+    {
+      "record": "paired_detection/masked_source_hashes.json",
+      "original_path": "models/detection2_archived/runs/unknown_regions_20260915_v1_12ep/unknown/source_sha256.json",
+      "legacy_path": "models/detection2/runs/unknown_regions_20260915_v1_12ep/unknown/source_sha256.json",
+      "bytes": 2314,
+      "sha256": "09d10a9cd9b6f2ce2f8677bed613cb226a9232b09917c72bb104b7e0559bfcd6"
+    },
+    {
+      "record": "decoder_warmup/config.json",
+      "original_path": "models/detection2_archived/runs/decoder_warmup_20260915_v1/training/config.json",
+      "legacy_path": "models/detection2/runs/decoder_warmup_20260915_v1/training/config.json",
+      "bytes": 1183,
+      "sha256": "2f823ea346359e4eba0f046d895227dca23d37de6fa17ef35c20a1a319cdfb8f"
+    },
+    {
+      "record": "decoder_warmup/normalization.json",
+      "original_path": "models/detection2_archived/runs/decoder_warmup_20260915_v1/prepared/normalization.json",
+      "legacy_path": "models/detection2/runs/decoder_warmup_20260915_v1/prepared/normalization.json",
+      "bytes": 2148,
+      "sha256": "2abaf001fff7a836991d3458415c8c3ab819f9aee64af867c037f12ab595734b"
+    },
+    {
+      "record": "decoder_warmup/initial_validation.json",
+      "original_path": "models/detection2_archived/runs/decoder_warmup_20260915_v1/training/validation_epoch_00.json",
+      "legacy_path": "models/detection2/runs/decoder_warmup_20260915_v1/training/validation_epoch_00.json",
+      "bytes": 6184,
+      "sha256": "af2241472dd066c98b8cd2e4490b022d5d65387f9037db9f7d1c53d885645412"
+    },
+    {
+      "record": "decoder_warmup/final_validation.json",
+      "original_path": "models/detection2_archived/runs/decoder_warmup_20260915_v1/training/validation_epoch_20.json",
+      "legacy_path": "models/detection2/runs/decoder_warmup_20260915_v1/training/validation_epoch_20.json",
+      "bytes": 6141,
+      "sha256": "b4ef2055b168bc278415a21bde06af54f2f6e75a08d6f4d4749938dadc18b758"
+    },
+    {
+      "record": "decoder_warmup/source_hashes.json",
+      "original_path": "models/detection2_archived/runs/decoder_warmup_20260915_v1/training/source_sha256.json",
+      "legacy_path": "models/detection2/runs/decoder_warmup_20260915_v1/training/source_sha256.json",
+      "bytes": 1413,
+      "sha256": "90872aa671f069735875a0e4b42451271af7a2df2e7d576527fbf342e3fd12de"
+    },
+    {
+      "record": "decoder_warmup/wandb_run.json",
+      "original_path": "models/detection2_archived/runs/decoder_warmup_20260915_v1/training/wandb_run.json",
+      "legacy_path": "models/detection2/runs/decoder_warmup_20260915_v1/training/wandb_run.json",
+      "bytes": 94,
+      "sha256": "2074973ddc824bd399cfefff1644a5dc4ccbf9e0c6220376eb3d974793419f5b"
+    },
+    {
+      "record": "decoder_warmup/report.json",
+      "original_path": "models/detection2_archived/runs/decoder_warmup_20260915_v1/training/report.json",
+      "legacy_path": "models/detection2/runs/decoder_warmup_20260915_v1/training/report.json",
+      "bytes": 170,
+      "sha256": "5488a724e4a39e034b1f7d565ba666939e316cc7ca6cb6c8e24211e4b29e293d"
+    },
+    {
+      "record": "rescoring/comparison.md",
+      "original_path": "models/detection2_archived/runs/decoder_rescore_20260915_v1/comparison.md",
+      "legacy_path": "models/detection2/runs/decoder_rescore_20260915_v1/comparison.md",
+      "bytes": 1975,
+      "sha256": "401d5782efcecdc36c2766a119403802113d88064bfc9be553e1d169122136c2"
+    },
+    {
+      "record": "rescoring/results.json",
+      "original_path": "models/detection2_archived/runs/decoder_rescore_20260915_v1/results.json",
+      "legacy_path": "models/detection2/runs/decoder_rescore_20260915_v1/results.json",
+      "bytes": 6341,
+      "sha256": "bfd7d483e9c20f7008c585ef61acea6e5d5ffe225a00c7b1da80154931aeccb6"
+    },
+    {
+      "record": "rescoring/protocol.json",
+      "original_path": "models/detection2_archived/runs/decoder_rescore_20260915_v1/protocol.json",
+      "legacy_path": "models/detection2/runs/decoder_rescore_20260915_v1/protocol.json",
+      "bytes": 3112,
+      "sha256": "fcc7b3cfc09f46e21f7753ab3c9f6e420cd32473b5b613ce19761b037d7e142c"
+    },
+    {
+      "record": "rescoring/closure.json",
+      "original_path": "models/detection2_archived/runs/decoder_rescore_20260915_v1/closure.json",
+      "legacy_path": "models/detection2/runs/decoder_rescore_20260915_v1/closure.json",
+      "bytes": 680,
+      "sha256": "29d610d31a60ce1a445c821d60eda8c1aee49f66aedc3b73c413046a419fce23"
+    },
+    {
+      "record": "rescoring/wandb_run.json",
+      "original_path": "models/detection2_archived/runs/decoder_rescore_20260915_v1/wandb_run.json",
+      "legacy_path": "models/detection2/runs/decoder_rescore_20260915_v1/wandb_run.json",
+      "bytes": 94,
+      "sha256": "43fa3b79d916d6c9c86ea04904c5fd6d3a5d4cfa7484cad266e24324b702d610"
+    },
+    {
+      "record": "rescoring/report.json",
+      "original_path": "models/detection2_archived/runs/decoder_rescore_20260915_v1/report.json",
+      "legacy_path": "models/detection2/runs/decoder_rescore_20260915_v1/report.json",
+      "bytes": 169,
+      "sha256": "ad2637c3acbc3649a338a54fa53d70f3766aab9014f104cfd511d4309f022638"
+    },
+    {
+      "record": "rescoring/publication_verification.json",
+      "original_path": "models/detection2_archived/runs/decoder_rescore_20260915_v1/publication_verification.json",
+      "legacy_path": "models/detection2/runs/decoder_rescore_20260915_v1/publication_verification.json",
+      "bytes": 163,
+      "sha256": "64b319fd682c68e4afbc5804d224ce541385fe8b05ccae360c3ebedc093f80ea"
+    }
+  ]
+}

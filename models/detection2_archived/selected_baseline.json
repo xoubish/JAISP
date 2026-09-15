@@ -1,0 +1,18 @@
+{
+  "selected_utc": "2026-09-15T18:28:59.021147+00:00",
+  "purpose": "Working baseline for the next learned-object-decoder experiment",
+  "name": "CenterNet — standard loss",
+  "checkpoint": "models/detection2/runs/unknown_regions_20260915_v1_12ep/control/final.pt",
+  "checkpoint_sha256": "88075aed83fcf65683c7473a534fc31b032b69864ea1b1f4c36b560571596fe0",
+  "architecture": "Existing CenterNet detector head on frozen JAISP v11 ten-band features",
+  "feature_dir": "data/cached_features_v11_q1",
+  "training_arm": "control",
+  "training_epochs": 12,
+  "training_config": "models/detection2/runs/unknown_regions_20260915_v1_12ep/control/config.json",
+  "training_run_url": "https://wandb.ai/AI-Astro/JAISP-Detection-Q1/runs/mfviwjw1",
+  "comparison": "models/detection2/runs/unknown_regions_20260915_v1_12ep/full_validation/results.json",
+  "comparison_report": "https://wandb.ai/AI-Astro/JAISP-Detection-Q1/reports/Detection2-detection-progress--VmlldzoxNzkzOTM5NQ==",
+  "selection_basis": "User accepted standard-loss recommendation after the full patch-25 development comparison; final epoch fixed before evaluation.",
+  "next_stage": "Train the learned object decoder; this selection does not start another training job.",
+  "edfs_evaluation_of_this_checkpoint": "not yet run"
+}
