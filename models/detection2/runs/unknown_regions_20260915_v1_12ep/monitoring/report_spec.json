@@ -1,0 +1,1023 @@
+{
+  "id": "VmlldzoxNzkzOTM5NQ==",
+  "name": "",
+  "displayName": "Detection2 detection progress",
+  "description": "12-epoch control versus unknown regions. Fixed validation tiles, starting-model reference and threshold tradeoffs.",
+  "project": {
+    "name": "JAISP-Detection-Q1",
+    "entityName": "AI-Astro"
+  },
+  "spec": {
+    "version": 5,
+    "panelSettings": {},
+    "blocks": [
+      {
+        "type": "paragraph",
+        "children": [
+          {
+            "text": ""
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "children": [
+          {
+            "text": "Are we recovering more objects without losing catalogue agreement?"
+          }
+        ],
+        "level": 1
+      },
+      {
+        "type": "paragraph",
+        "children": [
+          {
+            "text": "In the epoch plots, blue is control, orange is unknown regions, and grey is the unchanged starting model. Compare the validation curves, not the raw losses. Each quality point is one completed epoch on the same 12 patch-25 tiles; all four panels use score threshold 0.30."
+          }
+        ]
+      },
+      {
+        "type": "panel-grid",
+        "children": [
+          {
+            "text": ""
+          }
+        ],
+        "metadata": {
+          "openViz": true,
+          "openRunSet": 0,
+          "name": "unused-name",
+          "runSets": [
+            {
+              "id": "1tirqb8pw68",
+              "runFeed": {
+                "version": 2,
+                "columnVisible": {
+                  "run:name": false
+                },
+                "columnPinned": {},
+                "columnWidths": {},
+                "columnOrder": [],
+                "pageSize": 10,
+                "onlyShowSelected": false
+              },
+              "enabled": true,
+              "project": {
+                "name": "JAISP-Detection-Q1",
+                "entityName": "AI-Astro",
+                "id": "UHJvamVjdEludGVybmFsSWQ6NDQ3MDc1ODI="
+              },
+              "name": "Detection2 comparison",
+              "search": {
+                "query": ""
+              },
+              "filters": {
+                "op": "OR",
+                "filters": [
+                  {
+                    "op": "AND",
+                    "filters": [
+                      {
+                        "op": "IN",
+                        "key": {
+                          "section": "run",
+                          "name": "ID"
+                        },
+                        "value": [
+                          "wlymkj1t",
+                          "mfviwjw1",
+                          "rj1onedv"
+                        ],
+                        "disabled": false
+                      }
+                    ]
+                  }
+                ]
+              },
+              "grouping": [],
+              "sort": {
+                "keys": [
+                  {
+                    "key": {
+                      "section": "run",
+                      "name": "createdAt"
+                    },
+                    "ascending": false
+                  }
+                ]
+              },
+              "selections": {
+                "root": 1,
+                "bounds": [],
+                "tree": []
+              },
+              "expandedRowAddresses": []
+            }
+          ],
+          "hideRunSets": true,
+          "panels": {
+            "views": {
+              "0": {
+                "name": "Panels",
+                "defaults": [],
+                "config": []
+              }
+            },
+            "tabs": [
+              "0"
+            ]
+          },
+          "panelBankConfig": {
+            "state": 0,
+            "settings": {
+              "autoOrganizePrefix": 2,
+              "showEmptySections": false,
+              "sortAlphabetically": false
+            },
+            "sections": [
+              {
+                "name": "Hidden Panels",
+                "isOpen": false,
+                "type": "flow",
+                "flowConfig": {
+                  "snapToColumns": true,
+                  "columnsPerPage": 3,
+                  "rowsPerPage": 2,
+                  "gutterWidth": 16,
+                  "boxWidth": 460,
+                  "boxHeight": 300
+                },
+                "sorted": 0,
+                "localPanelSettings": {
+                  "smoothingWeight": 0,
+                  "smoothingType": "exponential",
+                  "xAxis": "_step",
+                  "ignoreOutliers": false,
+                  "useRunsTableGroupingInPanels": true,
+                  "smoothingActive": true,
+                  "xAxisActive": false
+                },
+                "panels": []
+              }
+            ]
+          },
+          "panelBankSectionConfig": {
+            "name": "Report Panels",
+            "isOpen": false,
+            "panels": [
+              {
+                "__id__": "5g3m3wepeos",
+                "layout": {
+                  "x": 0,
+                  "y": 0,
+                  "w": 12,
+                  "h": 8
+                },
+                "viewType": "Run History Line Plot",
+                "config": {
+                  "chartTitle": "VIS completeness (mag < 24.5)",
+                  "xAxis": "epoch",
+                  "metrics": [
+                    "val/t0.30/vis_bright_completeness"
+                  ],
+                  "xAxisMin": 0.0,
+                  "yAxisMax": 100.0,
+                  "xAxisTitle": "Completed validation epoch",
+                  "yAxisTitle": "Percent",
+                  "ignoreOutliers": false,
+                  "smoothingType": "none",
+                  "limit": 3,
+                  "expressions": [
+                    "${val/t0.30/vis_bright_completeness} * 100"
+                  ],
+                  "fontSize": "medium",
+                  "legendPosition": "south",
+                  "aggregate": false
+                }
+              },
+              {
+                "__id__": "3wc8t1isp4e",
+                "layout": {
+                  "x": 12,
+                  "y": 0,
+                  "w": 12,
+                  "h": 8
+                },
+                "viewType": "Run History Line Plot",
+                "config": {
+                  "chartTitle": "NIR-only completeness",
+                  "xAxis": "epoch",
+                  "metrics": [
+                    "val/t0.30/nir_only_completeness"
+                  ],
+                  "xAxisMin": 0.0,
+                  "yAxisMax": 100.0,
+                  "xAxisTitle": "Completed validation epoch",
+                  "yAxisTitle": "Percent",
+                  "ignoreOutliers": false,
+                  "smoothingType": "none",
+                  "limit": 3,
+                  "expressions": [
+                    "${val/t0.30/nir_only_completeness} * 100"
+                  ],
+                  "fontSize": "medium",
+                  "legendPosition": "south",
+                  "aggregate": false
+                }
+              },
+              {
+                "__id__": "7nupjh9xllc",
+                "layout": {
+                  "x": 0,
+                  "y": 8,
+                  "w": 12,
+                  "h": 8
+                },
+                "viewType": "Run History Line Plot",
+                "config": {
+                  "chartTitle": "Full-MER completeness",
+                  "xAxis": "epoch",
+                  "metrics": [
+                    "val/t0.30/full_mer_completeness"
+                  ],
+                  "xAxisMin": 0.0,
+                  "yAxisMax": 100.0,
+                  "xAxisTitle": "Completed validation epoch",
+                  "yAxisTitle": "Percent",
+                  "ignoreOutliers": false,
+                  "smoothingType": "none",
+                  "limit": 3,
+                  "expressions": [
+                    "${val/t0.30/full_mer_completeness} * 100"
+                  ],
+                  "fontSize": "medium",
+                  "legendPosition": "south",
+                  "aggregate": false
+                }
+              },
+              {
+                "__id__": "73ouqdzp26",
+                "layout": {
+                  "x": 12,
+                  "y": 8,
+                  "w": 12,
+                  "h": 8
+                },
+                "viewType": "Run History Line Plot",
+                "config": {
+                  "chartTitle": "MER match fraction",
+                  "xAxis": "epoch",
+                  "metrics": [
+                    "val/t0.30/mer_match_fraction"
+                  ],
+                  "xAxisMin": 0.0,
+                  "yAxisMax": 100.0,
+                  "xAxisTitle": "Completed validation epoch",
+                  "yAxisTitle": "Percent",
+                  "ignoreOutliers": false,
+                  "smoothingType": "none",
+                  "limit": 3,
+                  "expressions": [
+                    "${val/t0.30/mer_match_fraction} * 100"
+                  ],
+                  "fontSize": "medium",
+                  "legendPosition": "south",
+                  "aggregate": false
+                }
+              }
+            ],
+            "type": "grid",
+            "flowConfig": {
+              "snapToColumns": true,
+              "columnsPerPage": 3,
+              "rowsPerPage": 2,
+              "gutterWidth": 16,
+              "boxWidth": 460,
+              "boxHeight": 300
+            },
+            "sorted": 0,
+            "localPanelSettings": {
+              "smoothingWeight": 0,
+              "smoothingType": "exponential",
+              "xAxis": "_step",
+              "ignoreOutliers": false,
+              "useRunsTableGroupingInPanels": true,
+              "smoothingActive": true,
+              "xAxisActive": false
+            }
+          },
+          "customRunColors": {
+            "wlymkj1t": "#667085",
+            "mfviwjw1": "#2563eb",
+            "rj1onedv": "#ea7c19"
+          }
+        }
+      },
+      {
+        "type": "heading",
+        "children": [
+          {
+            "text": "Does the tradeoff improve when the threshold changes?"
+          }
+        ],
+        "level": 2
+      },
+      {
+        "type": "paragraph",
+        "children": [
+          {
+            "text": "Higher and farther right is better. Each curve connects the four measured thresholds 0.20, 0.30, 0.40 and 0.50; the lines are visual guides, not extra measurements. Control and unknown always use their latest shared completed epoch. The starting model remains the epoch-0 reference. Legend labels identify each curve."
+          }
+        ]
+      },
+      {
+        "type": "panel-grid",
+        "children": [
+          {
+            "text": ""
+          }
+        ],
+        "metadata": {
+          "openViz": true,
+          "openRunSet": 0,
+          "name": "unused-name",
+          "runSets": [
+            {
+              "id": "1pbc3rn6trv",
+              "runFeed": {
+                "version": 2,
+                "columnVisible": {
+                  "run:name": false
+                },
+                "columnPinned": {},
+                "columnWidths": {},
+                "columnOrder": [],
+                "pageSize": 10,
+                "onlyShowSelected": false
+              },
+              "enabled": true,
+              "project": {
+                "name": "JAISP-Detection-Q1",
+                "entityName": "AI-Astro",
+                "id": "UHJvamVjdEludGVybmFsSWQ6NDQ3MDc1ODI="
+              },
+              "name": "Detection2 comparison",
+              "search": {
+                "query": ""
+              },
+              "filters": {
+                "op": "OR",
+                "filters": [
+                  {
+                    "op": "AND",
+                    "filters": [
+                      {
+                        "op": "IN",
+                        "key": {
+                          "section": "run",
+                          "name": "ID"
+                        },
+                        "value": [
+                          "wlymkj1t"
+                        ],
+                        "disabled": false
+                      }
+                    ]
+                  }
+                ]
+              },
+              "grouping": [],
+              "sort": {
+                "keys": [
+                  {
+                    "key": {
+                      "section": "run",
+                      "name": "createdAt"
+                    },
+                    "ascending": false
+                  }
+                ]
+              },
+              "selections": {
+                "root": 1,
+                "bounds": [],
+                "tree": []
+              },
+              "expandedRowAddresses": []
+            }
+          ],
+          "hideRunSets": true,
+          "panels": {
+            "views": {
+              "0": {
+                "name": "Panels",
+                "defaults": [],
+                "config": []
+              }
+            },
+            "tabs": [
+              "0"
+            ]
+          },
+          "panelBankConfig": {
+            "state": 0,
+            "settings": {
+              "autoOrganizePrefix": 2,
+              "showEmptySections": false,
+              "sortAlphabetically": false
+            },
+            "sections": [
+              {
+                "name": "Hidden Panels",
+                "isOpen": false,
+                "type": "flow",
+                "flowConfig": {
+                  "snapToColumns": true,
+                  "columnsPerPage": 3,
+                  "rowsPerPage": 2,
+                  "gutterWidth": 16,
+                  "boxWidth": 460,
+                  "boxHeight": 300
+                },
+                "sorted": 0,
+                "localPanelSettings": {
+                  "smoothingWeight": 0,
+                  "smoothingType": "exponential",
+                  "xAxis": "_step",
+                  "ignoreOutliers": false,
+                  "useRunsTableGroupingInPanels": true,
+                  "smoothingActive": true,
+                  "xAxisActive": false
+                },
+                "panels": []
+              }
+            ]
+          },
+          "panelBankSectionConfig": {
+            "name": "Report Panels",
+            "isOpen": false,
+            "panels": [
+              {
+                "__id__": "a7zzdmkmnko",
+                "layout": {
+                  "x": 0,
+                  "y": 0,
+                  "w": 8,
+                  "h": 4
+                },
+                "viewType": "Scalar Chart",
+                "config": {
+                  "chartTitle": "Latest shared validation epoch",
+                  "metrics": [
+                    "monitor/latest_shared_epoch"
+                  ]
+                }
+              }
+            ],
+            "type": "grid",
+            "flowConfig": {
+              "snapToColumns": true,
+              "columnsPerPage": 3,
+              "rowsPerPage": 2,
+              "gutterWidth": 16,
+              "boxWidth": 460,
+              "boxHeight": 300
+            },
+            "sorted": 0,
+            "localPanelSettings": {
+              "smoothingWeight": 0,
+              "smoothingType": "exponential",
+              "xAxis": "_step",
+              "ignoreOutliers": false,
+              "useRunsTableGroupingInPanels": true,
+              "smoothingActive": true,
+              "xAxisActive": false
+            }
+          },
+          "customRunColors": {}
+        }
+      },
+      {
+        "type": "panel-grid",
+        "children": [
+          {
+            "text": ""
+          }
+        ],
+        "metadata": {
+          "openViz": true,
+          "openRunSet": 0,
+          "name": "unused-name",
+          "runSets": [
+            {
+              "id": "1kdpynnt1u3",
+              "runFeed": {
+                "version": 2,
+                "columnVisible": {
+                  "run:name": false
+                },
+                "columnPinned": {},
+                "columnWidths": {},
+                "columnOrder": [],
+                "pageSize": 10,
+                "onlyShowSelected": false
+              },
+              "enabled": true,
+              "project": {
+                "name": "JAISP-Detection-Q1",
+                "entityName": "AI-Astro",
+                "id": "UHJvamVjdEludGVybmFsSWQ6NDQ3MDc1ODI="
+              },
+              "name": "Detection2 comparison",
+              "search": {
+                "query": ""
+              },
+              "filters": {
+                "op": "OR",
+                "filters": [
+                  {
+                    "op": "AND",
+                    "filters": [
+                      {
+                        "op": "IN",
+                        "key": {
+                          "section": "run",
+                          "name": "ID"
+                        },
+                        "value": [
+                          "wlymkj1t"
+                        ],
+                        "disabled": false
+                      }
+                    ]
+                  }
+                ]
+              },
+              "grouping": [],
+              "sort": {
+                "keys": [
+                  {
+                    "key": {
+                      "section": "run",
+                      "name": "createdAt"
+                    },
+                    "ascending": false
+                  }
+                ]
+              },
+              "selections": {
+                "root": 1,
+                "bounds": [],
+                "tree": []
+              },
+              "expandedRowAddresses": []
+            }
+          ],
+          "hideRunSets": true,
+          "panels": {
+            "views": {
+              "0": {
+                "name": "Panels",
+                "defaults": [],
+                "config": []
+              }
+            },
+            "tabs": [
+              "0"
+            ]
+          },
+          "panelBankConfig": {
+            "state": 0,
+            "settings": {
+              "autoOrganizePrefix": 2,
+              "showEmptySections": false,
+              "sortAlphabetically": false
+            },
+            "sections": [
+              {
+                "name": "Hidden Panels",
+                "isOpen": false,
+                "type": "flow",
+                "flowConfig": {
+                  "snapToColumns": true,
+                  "columnsPerPage": 3,
+                  "rowsPerPage": 2,
+                  "gutterWidth": 16,
+                  "boxWidth": 460,
+                  "boxHeight": 300
+                },
+                "sorted": 0,
+                "localPanelSettings": {
+                  "smoothingWeight": 0,
+                  "smoothingType": "exponential",
+                  "xAxis": "_step",
+                  "ignoreOutliers": false,
+                  "useRunsTableGroupingInPanels": true,
+                  "smoothingActive": true,
+                  "xAxisActive": false
+                },
+                "panels": []
+              }
+            ]
+          },
+          "panelBankSectionConfig": {
+            "name": "Report Panels",
+            "isOpen": false,
+            "panels": [
+              {
+                "__id__": "",
+                "layout": {
+                  "x": 0,
+                  "y": 0,
+                  "w": 12,
+                  "h": 9
+                },
+                "viewType": "Vega2",
+                "config": {
+                  "transform": {
+                    "name": "tableWithLeafColNames"
+                  },
+                  "userQuery": {
+                    "queryFields": [
+                      {
+                        "name": "runSets",
+                        "args": [
+                          {
+                            "name": "runSets",
+                            "value": "${runSets}"
+                          },
+                          {
+                            "name": "limit",
+                            "value": 500.0
+                          }
+                        ],
+                        "fields": [
+                          {
+                            "name": "summaryTable",
+                            "args": [
+                              {
+                                "name": "tableKey",
+                                "value": "tradeoff/full_mer_table"
+                              }
+                            ],
+                            "fields": []
+                          },
+                          {
+                            "name": "id",
+                            "fields": []
+                          },
+                          {
+                            "name": "name",
+                            "fields": []
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  "panelDefId": "wandb/lineseries/v0",
+                  "fieldSettings": {
+                    "step": "step",
+                    "lineKey": "lineKey",
+                    "lineVal": "lineVal"
+                  },
+                  "stringSettings": {
+                    "title": "Full-MER completeness (%) \u2014 latest shared epoch",
+                    "xname": "MER match fraction (%)"
+                  }
+                }
+              },
+              {
+                "__id__": "",
+                "layout": {
+                  "x": 12,
+                  "y": 0,
+                  "w": 12,
+                  "h": 9
+                },
+                "viewType": "Vega2",
+                "config": {
+                  "transform": {
+                    "name": "tableWithLeafColNames"
+                  },
+                  "userQuery": {
+                    "queryFields": [
+                      {
+                        "name": "runSets",
+                        "args": [
+                          {
+                            "name": "runSets",
+                            "value": "${runSets}"
+                          },
+                          {
+                            "name": "limit",
+                            "value": 500.0
+                          }
+                        ],
+                        "fields": [
+                          {
+                            "name": "summaryTable",
+                            "args": [
+                              {
+                                "name": "tableKey",
+                                "value": "tradeoff/nir_only_table"
+                              }
+                            ],
+                            "fields": []
+                          },
+                          {
+                            "name": "id",
+                            "fields": []
+                          },
+                          {
+                            "name": "name",
+                            "fields": []
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  "panelDefId": "wandb/lineseries/v0",
+                  "fieldSettings": {
+                    "step": "step",
+                    "lineKey": "lineKey",
+                    "lineVal": "lineVal"
+                  },
+                  "stringSettings": {
+                    "title": "NIR-only completeness (%) \u2014 latest shared epoch",
+                    "xname": "MER match fraction (%)"
+                  }
+                }
+              }
+            ],
+            "type": "grid",
+            "flowConfig": {
+              "snapToColumns": true,
+              "columnsPerPage": 3,
+              "rowsPerPage": 2,
+              "gutterWidth": 16,
+              "boxWidth": 460,
+              "boxHeight": 300
+            },
+            "sorted": 0,
+            "localPanelSettings": {
+              "smoothingWeight": 0,
+              "smoothingType": "exponential",
+              "xAxis": "_step",
+              "ignoreOutliers": false,
+              "useRunsTableGroupingInPanels": true,
+              "smoothingActive": true,
+              "xAxisActive": false
+            }
+          },
+          "customRunColors": {}
+        }
+      },
+      {
+        "type": "heading",
+        "children": [
+          {
+            "text": "How to interpret the result"
+          }
+        ],
+        "level": 2
+      },
+      {
+        "type": "paragraph",
+        "children": [
+          {
+            "text": "An improvement should retain or increase completeness at comparable MER agreement. A shift in score calibration can change the fixed-threshold plots without improving the tradeoff. MER agreement is not absolute object purity: real sources absent from MER count as unmatched. Counts are tile-pooled and matching is nearest-neighbour within 0.5 arcsec. VIS here means clean VIS sources with magnitude <24.5; NIR-only and full-MER completeness have no magnitude cut. These are development metrics, not a blind final test."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "children": [
+          {
+            "text": "Optimization diagnostics"
+          }
+        ],
+        "level": 2
+      },
+      {
+        "type": "paragraph",
+        "children": [
+          {
+            "text": "The unknown arm omits some background penalties, so its loss can be lower by construction. Use these secondary plots to spot instability, not to decide which detector is better."
+          }
+        ]
+      },
+      {
+        "type": "panel-grid",
+        "children": [
+          {
+            "text": ""
+          }
+        ],
+        "metadata": {
+          "openViz": true,
+          "openRunSet": 0,
+          "name": "unused-name",
+          "runSets": [
+            {
+              "id": "2p6648k81r4",
+              "runFeed": {
+                "version": 2,
+                "columnVisible": {
+                  "run:name": false
+                },
+                "columnPinned": {},
+                "columnWidths": {},
+                "columnOrder": [],
+                "pageSize": 10,
+                "onlyShowSelected": false
+              },
+              "enabled": true,
+              "project": {
+                "name": "JAISP-Detection-Q1",
+                "entityName": "AI-Astro",
+                "id": "UHJvamVjdEludGVybmFsSWQ6NDQ3MDc1ODI="
+              },
+              "name": "Detection2 comparison",
+              "search": {
+                "query": ""
+              },
+              "filters": {
+                "op": "OR",
+                "filters": [
+                  {
+                    "op": "AND",
+                    "filters": [
+                      {
+                        "op": "IN",
+                        "key": {
+                          "section": "run",
+                          "name": "ID"
+                        },
+                        "value": [
+                          "mfviwjw1",
+                          "rj1onedv"
+                        ],
+                        "disabled": false
+                      }
+                    ]
+                  }
+                ]
+              },
+              "grouping": [],
+              "sort": {
+                "keys": [
+                  {
+                    "key": {
+                      "section": "run",
+                      "name": "createdAt"
+                    },
+                    "ascending": false
+                  }
+                ]
+              },
+              "selections": {
+                "root": 1,
+                "bounds": [],
+                "tree": []
+              },
+              "expandedRowAddresses": []
+            }
+          ],
+          "hideRunSets": true,
+          "panels": {
+            "views": {
+              "0": {
+                "name": "Panels",
+                "defaults": [],
+                "config": []
+              }
+            },
+            "tabs": [
+              "0"
+            ]
+          },
+          "panelBankConfig": {
+            "state": 0,
+            "settings": {
+              "autoOrganizePrefix": 2,
+              "showEmptySections": false,
+              "sortAlphabetically": false
+            },
+            "sections": [
+              {
+                "name": "Hidden Panels",
+                "isOpen": false,
+                "type": "flow",
+                "flowConfig": {
+                  "snapToColumns": true,
+                  "columnsPerPage": 3,
+                  "rowsPerPage": 2,
+                  "gutterWidth": 16,
+                  "boxWidth": 460,
+                  "boxHeight": 300
+                },
+                "sorted": 0,
+                "localPanelSettings": {
+                  "smoothingWeight": 0,
+                  "smoothingType": "exponential",
+                  "xAxis": "_step",
+                  "ignoreOutliers": false,
+                  "useRunsTableGroupingInPanels": true,
+                  "smoothingActive": true,
+                  "xAxisActive": false
+                },
+                "panels": []
+              }
+            ]
+          },
+          "panelBankSectionConfig": {
+            "name": "Report Panels",
+            "isOpen": false,
+            "panels": [
+              {
+                "__id__": "g81xq9nto1",
+                "layout": {
+                  "x": 0,
+                  "y": 0,
+                  "w": 12,
+                  "h": 7
+                },
+                "viewType": "Run History Line Plot",
+                "config": {
+                  "chartTitle": "Mean training loss per epoch",
+                  "xAxis": "epoch",
+                  "metrics": [
+                    "train/epoch_mean_loss"
+                  ],
+                  "smoothingType": "none",
+                  "aggregate": false
+                }
+              },
+              {
+                "__id__": "6pebsi6v2t",
+                "layout": {
+                  "x": 12,
+                  "y": 0,
+                  "w": 12,
+                  "h": 7
+                },
+                "viewType": "Run History Line Plot",
+                "config": {
+                  "chartTitle": "Learning rate",
+                  "xAxis": "train/step",
+                  "metrics": [
+                    "train/lr"
+                  ],
+                  "smoothingType": "none",
+                  "aggregate": false
+                }
+              }
+            ],
+            "type": "grid",
+            "flowConfig": {
+              "snapToColumns": true,
+              "columnsPerPage": 3,
+              "rowsPerPage": 2,
+              "gutterWidth": 16,
+              "boxWidth": 460,
+              "boxHeight": 300
+            },
+            "sorted": 0,
+            "localPanelSettings": {
+              "smoothingWeight": 0,
+              "smoothingType": "exponential",
+              "xAxis": "_step",
+              "ignoreOutliers": false,
+              "useRunsTableGroupingInPanels": true,
+              "smoothingActive": true,
+              "xAxisActive": false
+            }
+          },
+          "customRunColors": {
+            "mfviwjw1": "#2563eb",
+            "rj1onedv": "#ea7c19"
+          }
+        }
+      },
+      {
+        "type": "paragraph",
+        "children": [
+          {
+            "text": "The reference/comparison monitor reads saved validation metrics only. It uses no GPU and does not alter either training process. Tradeoff tables refresh within about 30 seconds of both validation files arriving. No candidate images or model checkpoints are uploaded."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "children": [
+          {
+            "text": ""
+          }
+        ]
+      }
+    ],
+    "width": "fluid",
+    "authors": [],
+    "discussionThreads": []
+  }
+}

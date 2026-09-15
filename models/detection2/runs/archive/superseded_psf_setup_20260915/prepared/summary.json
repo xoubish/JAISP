@@ -1,0 +1,38 @@
+{
+  "complete_training_split": false,
+  "n_tiles": 4,
+  "n_seeds": 1588,
+  "n_unknown": 504,
+  "mean_ignored_fraction": 0.008338113247368635,
+  "elapsed_seconds": 1.5000729486346245,
+  "tiles": [
+    {
+      "tile_id": "tile_x00000_y00000_tract5063_patch_14",
+      "seeds": 440,
+      "proposals": 530,
+      "unknown_candidates": 158,
+      "ignored_fraction": 0.010445459620647867
+    },
+    {
+      "tile_id": "tile_x01024_y00256_tract5063_patch_15",
+      "seeds": 391,
+      "proposals": 492,
+      "unknown_candidates": 125,
+      "ignored_fraction": 0.008344283166078893
+    },
+    {
+      "tile_id": "tile_x01792_y02560_tract5063_patch_4",
+      "seeds": 378,
+      "proposals": 488,
+      "unknown_candidates": 133,
+      "ignored_fraction": 0.008743413079887257
+    },
+    {
+      "tile_id": "tile_x02816_y02816_tract5063_patch_5",
+      "seeds": 379,
+      "proposals": 460,
+      "unknown_candidates": 88,
+      "ignored_fraction": 0.0058192971228605275
+    }
+  ]
+}

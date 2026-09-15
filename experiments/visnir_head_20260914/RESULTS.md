@@ -43,4 +43,24 @@ This is an exploratory operating-point comparison, not a replacement for the fix
 | ECDFS_patch25 | 90.79 | 69.68 | 84.55 | 92.67 |
 | EDF-S | 91.59 | 57.95 | 82.28 | 92.17 |
 
-The paired injection pilot is still running.
+## Follow-up label diagnostic
+
+After the primary result, a stricter NISP label threshold was checked on four training tiles only. The added-label MER match fraction rises from 68.1% to 82.3% when the extraction threshold rises from 3 to 4. Combined-label coverage of clean NIR-only references falls from 77.2% to 51.8%. These are label diagnostics, not trained-head results or definitive false-positive rates. No head was trained with threshold-4 labels.
+
+## Paired injection pilot
+
+27 tiles distributed across patch 25; identical injections for all heads. The recovery radius is 0.3 arcsec. Magnitudes are donor VIS-equivalent values, including for NISP-only injections. This pilot does not replace the paper’s existing full injection analysis.
+
+| Injection mode | Production d50 | VIS control d50 | VIS + NISP d50 |
+|---|---:|---:|---:|
+| all | 26.71 | 26.71 | 26.97 |
+| vis | 26.59 | 26.51 | 26.48 |
+| nisp | not bracketed | not bracketed | 26.63 |
+
+The d50 values use linear interpolation only where the sampled curve crosses 50%; no extrapolation.
+
+| Model | Induced artifacts / recovered sources, all modes (mag <30) | Faint-control recoveries (mag 35) |
+|---|---:|---:|
+| baseline | 13 / 4694 | 0 / 1215 |
+| vis_control | 11 / 4641 | 0 / 1215 |
+| visnir | 101 / 6860 | 0 / 1215 |

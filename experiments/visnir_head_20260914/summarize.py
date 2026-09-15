@@ -96,6 +96,18 @@ def main():
         values = [row['completeness_percent'][k] for k in ('vis_bright', 'nir_only', 'full_clean')]+[row['purity_percent']]
         lines.append('| '+field+' | '+' | '.join(f'{v:.2f}' for v in values)+' |')
     lines.append('')
+    audit_path = HERE/'label_threshold_audit.json'
+    if audit_path.exists():
+        audit = json.loads(audit_path.read_text())['results']
+        a, b = audit['threshold3'], audit['threshold4']
+        lines.extend(['## Follow-up label diagnostic', '',
+                      'After the primary result, a stricter NISP label threshold was checked on four training tiles only. '
+                      f"The added-label MER match fraction rises from {a['added_label_mer_match_percent']:.1f}% "
+                      f"to {b['added_label_mer_match_percent']:.1f}% when the extraction threshold rises from 3 to 4. "
+                      f"Combined-label coverage of clean NIR-only references falls from {a['nir_reference_label_coverage_percent']:.1f}% "
+                      f"to {b['nir_reference_label_coverage_percent']:.1f}%. "
+                      'These are label diagnostics, not trained-head results or definitive false-positive rates. '
+                      'No head was trained with threshold-4 labels.', ''])
     if inj is not None:
         lines.extend(['## Paired injection pilot', '',
                       '27 tiles distributed across patch 25; identical injections for all heads. '

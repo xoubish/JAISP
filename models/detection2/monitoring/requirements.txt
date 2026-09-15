@@ -1,0 +1,2 @@
+# Reporting helper only; isolated from training via --target monitoring/_vendor.
+wandb-workspaces==0.1.19

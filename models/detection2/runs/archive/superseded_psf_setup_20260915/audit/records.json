@@ -1,0 +1,2775 @@
+[
+  {
+    "tile_id": "tile_x00000_y00000_tract5063_patch_14",
+    "group": "unlabelled_score_ge_03",
+    "xy_vis": [
+      679.2810668945312,
+      815.7286376953125
+    ],
+    "neighbors_truncated": false,
+    "score": 29.685154702828797,
+    "width_arcsec": 0.0,
+    "bands": {
+      "euclid_VIS": {
+        "delta_weighted_rss": 15.959125008756757,
+        "flux": 0.0679150365713491,
+        "null_weighted_rss": 489.807857298173,
+        "source_weighted_rss": 473.84873228941626,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      },
+      "euclid_Y": {
+        "delta_weighted_rss": 8.925595205629001,
+        "flux": 66.44807289394937,
+        "null_weighted_rss": 54.35463203697959,
+        "source_weighted_rss": 45.42903683135059,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      },
+      "euclid_J": {
+        "delta_weighted_rss": 3.283890919672963,
+        "flux": 45.40299629364448,
+        "null_weighted_rss": 60.61232216144637,
+        "source_weighted_rss": 57.32843124177341,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      },
+      "euclid_H": {
+        "delta_weighted_rss": 1.516543568770075,
+        "flux": 30.263250880667965,
+        "null_weighted_rss": 49.44176181394859,
+        "source_weighted_rss": 47.92521824517851,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      }
+    }
+  },
+  {
+    "tile_id": "tile_x00000_y00000_tract5063_patch_14",
+    "group": "unlabelled_score_ge_03",
+    "xy_vis": [
+      271.9232482910156,
+      996.65673828125
+    ],
+    "neighbors_truncated": false,
+    "score": 76.32595585558238,
+    "width_arcsec": 0.3,
+    "bands": {
+      "euclid_VIS": {
+        "delta_weighted_rss": 69.31036228132143,
+        "flux": 0.46103596401426405,
+        "null_weighted_rss": 590.9770443717157,
+        "source_weighted_rss": 521.6666820903943,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      },
+      "euclid_Y": {
+        "delta_weighted_rss": 1.238979232553767,
+        "flux": 43.509066096527434,
+        "null_weighted_rss": 50.456302263177726,
+        "source_weighted_rss": 49.21732303062396,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      },
+      "euclid_J": {
+        "delta_weighted_rss": 1.5030090520493857,
+        "flux": 52.66200884402645,
+        "null_weighted_rss": 44.216442658316254,
+        "source_weighted_rss": 42.71343360626687,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      },
+      "euclid_H": {
+        "delta_weighted_rss": 4.273605289657802,
+        "flux": 87.40022686245749,
+        "null_weighted_rss": 53.12941418419312,
+        "source_weighted_rss": 48.855808894535315,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      }
+    }
+  },
+  {
+    "tile_id": "tile_x00000_y00000_tract5063_patch_14",
+    "group": "unlabelled_score_ge_03",
+    "xy_vis": [
+      486.46026611328125,
+      599.1448974609375
+    ],
+    "neighbors_truncated": false,
+    "score": 14.955732157223714,
+    "width_arcsec": 0.15,
+    "bands": {
+      "euclid_VIS": {
+        "delta_weighted_rss": 0.12178086305164015,
+        "flux": 0.02610273376025033,
+        "null_weighted_rss": 419.5979698630599,
+        "source_weighted_rss": 419.4761890000083,
+        "n_pixels": 1089,
+        "n_neighbors": 1
+      },
+      "euclid_Y": {
+        "delta_weighted_rss": 3.24347986015146,
+        "flux": 49.36300226806834,
+        "null_weighted_rss": 63.11354202135905,
+        "source_weighted_rss": 59.87006216120759,
+        "n_pixels": 1089,
+        "n_neighbors": 1
+      },
+      "euclid_J": {
+        "delta_weighted_rss": 7.467006965158724,
+        "flux": 86.46982002191727,
+        "null_weighted_rss": 54.51139015228502,
+        "source_weighted_rss": 47.04438318712629,
+        "n_pixels": 1089,
+        "n_neighbors": 1
+      },
+      "euclid_H": {
+        "delta_weighted_rss": 4.12346446886189,
+        "flux": 63.89260846745519,
+        "null_weighted_rss": 52.51061722428,
+        "source_weighted_rss": 48.38715275541811,
+        "n_pixels": 1089,
+        "n_neighbors": 1
+      }
+    }
+  },
+  {
+    "tile_id": "tile_x00000_y00000_tract5063_patch_14",
+    "group": "unlabelled_score_ge_03",
+    "xy_vis": [
+      606.9293212890625,
+      667.8757934570312
+    ],
+    "neighbors_truncated": false,
+    "score": 32.412512465920216,
+    "width_arcsec": 0.3,
+    "bands": {
+      "euclid_VIS": {
+        "delta_weighted_rss": 20.564333698151586,
+        "flux": 0.27078176343529436,
+        "null_weighted_rss": 460.7246760384043,
+        "source_weighted_rss": 440.1603423402527,
+        "n_pixels": 1089,
+        "n_neighbors": 1
+      },
+      "euclid_Y": {
+        "delta_weighted_rss": 0.21072100914410896,
+        "flux": 17.88320320010477,
+        "null_weighted_rss": 65.47274544115332,
+        "source_weighted_rss": 65.26202443200921,
+        "n_pixels": 1089,
+        "n_neighbors": 1
+      },
+      "euclid_J": {
+        "delta_weighted_rss": 6.500872471067403,
+        "flux": 109.23562577288624,
+        "null_weighted_rss": 60.89022101299916,
+        "source_weighted_rss": 54.38934854193176,
+        "n_pixels": 1089,
+        "n_neighbors": 1
+      },
+      "euclid_H": {
+        "delta_weighted_rss": 5.136585287557118,
+        "flux": 93.5242232037086,
+        "null_weighted_rss": 44.92663370257154,
+        "source_weighted_rss": 39.790048415014425,
+        "n_pixels": 1089,
+        "n_neighbors": 1
+      }
+    }
+  },
+  {
+    "tile_id": "tile_x00000_y00000_tract5063_patch_14",
+    "group": "unlabelled_score_015_03",
+    "xy_vis": [
+      1034.388427734375,
+      48.60658645629883
+    ],
+    "neighbors_truncated": false,
+    "score": 70.8746719078905,
+    "width_arcsec": 0.15,
+    "bands": {
+      "euclid_VIS": {
+        "delta_weighted_rss": 46.9037666658769,
+        "flux": 0.24568764630212045,
+        "null_weighted_rss": 560.5180123367134,
+        "source_weighted_rss": 513.6142456708365,
+        "n_pixels": 1088,
+        "n_neighbors": 1
+      },
+      "euclid_Y": {
+        "delta_weighted_rss": 1.6541636442793433,
+        "flux": 114.91472211379102,
+        "null_weighted_rss": 48.37861653514668,
+        "source_weighted_rss": 46.72445289086734,
+        "n_pixels": 1023,
+        "n_neighbors": 1
+      },
+      "euclid_J": {
+        "delta_weighted_rss": 17.657845238586653,
+        "flux": 208.92644812180822,
+        "null_weighted_rss": 80.59147998629653,
+        "source_weighted_rss": 62.93363474770988,
+        "n_pixels": 1036,
+        "n_neighbors": 1
+      },
+      "euclid_H": {
+        "delta_weighted_rss": 4.658896359147597,
+        "flux": 131.32696369100958,
+        "null_weighted_rss": 52.33007023804599,
+        "source_weighted_rss": 47.671173878898394,
+        "n_pixels": 1040,
+        "n_neighbors": 1
+      }
+    }
+  },
+  {
+    "tile_id": "tile_x00000_y00000_tract5063_patch_14",
+    "group": "unlabelled_score_015_03",
+    "xy_vis": [
+      325.1462097167969,
+      534.5128173828125
+    ],
+    "neighbors_truncated": false,
+    "score": 14.037576945622405,
+    "width_arcsec": 0.0,
+    "bands": {
+      "euclid_VIS": {
+        "delta_weighted_rss": 5.559444008382684,
+        "flux": 0.0390252691350776,
+        "null_weighted_rss": 465.54009411243646,
+        "source_weighted_rss": 459.9806501040538,
+        "n_pixels": 1089,
+        "n_neighbors": 1
+      },
+      "euclid_Y": {
+        "delta_weighted_rss": 0.6986797865662453,
+        "flux": 17.559487338704933,
+        "null_weighted_rss": 42.17213105259515,
+        "source_weighted_rss": 41.4734512660289,
+        "n_pixels": 1089,
+        "n_neighbors": 1
+      },
+      "euclid_J": {
+        "delta_weighted_rss": 6.398844881972778,
+        "flux": 62.65904562173861,
+        "null_weighted_rss": 65.80914699491782,
+        "source_weighted_rss": 59.41030211294505,
+        "n_pixels": 1089,
+        "n_neighbors": 1
+      },
+      "euclid_H": {
+        "delta_weighted_rss": 1.3806082687006977,
+        "flux": 29.08781129105818,
+        "null_weighted_rss": 52.04024252661132,
+        "source_weighted_rss": 50.659634257910625,
+        "n_pixels": 1089,
+        "n_neighbors": 1
+      }
+    }
+  },
+  {
+    "tile_id": "tile_x00000_y00000_tract5063_patch_14",
+    "group": "unlabelled_score_015_03",
+    "xy_vis": [
+      661.1555786132812,
+      53.241085052490234
+    ],
+    "neighbors_truncated": false,
+    "score": 58.858653511620965,
+    "width_arcsec": 0.15,
+    "bands": {
+      "euclid_VIS": {
+        "delta_weighted_rss": 54.87144865213196,
+        "flux": 0.236656251966804,
+        "null_weighted_rss": 535.6112158528717,
+        "source_weighted_rss": 480.7397672007398,
+        "n_pixels": 1086,
+        "n_neighbors": 0
+      },
+      "euclid_Y": {
+        "delta_weighted_rss": 0.00044376845250582164,
+        "flux": 0.5571225737106098,
+        "null_weighted_rss": 52.83154212371954,
+        "source_weighted_rss": 52.83109835526703,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      },
+      "euclid_J": {
+        "delta_weighted_rss": 0.30410528059105957,
+        "flux": 22.664810672965373,
+        "null_weighted_rss": 51.93117449137404,
+        "source_weighted_rss": 51.62706921078298,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      },
+      "euclid_H": {
+        "delta_weighted_rss": 3.682655810445439,
+        "flux": 56.55307591307342,
+        "null_weighted_rss": 46.12519427679045,
+        "source_weighted_rss": 42.44253846634501,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      }
+    }
+  },
+  {
+    "tile_id": "tile_x00000_y00000_tract5063_patch_14",
+    "group": "unlabelled_score_015_03",
+    "xy_vis": [
+      815.2275390625,
+      321.04559326171875
+    ],
+    "neighbors_truncated": false,
+    "score": 4.313421725560353,
+    "width_arcsec": 0.15,
+    "bands": {
+      "euclid_VIS": {
+        "delta_weighted_rss": 0.18031373735385614,
+        "flux": 0.013241575040335551,
+        "null_weighted_rss": 496.12983690204163,
+        "source_weighted_rss": 495.9495231646878,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      },
+      "euclid_Y": {
+        "delta_weighted_rss": 1.0611389458230747,
+        "flux": 27.894507956892177,
+        "null_weighted_rss": 57.39789233165948,
+        "source_weighted_rss": 56.3367533858364,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      },
+      "euclid_J": {
+        "delta_weighted_rss": 2.7630954214181713,
+        "flux": 49.88391816793468,
+        "null_weighted_rss": 66.80888075078921,
+        "source_weighted_rss": 64.04578532937104,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      },
+      "euclid_H": {
+        "delta_weighted_rss": 0.30887362096525095,
+        "flux": 16.394065974527543,
+        "null_weighted_rss": 62.427403136681605,
+        "source_weighted_rss": 62.118529515716354,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      }
+    }
+  },
+  {
+    "tile_id": "tile_x00000_y00000_tract5063_patch_14",
+    "group": "seed_matched_control",
+    "xy_vis": [
+      910.8869018554688,
+      589.3431396484375
+    ],
+    "neighbors_truncated": false,
+    "score": 122.4605705717087,
+    "width_arcsec": 0.0,
+    "bands": {
+      "euclid_VIS": {
+        "delta_weighted_rss": 0.0,
+        "flux": 0.0,
+        "null_weighted_rss": 441.863960217425,
+        "source_weighted_rss": 441.863960217425,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      },
+      "euclid_Y": {
+        "delta_weighted_rss": 1.1028947803261033,
+        "flux": 23.206641855870515,
+        "null_weighted_rss": 59.877481762632634,
+        "source_weighted_rss": 58.77458698230653,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      },
+      "euclid_J": {
+        "delta_weighted_rss": 121.24140712731241,
+        "flux": 361.95315596033765,
+        "null_weighted_rss": 295.1229392331323,
+        "source_weighted_rss": 173.88153210581987,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      },
+      "euclid_H": {
+        "delta_weighted_rss": 0.11626866407018355,
+        "flux": 8.237254047395027,
+        "null_weighted_rss": 58.63354724371753,
+        "source_weighted_rss": 58.517278579647346,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      }
+    }
+  },
+  {
+    "tile_id": "tile_x00000_y00000_tract5063_patch_14",
+    "group": "seed_matched_control",
+    "xy_vis": [
+      630.6767578125,
+      159.35548400878906
+    ],
+    "neighbors_truncated": false,
+    "score": 649.6475656732422,
+    "width_arcsec": 0.15,
+    "bands": {
+      "euclid_Y": {
+        "delta_weighted_rss": 160.0637317726316,
+        "flux": 409.6262470268015,
+        "null_weighted_rss": 208.03441995967017,
+        "source_weighted_rss": 47.970688187038576,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      },
+      "euclid_J": {
+        "delta_weighted_rss": 234.66146057653015,
+        "flux": 545.4351697275309,
+        "null_weighted_rss": 304.3205988426951,
+        "source_weighted_rss": 69.65913826616499,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      },
+      "euclid_H": {
+        "delta_weighted_rss": 254.92237332408047,
+        "flux": 577.2983934684427,
+        "null_weighted_rss": 308.4173227463515,
+        "source_weighted_rss": 53.494949422271034,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      }
+    }
+  },
+  {
+    "tile_id": "tile_x00000_y00000_tract5063_patch_14",
+    "group": "seed_matched_control",
+    "xy_vis": [
+      586.2319946289062,
+      509.1145324707031
+    ],
+    "neighbors_truncated": false,
+    "score": 289.8137511771681,
+    "width_arcsec": 0.15,
+    "bands": {
+      "euclid_VIS": {
+        "delta_weighted_rss": 194.3574928575958,
+        "flux": 0.4553200802236741,
+        "null_weighted_rss": 703.9861297364024,
+        "source_weighted_rss": 509.6286368788066,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      },
+      "euclid_Y": {
+        "delta_weighted_rss": 18.310310472299832,
+        "flux": 120.9172874117012,
+        "null_weighted_rss": 70.56187291451681,
+        "source_weighted_rss": 52.25156244221698,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      },
+      "euclid_J": {
+        "delta_weighted_rss": 34.459054373404506,
+        "flux": 205.23000180375726,
+        "null_weighted_rss": 90.6380578762757,
+        "source_weighted_rss": 56.17900350287119,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      },
+      "euclid_H": {
+        "delta_weighted_rss": 42.68689347386798,
+        "flux": 247.5842425939353,
+        "null_weighted_rss": 108.14771804195554,
+        "source_weighted_rss": 65.46082456808756,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      }
+    }
+  },
+  {
+    "tile_id": "tile_x00000_y00000_tract5063_patch_14",
+    "group": "seed_matched_control",
+    "xy_vis": [
+      542.7877197265625,
+      138.53184509277344
+    ],
+    "neighbors_truncated": false,
+    "score": 14484.112771020125,
+    "width_arcsec": 0.3,
+    "bands": {
+      "euclid_VIS": {
+        "delta_weighted_rss": 6255.406031691213,
+        "flux": 9.706475221197417,
+        "null_weighted_rss": 12337.687308459073,
+        "source_weighted_rss": 6082.281276767861,
+        "n_pixels": 1028,
+        "n_neighbors": 1
+      },
+      "euclid_Y": {
+        "delta_weighted_rss": 1316.6339127077276,
+        "flux": 2562.554389255142,
+        "null_weighted_rss": 2113.990255135214,
+        "source_weighted_rss": 797.3563424274862,
+        "n_pixels": 1089,
+        "n_neighbors": 1
+      },
+      "euclid_J": {
+        "delta_weighted_rss": 3256.2798894070684,
+        "flux": 4286.976988195005,
+        "null_weighted_rss": 4588.162501014548,
+        "source_weighted_rss": 1331.8826116074797,
+        "n_pixels": 1089,
+        "n_neighbors": 1
+      },
+      "euclid_H": {
+        "delta_weighted_rss": 3655.7929372141143,
+        "flux": 5084.396720278254,
+        "null_weighted_rss": 4885.4465811711925,
+        "source_weighted_rss": 1229.653643957078,
+        "n_pixels": 1089,
+        "n_neighbors": 1
+      }
+    }
+  },
+  {
+    "tile_id": "tile_x00000_y00000_tract5063_patch_14",
+    "group": "blank_position_control",
+    "xy_vis": [
+      819.0174771871908,
+      479.583859468829
+    ],
+    "neighbors_truncated": false,
+    "score": 0.0,
+    "width_arcsec": 0.0,
+    "bands": {
+      "euclid_VIS": {
+        "delta_weighted_rss": 0.0,
+        "flux": 0.0,
+        "null_weighted_rss": 788.3643165749927,
+        "source_weighted_rss": 788.3643165749927,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      },
+      "euclid_Y": {
+        "delta_weighted_rss": 0.0,
+        "flux": 0.0,
+        "null_weighted_rss": 81.14788195722923,
+        "source_weighted_rss": 81.14788195722923,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      },
+      "euclid_J": {
+        "delta_weighted_rss": 0.0,
+        "flux": 0.0,
+        "null_weighted_rss": 172.83561467200317,
+        "source_weighted_rss": 172.83561467200317,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      },
+      "euclid_H": {
+        "delta_weighted_rss": 0.0,
+        "flux": 0.0,
+        "null_weighted_rss": 233.43032238036636,
+        "source_weighted_rss": 233.43032238036636,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      }
+    }
+  },
+  {
+    "tile_id": "tile_x00000_y00000_tract5063_patch_14",
+    "group": "blank_position_control",
+    "xy_vis": [
+      130.40165341018897,
+      1023.3054422080336
+    ],
+    "neighbors_truncated": false,
+    "score": 1.0258616047949545,
+    "width_arcsec": 0.6,
+    "bands": {
+      "euclid_VIS": {
+        "delta_weighted_rss": 1.0258616047949545,
+        "flux": 0.12523859665258352,
+        "null_weighted_rss": 445.8174666659986,
+        "source_weighted_rss": 444.79160506120365,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      },
+      "euclid_Y": {
+        "delta_weighted_rss": 0.0,
+        "flux": 0.0,
+        "null_weighted_rss": 45.0479572809253,
+        "source_weighted_rss": 45.0479572809253,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      },
+      "euclid_J": {
+        "delta_weighted_rss": 0.0,
+        "flux": 0.0,
+        "null_weighted_rss": 60.17599439478175,
+        "source_weighted_rss": 60.17599439478175,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      },
+      "euclid_H": {
+        "delta_weighted_rss": 0.0,
+        "flux": 0.0,
+        "null_weighted_rss": 55.298652595309925,
+        "source_weighted_rss": 55.298652595309925,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      }
+    }
+  },
+  {
+    "tile_id": "tile_x00000_y00000_tract5063_patch_14",
+    "group": "blank_position_control",
+    "xy_vis": [
+      410.6183985476048,
+      973.8129337036337
+    ],
+    "neighbors_truncated": false,
+    "score": 1.2773664920843615,
+    "width_arcsec": 0.6,
+    "bands": {
+      "euclid_VIS": {
+        "delta_weighted_rss": 0.22948437628349438,
+        "flux": 0.0607922942170745,
+        "null_weighted_rss": 476.2417347808251,
+        "source_weighted_rss": 476.0122504045416,
+        "n_pixels": 1089,
+        "n_neighbors": 1
+      },
+      "euclid_Y": {
+        "delta_weighted_rss": 0.0,
+        "flux": 0.0,
+        "null_weighted_rss": 49.84469145481414,
+        "source_weighted_rss": 49.84469145481414,
+        "n_pixels": 1089,
+        "n_neighbors": 1
+      },
+      "euclid_J": {
+        "delta_weighted_rss": 0.7161399815157168,
+        "flux": 80.53414903408543,
+        "null_weighted_rss": 62.732835522459936,
+        "source_weighted_rss": 62.01669554094422,
+        "n_pixels": 1089,
+        "n_neighbors": 1
+      },
+      "euclid_H": {
+        "delta_weighted_rss": 0.3317421342851503,
+        "flux": 52.53198634145378,
+        "null_weighted_rss": 64.56923939316816,
+        "source_weighted_rss": 64.23749725888301,
+        "n_pixels": 1089,
+        "n_neighbors": 1
+      }
+    }
+  },
+  {
+    "tile_id": "tile_x00000_y00000_tract5063_patch_14",
+    "group": "blank_position_control",
+    "xy_vis": [
+      164.77910990032797,
+      491.2409550882095
+    ],
+    "neighbors_truncated": false,
+    "score": 2.7132736814944636,
+    "width_arcsec": 0.15,
+    "bands": {
+      "euclid_VIS": {
+        "delta_weighted_rss": 2.149189657052432,
+        "flux": 0.047084947391777994,
+        "null_weighted_rss": 452.964203767151,
+        "source_weighted_rss": 450.81501411009856,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      },
+      "euclid_Y": {
+        "delta_weighted_rss": 0.004069297172279107,
+        "flux": 1.7076965956236627,
+        "null_weighted_rss": 40.9054835994147,
+        "source_weighted_rss": 40.90141430224242,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      },
+      "euclid_J": {
+        "delta_weighted_rss": 0.0,
+        "flux": 0.0,
+        "null_weighted_rss": 40.75361790290699,
+        "source_weighted_rss": 40.75361790290699,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      },
+      "euclid_H": {
+        "delta_weighted_rss": 0.5600147272697527,
+        "flux": 21.996658024031404,
+        "null_weighted_rss": 42.830895686164446,
+        "source_weighted_rss": 42.27088095889469,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      }
+    }
+  },
+  {
+    "tile_id": "tile_x01024_y00256_tract5063_patch_15",
+    "group": "unlabelled_score_ge_03",
+    "xy_vis": [
+      132.81781005859375,
+      1069.09033203125
+    ],
+    "neighbors_truncated": false,
+    "score": null,
+    "width_arcsec": null,
+    "bands": {}
+  },
+  {
+    "tile_id": "tile_x01024_y00256_tract5063_patch_15",
+    "group": "unlabelled_score_ge_03",
+    "xy_vis": [
+      147.35504150390625,
+      435.7835388183594
+    ],
+    "neighbors_truncated": false,
+    "score": 16.940163887778112,
+    "width_arcsec": 0.3,
+    "bands": {
+      "euclid_VIS": {
+        "delta_weighted_rss": 1.872949837888882e-06,
+        "flux": 0.0001285314440254902,
+        "null_weighted_rss": 463.46859325790376,
+        "source_weighted_rss": 463.4685913849539,
+        "n_pixels": 1089,
+        "n_neighbors": 1
+      },
+      "euclid_Y": {
+        "delta_weighted_rss": 4.587076094230142,
+        "flux": 80.14100419800768,
+        "null_weighted_rss": 50.36386559471735,
+        "source_weighted_rss": 45.77678950048721,
+        "n_pixels": 1089,
+        "n_neighbors": 1
+      },
+      "euclid_J": {
+        "delta_weighted_rss": 6.087331069340927,
+        "flux": 100.12238970632743,
+        "null_weighted_rss": 53.57888385354195,
+        "source_weighted_rss": 47.491552784201026,
+        "n_pixels": 1089,
+        "n_neighbors": 1
+      },
+      "euclid_H": {
+        "delta_weighted_rss": 6.265754851257206,
+        "flux": 102.29613557828766,
+        "null_weighted_rss": 55.52238834230428,
+        "source_weighted_rss": 49.256633491047076,
+        "n_pixels": 1089,
+        "n_neighbors": 1
+      }
+    }
+  },
+  {
+    "tile_id": "tile_x01024_y00256_tract5063_patch_15",
+    "group": "unlabelled_score_ge_03",
+    "xy_vis": [
+      88.91112518310547,
+      349.8848876953125
+    ],
+    "neighbors_truncated": false,
+    "score": 326.7908620655549,
+    "width_arcsec": 0.0,
+    "bands": {
+      "euclid_VIS": {
+        "delta_weighted_rss": 277.9575543755076,
+        "flux": 0.47967182410415515,
+        "null_weighted_rss": 1281.749675160864,
+        "source_weighted_rss": 1003.7921207853564,
+        "n_pixels": 1089,
+        "n_neighbors": 1
+      },
+      "euclid_Y": {
+        "delta_weighted_rss": 10.495622408657198,
+        "flux": 72.77225526145062,
+        "null_weighted_rss": 167.77544428226105,
+        "source_weighted_rss": 157.27982187360385,
+        "n_pixels": 1089,
+        "n_neighbors": 1
+      },
+      "euclid_J": {
+        "delta_weighted_rss": 13.123759872558935,
+        "flux": 95.07118042865932,
+        "null_weighted_rss": 407.1512149235154,
+        "source_weighted_rss": 394.02745505095646,
+        "n_pixels": 1089,
+        "n_neighbors": 1
+      },
+      "euclid_H": {
+        "delta_weighted_rss": 25.213925408831187,
+        "flux": 133.37620844471184,
+        "null_weighted_rss": 453.02747462587837,
+        "source_weighted_rss": 427.8135492170472,
+        "n_pixels": 1089,
+        "n_neighbors": 1
+      }
+    }
+  },
+  {
+    "tile_id": "tile_x01024_y00256_tract5063_patch_15",
+    "group": "unlabelled_score_ge_03",
+    "xy_vis": [
+      551.04638671875,
+      790.9236450195312
+    ],
+    "neighbors_truncated": false,
+    "score": 48.55490407689374,
+    "width_arcsec": 0.15,
+    "bands": {
+      "euclid_VIS": {
+        "delta_weighted_rss": 34.03464302386419,
+        "flux": 0.1841310043139541,
+        "null_weighted_rss": 569.836017062406,
+        "source_weighted_rss": 535.8013740385418,
+        "n_pixels": 1089,
+        "n_neighbors": 1
+      },
+      "euclid_Y": {
+        "delta_weighted_rss": 2.263275187255701,
+        "flux": 38.93138643096704,
+        "null_weighted_rss": 70.1936220158853,
+        "source_weighted_rss": 67.9303468286296,
+        "n_pixels": 1089,
+        "n_neighbors": 1
+      },
+      "euclid_J": {
+        "delta_weighted_rss": 8.34131962135168,
+        "flux": 82.31665812858388,
+        "null_weighted_rss": 58.971985631233146,
+        "source_weighted_rss": 50.630666009881466,
+        "n_pixels": 1089,
+        "n_neighbors": 1
+      },
+      "euclid_H": {
+        "delta_weighted_rss": 3.9156662444221695,
+        "flux": 58.504035191320554,
+        "null_weighted_rss": 67.98716748941246,
+        "source_weighted_rss": 64.07150124499029,
+        "n_pixels": 1089,
+        "n_neighbors": 1
+      }
+    }
+  },
+  {
+    "tile_id": "tile_x01024_y00256_tract5063_patch_15",
+    "group": "unlabelled_score_015_03",
+    "xy_vis": [
+      740.2617797851562,
+      1054.5916748046875
+    ],
+    "neighbors_truncated": false,
+    "score": 58.24088720504237,
+    "width_arcsec": 0.15,
+    "bands": {
+      "euclid_VIS": {
+        "delta_weighted_rss": 47.215119283934314,
+        "flux": 0.23521492208983094,
+        "null_weighted_rss": 539.8812821647938,
+        "source_weighted_rss": 492.6661628808595,
+        "n_pixels": 1089,
+        "n_neighbors": 2
+      },
+      "euclid_Y": {
+        "delta_weighted_rss": 2.8119763249925924,
+        "flux": 55.02603137232406,
+        "null_weighted_rss": 47.77755594917553,
+        "source_weighted_rss": 44.965579624182936,
+        "n_pixels": 1089,
+        "n_neighbors": 2
+      },
+      "euclid_J": {
+        "delta_weighted_rss": 4.971456697257452,
+        "flux": 75.8708055973371,
+        "null_weighted_rss": 65.71107968538779,
+        "source_weighted_rss": 60.739622988130336,
+        "n_pixels": 1089,
+        "n_neighbors": 2
+      },
+      "euclid_H": {
+        "delta_weighted_rss": 3.2423348988580116,
+        "flux": 75.4278147102991,
+        "null_weighted_rss": 36.57596683790013,
+        "source_weighted_rss": 33.33363193904212,
+        "n_pixels": 1089,
+        "n_neighbors": 2
+      }
+    }
+  },
+  {
+    "tile_id": "tile_x01024_y00256_tract5063_patch_15",
+    "group": "unlabelled_score_015_03",
+    "xy_vis": [
+      834.8964233398438,
+      618.7572631835938
+    ],
+    "neighbors_truncated": false,
+    "score": 29.4910291462448,
+    "width_arcsec": 0.15,
+    "bands": {
+      "euclid_VIS": {
+        "delta_weighted_rss": 1.6322762303742024,
+        "flux": 0.04221848488962529,
+        "null_weighted_rss": 447.80866453648963,
+        "source_weighted_rss": 446.1763883061154,
+        "n_pixels": 1089,
+        "n_neighbors": 1
+      },
+      "euclid_Y": {
+        "delta_weighted_rss": 12.131738439635306,
+        "flux": 100.82173686031298,
+        "null_weighted_rss": 62.17283450219022,
+        "source_weighted_rss": 50.041096062554914,
+        "n_pixels": 1089,
+        "n_neighbors": 1
+      },
+      "euclid_J": {
+        "delta_weighted_rss": 0.0,
+        "flux": 0.0,
+        "null_weighted_rss": 35.87117173049227,
+        "source_weighted_rss": 35.87117173049227,
+        "n_pixels": 1089,
+        "n_neighbors": 1
+      },
+      "euclid_H": {
+        "delta_weighted_rss": 15.72701447623529,
+        "flux": 122.71492280767183,
+        "null_weighted_rss": 65.44199089348622,
+        "source_weighted_rss": 49.71497641725093,
+        "n_pixels": 1089,
+        "n_neighbors": 1
+      }
+    }
+  },
+  {
+    "tile_id": "tile_x01024_y00256_tract5063_patch_15",
+    "group": "unlabelled_score_015_03",
+    "xy_vis": [
+      962.0392456054688,
+      535.0230102539062
+    ],
+    "neighbors_truncated": false,
+    "score": 13.35883741984582,
+    "width_arcsec": 0.3,
+    "bands": {
+      "euclid_VIS": {
+        "delta_weighted_rss": 1.0875227811840205,
+        "flux": 0.058520874727945725,
+        "null_weighted_rss": 485.60772295486754,
+        "source_weighted_rss": 484.5202001736835,
+        "n_pixels": 1089,
+        "n_neighbors": 2
+      },
+      "euclid_Y": {
+        "delta_weighted_rss": 3.3098347750938544,
+        "flux": 73.10234595259959,
+        "null_weighted_rss": 54.96379193213559,
+        "source_weighted_rss": 51.65395715704174,
+        "n_pixels": 1077,
+        "n_neighbors": 2
+      },
+      "euclid_J": {
+        "delta_weighted_rss": 1.4600612039059584,
+        "flux": 62.438918701344576,
+        "null_weighted_rss": 54.726749143885314,
+        "source_weighted_rss": 53.266687939979356,
+        "n_pixels": 1089,
+        "n_neighbors": 2
+      },
+      "euclid_H": {
+        "delta_weighted_rss": 7.5014186596619865,
+        "flux": 138.4981002859151,
+        "null_weighted_rss": 54.57820479151088,
+        "source_weighted_rss": 47.07678613184889,
+        "n_pixels": 1082,
+        "n_neighbors": 2
+      }
+    }
+  },
+  {
+    "tile_id": "tile_x01024_y00256_tract5063_patch_15",
+    "group": "unlabelled_score_015_03",
+    "xy_vis": [
+      751.6032104492188,
+      973.3863525390625
+    ],
+    "neighbors_truncated": false,
+    "score": 23.271829007401877,
+    "width_arcsec": 0.15,
+    "bands": {
+      "euclid_VIS": {
+        "delta_weighted_rss": 1.2509878192273618,
+        "flux": 0.034536536146615913,
+        "null_weighted_rss": 459.56615991230075,
+        "source_weighted_rss": 458.3151720930734,
+        "n_pixels": 1089,
+        "n_neighbors": 2
+      },
+      "euclid_Y": {
+        "delta_weighted_rss": 5.229138795677493,
+        "flux": 73.4997641402774,
+        "null_weighted_rss": 68.59377434238522,
+        "source_weighted_rss": 63.364635546707724,
+        "n_pixels": 1089,
+        "n_neighbors": 2
+      },
+      "euclid_J": {
+        "delta_weighted_rss": 6.292140114393071,
+        "flux": 80.47214403310099,
+        "null_weighted_rss": 53.545879897493926,
+        "source_weighted_rss": 47.253739783100855,
+        "n_pixels": 1089,
+        "n_neighbors": 2
+      },
+      "euclid_H": {
+        "delta_weighted_rss": 10.499562278103951,
+        "flux": 102.0880328686487,
+        "null_weighted_rss": 84.44243682748036,
+        "source_weighted_rss": 73.94287454937641,
+        "n_pixels": 1089,
+        "n_neighbors": 2
+      }
+    }
+  },
+  {
+    "tile_id": "tile_x01024_y00256_tract5063_patch_15",
+    "group": "seed_matched_control",
+    "xy_vis": [
+      660.6719970703125,
+      238.79270935058594
+    ],
+    "neighbors_truncated": false,
+    "score": 37.36181678958266,
+    "width_arcsec": 0.0,
+    "bands": {
+      "euclid_VIS": {
+        "delta_weighted_rss": 21.808056775203454,
+        "flux": 0.1033917134760158,
+        "null_weighted_rss": 465.8717323892885,
+        "source_weighted_rss": 444.06367561408507,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      },
+      "euclid_Y": {
+        "delta_weighted_rss": 6.403266697825174,
+        "flux": 55.39762131264067,
+        "null_weighted_rss": 62.69809389174852,
+        "source_weighted_rss": 56.294827193923346,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      },
+      "euclid_J": {
+        "delta_weighted_rss": 0.21216386550553068,
+        "flux": 11.610874628258278,
+        "null_weighted_rss": 67.51218129696552,
+        "source_weighted_rss": 67.30001743145999,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      },
+      "euclid_H": {
+        "delta_weighted_rss": 8.938329451048503,
+        "flux": 73.77707076704363,
+        "null_weighted_rss": 64.46533196737495,
+        "source_weighted_rss": 55.52700251632645,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      }
+    }
+  },
+  {
+    "tile_id": "tile_x01024_y00256_tract5063_patch_15",
+    "group": "seed_matched_control",
+    "xy_vis": [
+      771.7908325195312,
+      942.4191284179688
+    ],
+    "neighbors_truncated": false,
+    "score": 169.02475369832575,
+    "width_arcsec": 0.3,
+    "bands": {
+      "euclid_VIS": {
+        "delta_weighted_rss": 72.12752449430974,
+        "flux": 0.5034723515684091,
+        "null_weighted_rss": 561.9977057254175,
+        "source_weighted_rss": 489.8701812311078,
+        "n_pixels": 1089,
+        "n_neighbors": 1
+      },
+      "euclid_Y": {
+        "delta_weighted_rss": 2.627738404967033,
+        "flux": 65.21435953457211,
+        "null_weighted_rss": 52.28044653251471,
+        "source_weighted_rss": 49.652708127547676,
+        "n_pixels": 1089,
+        "n_neighbors": 1
+      },
+      "euclid_J": {
+        "delta_weighted_rss": 28.552763676126183,
+        "flux": 243.91145320474274,
+        "null_weighted_rss": 78.23133656316436,
+        "source_weighted_rss": 49.67857288703818,
+        "n_pixels": 1089,
+        "n_neighbors": 1
+      },
+      "euclid_H": {
+        "delta_weighted_rss": 65.7167271229228,
+        "flux": 375.284855915662,
+        "null_weighted_rss": 132.6792642823975,
+        "source_weighted_rss": 66.96253715947469,
+        "n_pixels": 1089,
+        "n_neighbors": 1
+      }
+    }
+  },
+  {
+    "tile_id": "tile_x01024_y00256_tract5063_patch_15",
+    "group": "seed_matched_control",
+    "xy_vis": [
+      31.04213523864746,
+      307.0621032714844
+    ],
+    "neighbors_truncated": false,
+    "score": 44.97809134831445,
+    "width_arcsec": 0.3,
+    "bands": {
+      "euclid_VIS": {
+        "delta_weighted_rss": 17.501757946368684,
+        "flux": 0.29162276808833004,
+        "null_weighted_rss": 479.99092988299236,
+        "source_weighted_rss": 462.4891719366237,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      },
+      "euclid_Y": {
+        "delta_weighted_rss": 1.0271985182426988,
+        "flux": 36.89554878321758,
+        "null_weighted_rss": 38.92134595009647,
+        "source_weighted_rss": 37.894147431853774,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      },
+      "euclid_J": {
+        "delta_weighted_rss": 15.928028645832178,
+        "flux": 162.05420401648308,
+        "null_weighted_rss": 65.7877947291983,
+        "source_weighted_rss": 49.85976608336612,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      },
+      "euclid_H": {
+        "delta_weighted_rss": 10.521106237870889,
+        "flux": 127.98347175175869,
+        "null_weighted_rss": 61.695173715941465,
+        "source_weighted_rss": 51.174067478070576,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      }
+    }
+  },
+  {
+    "tile_id": "tile_x01024_y00256_tract5063_patch_15",
+    "group": "seed_matched_control",
+    "xy_vis": [
+      962.0657958984375,
+      620.8558349609375
+    ],
+    "neighbors_truncated": false,
+    "score": 28.84230572083787,
+    "width_arcsec": 0.3,
+    "bands": {
+      "euclid_VIS": {
+        "delta_weighted_rss": 5.093389837229836,
+        "flux": 0.12294128771365716,
+        "null_weighted_rss": 460.46082335336393,
+        "source_weighted_rss": 455.3674335161341,
+        "n_pixels": 1089,
+        "n_neighbors": 1
+      },
+      "euclid_Y": {
+        "delta_weighted_rss": 20.90477412838341,
+        "flux": 220.65606039191292,
+        "null_weighted_rss": 103.81428214005577,
+        "source_weighted_rss": 82.90950801167236,
+        "n_pixels": 1089,
+        "n_neighbors": 1
+      },
+      "euclid_J": {
+        "delta_weighted_rss": 0.31833083255295946,
+        "flux": 24.448616665435093,
+        "null_weighted_rss": 54.156554212827245,
+        "source_weighted_rss": 53.838223380274286,
+        "n_pixels": 1077,
+        "n_neighbors": 1
+      },
+      "euclid_H": {
+        "delta_weighted_rss": 2.525810922671667,
+        "flux": 66.81918425898985,
+        "null_weighted_rss": 53.48178677659273,
+        "source_weighted_rss": 50.95597585392106,
+        "n_pixels": 1089,
+        "n_neighbors": 1
+      }
+    }
+  },
+  {
+    "tile_id": "tile_x01024_y00256_tract5063_patch_15",
+    "group": "blank_position_control",
+    "xy_vis": [
+      714.9574216816043,
+      372.97504918650526
+    ],
+    "neighbors_truncated": false,
+    "score": 4.7982402608025865,
+    "width_arcsec": 0.6,
+    "bands": {
+      "euclid_VIS": {
+        "delta_weighted_rss": 0.0,
+        "flux": 0.0,
+        "null_weighted_rss": 481.2630381808361,
+        "source_weighted_rss": 481.2630381808361,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      },
+      "euclid_Y": {
+        "delta_weighted_rss": 0.0,
+        "flux": 0.0,
+        "null_weighted_rss": 61.34882960551637,
+        "source_weighted_rss": 61.34882960551637,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      },
+      "euclid_J": {
+        "delta_weighted_rss": 4.7982402608025865,
+        "flux": 195.38750752133768,
+        "null_weighted_rss": 55.27466144973448,
+        "source_weighted_rss": 50.476421188931894,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      },
+      "euclid_H": {
+        "delta_weighted_rss": 0.0,
+        "flux": 0.0,
+        "null_weighted_rss": 51.845167400813175,
+        "source_weighted_rss": 51.845167400813175,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      }
+    }
+  },
+  {
+    "tile_id": "tile_x01024_y00256_tract5063_patch_15",
+    "group": "blank_position_control",
+    "xy_vis": [
+      123.8492290656084,
+      701.4155077460547
+    ],
+    "neighbors_truncated": false,
+    "score": 1.6192232078133912,
+    "width_arcsec": 0.15,
+    "bands": {
+      "euclid_VIS": {
+        "delta_weighted_rss": 1.393116232507623,
+        "flux": 0.0468112092477741,
+        "null_weighted_rss": 536.378984926746,
+        "source_weighted_rss": 534.9858686942384,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      },
+      "euclid_Y": {
+        "delta_weighted_rss": 0.2261069753057683,
+        "flux": 11.925287748181407,
+        "null_weighted_rss": 52.410812699885355,
+        "source_weighted_rss": 52.18470572457959,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      },
+      "euclid_J": {
+        "delta_weighted_rss": 0.0,
+        "flux": 0.0,
+        "null_weighted_rss": 55.6370012254784,
+        "source_weighted_rss": 55.6370012254784,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      },
+      "euclid_H": {
+        "delta_weighted_rss": 0.0,
+        "flux": 0.0,
+        "null_weighted_rss": 50.378145329007545,
+        "source_weighted_rss": 50.378145329007545,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      }
+    }
+  },
+  {
+    "tile_id": "tile_x01024_y00256_tract5063_patch_15",
+    "group": "blank_position_control",
+    "xy_vis": [
+      945.0453124772357,
+      807.4450649825708
+    ],
+    "neighbors_truncated": false,
+    "score": 0.2697126334130857,
+    "width_arcsec": 0.6,
+    "bands": {
+      "euclid_VIS": {
+        "delta_weighted_rss": 0.1447064457149736,
+        "flux": 0.04837721208102811,
+        "null_weighted_rss": 435.5940265501016,
+        "source_weighted_rss": 435.44932010438663,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      },
+      "euclid_Y": {
+        "delta_weighted_rss": 0.12500618769811211,
+        "flux": 29.185308524041204,
+        "null_weighted_rss": 45.466053701704816,
+        "source_weighted_rss": 45.3410475140067,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      },
+      "euclid_J": {
+        "delta_weighted_rss": 0.0,
+        "flux": 0.0,
+        "null_weighted_rss": 97.73687604282807,
+        "source_weighted_rss": 97.73687604282807,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      },
+      "euclid_H": {
+        "delta_weighted_rss": 0.0,
+        "flux": 0.0,
+        "null_weighted_rss": 50.26732283871899,
+        "source_weighted_rss": 50.26732283871899,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      }
+    }
+  },
+  {
+    "tile_id": "tile_x01024_y00256_tract5063_patch_15",
+    "group": "blank_position_control",
+    "xy_vis": [
+      459.0502087006544,
+      819.3875945516872
+    ],
+    "neighbors_truncated": false,
+    "score": 4.415028494502586,
+    "width_arcsec": 0.6,
+    "bands": {
+      "euclid_VIS": {
+        "delta_weighted_rss": 3.369712351084729,
+        "flux": 0.23182119329232384,
+        "null_weighted_rss": 471.5220387142146,
+        "source_weighted_rss": 468.1523263631299,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      },
+      "euclid_Y": {
+        "delta_weighted_rss": 0.24741515285041515,
+        "flux": 39.30201527554088,
+        "null_weighted_rss": 50.55993472602951,
+        "source_weighted_rss": 50.312519573179095,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      },
+      "euclid_J": {
+        "delta_weighted_rss": 0.7979009905674417,
+        "flux": 74.5824755776125,
+        "null_weighted_rss": 54.874953656184985,
+        "source_weighted_rss": 54.07705266561754,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      },
+      "euclid_H": {
+        "delta_weighted_rss": 0.0,
+        "flux": 0.0,
+        "null_weighted_rss": 54.34240280129311,
+        "source_weighted_rss": 54.34240280129311,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      }
+    }
+  },
+  {
+    "tile_id": "tile_x01792_y02560_tract5063_patch_4",
+    "group": "unlabelled_score_ge_03",
+    "xy_vis": [
+      564.5138549804688,
+      398.02679443359375
+    ],
+    "neighbors_truncated": false,
+    "score": 14.093401231347379,
+    "width_arcsec": 0.15,
+    "bands": {
+      "euclid_VIS": {
+        "delta_weighted_rss": 0.0,
+        "flux": 0.0,
+        "null_weighted_rss": 438.2074647327614,
+        "source_weighted_rss": 438.2074647327614,
+        "n_pixels": 1089,
+        "n_neighbors": 1
+      },
+      "euclid_Y": {
+        "delta_weighted_rss": 2.743429135066407,
+        "flux": 41.84767428415432,
+        "null_weighted_rss": 47.77490154092069,
+        "source_weighted_rss": 45.03147240585428,
+        "n_pixels": 1089,
+        "n_neighbors": 1
+      },
+      "euclid_J": {
+        "delta_weighted_rss": 7.739726587138364,
+        "flux": 83.07204346121186,
+        "null_weighted_rss": 47.8868729946404,
+        "source_weighted_rss": 40.147146407502035,
+        "n_pixels": 1089,
+        "n_neighbors": 1
+      },
+      "euclid_H": {
+        "delta_weighted_rss": 3.610245509142608,
+        "flux": 53.389212847896246,
+        "null_weighted_rss": 58.325747175281855,
+        "source_weighted_rss": 54.71550166613925,
+        "n_pixels": 1089,
+        "n_neighbors": 1
+      }
+    }
+  },
+  {
+    "tile_id": "tile_x01792_y02560_tract5063_patch_4",
+    "group": "unlabelled_score_ge_03",
+    "xy_vis": [
+      48.59270477294922,
+      788.8735961914062
+    ],
+    "neighbors_truncated": false,
+    "score": 10.680038269751684,
+    "width_arcsec": 0.0,
+    "bands": {
+      "euclid_VIS": {
+        "delta_weighted_rss": 1.7591999823633842,
+        "flux": 0.021621167454665816,
+        "null_weighted_rss": 531.5830044329417,
+        "source_weighted_rss": 529.8238044505783,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      },
+      "euclid_Y": {
+        "delta_weighted_rss": 5.370232739225749,
+        "flux": 47.4896928091329,
+        "null_weighted_rss": 67.03035625096726,
+        "source_weighted_rss": 61.66012351174151,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      },
+      "euclid_J": {
+        "delta_weighted_rss": 3.2389241213008972,
+        "flux": 42.19044493940542,
+        "null_weighted_rss": 68.97172335483644,
+        "source_weighted_rss": 65.73279923353554,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      },
+      "euclid_H": {
+        "delta_weighted_rss": 0.3116814268616537,
+        "flux": 12.569727753944042,
+        "null_weighted_rss": 71.90992093883261,
+        "source_weighted_rss": 71.59823951197096,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      }
+    }
+  },
+  {
+    "tile_id": "tile_x01792_y02560_tract5063_patch_4",
+    "group": "unlabelled_score_ge_03",
+    "xy_vis": [
+      61.52559280395508,
+      877.2687377929688
+    ],
+    "neighbors_truncated": false,
+    "score": 97.44312374370921,
+    "width_arcsec": 0.15,
+    "bands": {
+      "euclid_VIS": {
+        "delta_weighted_rss": 79.51320324303413,
+        "flux": 0.3086557291527423,
+        "null_weighted_rss": 541.113313073918,
+        "source_weighted_rss": 461.60010983088387,
+        "n_pixels": 1089,
+        "n_neighbors": 3
+      },
+      "euclid_Y": {
+        "delta_weighted_rss": 1.274239643099726,
+        "flux": 29.867007489464314,
+        "null_weighted_rss": 38.86425059431166,
+        "source_weighted_rss": 37.59001095121194,
+        "n_pixels": 1089,
+        "n_neighbors": 3
+      },
+      "euclid_J": {
+        "delta_weighted_rss": 7.543931027383138,
+        "flux": 86.93747027822587,
+        "null_weighted_rss": 56.858000883405744,
+        "source_weighted_rss": 49.314069856022606,
+        "n_pixels": 1089,
+        "n_neighbors": 3
+      },
+      "euclid_H": {
+        "delta_weighted_rss": 9.111749830192217,
+        "flux": 88.56955570897091,
+        "null_weighted_rss": 52.73929890255354,
+        "source_weighted_rss": 43.627549072361326,
+        "n_pixels": 1089,
+        "n_neighbors": 3
+      }
+    }
+  },
+  {
+    "tile_id": "tile_x01792_y02560_tract5063_patch_4",
+    "group": "unlabelled_score_ge_03",
+    "xy_vis": [
+      57.934844970703125,
+      21.702632904052734
+    ],
+    "neighbors_truncated": false,
+    "score": 55.04713792917313,
+    "width_arcsec": 0.3,
+    "bands": {
+      "euclid_VIS": {
+        "delta_weighted_rss": 31.940223100069375,
+        "flux": 0.3108928072483618,
+        "null_weighted_rss": 533.9698761610402,
+        "source_weighted_rss": 502.0296530609709,
+        "n_pixels": 1089,
+        "n_neighbors": 1
+      },
+      "euclid_Y": {
+        "delta_weighted_rss": 2.7696856868241184,
+        "flux": 67.05682927852054,
+        "null_weighted_rss": 56.34252322028043,
+        "source_weighted_rss": 53.57283753345631,
+        "n_pixels": 1089,
+        "n_neighbors": 1
+      },
+      "euclid_J": {
+        "delta_weighted_rss": 3.9876638941062907,
+        "flux": 86.42287726436055,
+        "null_weighted_rss": 44.8850534155955,
+        "source_weighted_rss": 40.89738952148921,
+        "n_pixels": 1089,
+        "n_neighbors": 1
+      },
+      "euclid_H": {
+        "delta_weighted_rss": 16.34956524817335,
+        "flux": 170.81970514788352,
+        "null_weighted_rss": 68.39900005529303,
+        "source_weighted_rss": 52.04943480711968,
+        "n_pixels": 1089,
+        "n_neighbors": 1
+      }
+    }
+  },
+  {
+    "tile_id": "tile_x01792_y02560_tract5063_patch_4",
+    "group": "unlabelled_score_015_03",
+    "xy_vis": [
+      585.212890625,
+      868.4860229492188
+    ],
+    "neighbors_truncated": false,
+    "score": 82.00854698242875,
+    "width_arcsec": 0.15,
+    "bands": {
+      "euclid_VIS": {
+        "delta_weighted_rss": 40.90271877736291,
+        "flux": 0.29301689753054605,
+        "null_weighted_rss": 582.8569320687151,
+        "source_weighted_rss": 541.9542132913522,
+        "n_pixels": 1089,
+        "n_neighbors": 2
+      },
+      "euclid_Y": {
+        "delta_weighted_rss": 20.53406173878033,
+        "flux": 135.54299542573716,
+        "null_weighted_rss": 65.54473407827655,
+        "source_weighted_rss": 45.01067233949622,
+        "n_pixels": 1089,
+        "n_neighbors": 2
+      },
+      "euclid_J": {
+        "delta_weighted_rss": 17.180060205208278,
+        "flux": 142.78951189227323,
+        "null_weighted_rss": 82.73136063111986,
+        "source_weighted_rss": 65.55130042591158,
+        "n_pixels": 1089,
+        "n_neighbors": 2
+      },
+      "euclid_H": {
+        "delta_weighted_rss": 3.391706261077246,
+        "flux": 63.98965638961476,
+        "null_weighted_rss": 67.70055065820448,
+        "source_weighted_rss": 64.30884439712723,
+        "n_pixels": 1089,
+        "n_neighbors": 2
+      }
+    }
+  },
+  {
+    "tile_id": "tile_x01792_y02560_tract5063_patch_4",
+    "group": "unlabelled_score_015_03",
+    "xy_vis": [
+      361.3278503417969,
+      801.8289184570312
+    ],
+    "neighbors_truncated": false,
+    "score": 211.5036623543562,
+    "width_arcsec": 0.15,
+    "bands": {
+      "euclid_VIS": {
+        "delta_weighted_rss": 139.72409277113513,
+        "flux": 0.5699657571640113,
+        "null_weighted_rss": 959.8040009083944,
+        "source_weighted_rss": 820.0799081372593,
+        "n_pixels": 1089,
+        "n_neighbors": 1
+      },
+      "euclid_Y": {
+        "delta_weighted_rss": 21.561232945295217,
+        "flux": 149.88412779022016,
+        "null_weighted_rss": 101.60334359869373,
+        "source_weighted_rss": 80.04211065339851,
+        "n_pixels": 1089,
+        "n_neighbors": 1
+      },
+      "euclid_J": {
+        "delta_weighted_rss": 25.796045523212257,
+        "flux": 179.8822630175417,
+        "null_weighted_rss": 154.18482587113132,
+        "source_weighted_rss": 128.38878034791907,
+        "n_pixels": 1089,
+        "n_neighbors": 1
+      },
+      "euclid_H": {
+        "delta_weighted_rss": 24.422291114713616,
+        "flux": 182.52569438597158,
+        "null_weighted_rss": 140.96895403756662,
+        "source_weighted_rss": 116.546662922853,
+        "n_pixels": 1089,
+        "n_neighbors": 1
+      }
+    }
+  },
+  {
+    "tile_id": "tile_x01792_y02560_tract5063_patch_4",
+    "group": "unlabelled_score_015_03",
+    "xy_vis": [
+      346.8782958984375,
+      991.018310546875
+    ],
+    "neighbors_truncated": false,
+    "score": 12.298236742548092,
+    "width_arcsec": 0.15,
+    "bands": {
+      "euclid_VIS": {
+        "delta_weighted_rss": 0.05410176415443857,
+        "flux": 0.009162567130693812,
+        "null_weighted_rss": 545.4333811012282,
+        "source_weighted_rss": 545.3792793370737,
+        "n_pixels": 1089,
+        "n_neighbors": 1
+      },
+      "euclid_Y": {
+        "delta_weighted_rss": 2.1112193872988243,
+        "flux": 37.10494458068831,
+        "null_weighted_rss": 47.63252536173883,
+        "source_weighted_rss": 45.521305974440004,
+        "n_pixels": 1089,
+        "n_neighbors": 1
+      },
+      "euclid_J": {
+        "delta_weighted_rss": 0.1079405245843219,
+        "flux": 9.07232407439394,
+        "null_weighted_rss": 35.548606375744946,
+        "source_weighted_rss": 35.440665851160624,
+        "n_pixels": 1089,
+        "n_neighbors": 1
+      },
+      "euclid_H": {
+        "delta_weighted_rss": 10.024975066510507,
+        "flux": 89.82469536993919,
+        "null_weighted_rss": 60.4061374709846,
+        "source_weighted_rss": 50.3811624044741,
+        "n_pixels": 1089,
+        "n_neighbors": 1
+      }
+    }
+  },
+  {
+    "tile_id": "tile_x01792_y02560_tract5063_patch_4",
+    "group": "unlabelled_score_015_03",
+    "xy_vis": [
+      297.7689208984375,
+      254.31639099121094
+    ],
+    "neighbors_truncated": false,
+    "score": 45.915132439408666,
+    "width_arcsec": 0.3,
+    "bands": {
+      "euclid_VIS": {
+        "delta_weighted_rss": 0.0071039765433056346,
+        "flux": 0.00461194070570192,
+        "null_weighted_rss": 472.1255529658724,
+        "source_weighted_rss": 472.11844898932907,
+        "n_pixels": 1089,
+        "n_neighbors": 3
+      },
+      "euclid_Y": {
+        "delta_weighted_rss": 19.394123570090102,
+        "flux": 216.03433174942506,
+        "null_weighted_rss": 100.52158937492413,
+        "source_weighted_rss": 81.12746580483403,
+        "n_pixels": 1089,
+        "n_neighbors": 3
+      },
+      "euclid_J": {
+        "delta_weighted_rss": 9.10882125740271,
+        "flux": 138.38399945170036,
+        "null_weighted_rss": 91.83360001518074,
+        "source_weighted_rss": 82.72477875777803,
+        "n_pixels": 1089,
+        "n_neighbors": 3
+      },
+      "euclid_H": {
+        "delta_weighted_rss": 17.40508363537255,
+        "flux": 221.1684719208363,
+        "null_weighted_rss": 68.73346791508824,
+        "source_weighted_rss": 51.32838427971569,
+        "n_pixels": 1089,
+        "n_neighbors": 3
+      }
+    }
+  },
+  {
+    "tile_id": "tile_x01792_y02560_tract5063_patch_4",
+    "group": "seed_matched_control",
+    "xy_vis": [
+      1012.6160888671875,
+      375.73199462890625
+    ],
+    "neighbors_truncated": false,
+    "score": 10101.290439041984,
+    "width_arcsec": 0.0,
+    "bands": {
+      "euclid_VIS": {
+        "delta_weighted_rss": 7660.213252502973,
+        "flux": 4.235486143459436,
+        "null_weighted_rss": 8224.432059527415,
+        "source_weighted_rss": 564.218807024442,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      },
+      "euclid_Y": {
+        "delta_weighted_rss": 417.90371262009944,
+        "flux": 1123.535134561186,
+        "null_weighted_rss": 492.10038849003996,
+        "source_weighted_rss": 74.19667586994053,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      },
+      "euclid_J": {
+        "delta_weighted_rss": 1050.5587618897966,
+        "flux": 1561.8316117990184,
+        "null_weighted_rss": 1123.635908243099,
+        "source_weighted_rss": 73.07714635330231,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      },
+      "euclid_H": {
+        "delta_weighted_rss": 972.614712029115,
+        "flux": 1322.1497340184028,
+        "null_weighted_rss": 1030.2536370461562,
+        "source_weighted_rss": 57.63892501704119,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      }
+    }
+  },
+  {
+    "tile_id": "tile_x01792_y02560_tract5063_patch_4",
+    "group": "seed_matched_control",
+    "xy_vis": [
+      367.5513000488281,
+      81.1314697265625
+    ],
+    "neighbors_truncated": false,
+    "score": 1940.3413664376844,
+    "width_arcsec": 0.3,
+    "bands": {
+      "euclid_VIS": {
+        "delta_weighted_rss": 663.3110540297448,
+        "flux": 1.4975653451406656,
+        "null_weighted_rss": 1260.4893239218245,
+        "source_weighted_rss": 597.1782698920797,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      },
+      "euclid_Y": {
+        "delta_weighted_rss": 216.89609808208297,
+        "flux": 690.3146517198392,
+        "null_weighted_rss": 282.3734254292625,
+        "source_weighted_rss": 65.47732734717955,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      },
+      "euclid_J": {
+        "delta_weighted_rss": 462.3152158969521,
+        "flux": 1126.3891473466242,
+        "null_weighted_rss": 529.7210966034635,
+        "source_weighted_rss": 67.40588070651138,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      },
+      "euclid_H": {
+        "delta_weighted_rss": 597.8189984289044,
+        "flux": 1322.4091135463254,
+        "null_weighted_rss": 678.028954307017,
+        "source_weighted_rss": 80.20995587811261,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      }
+    }
+  },
+  {
+    "tile_id": "tile_x01792_y02560_tract5063_patch_4",
+    "group": "seed_matched_control",
+    "xy_vis": [
+      402.7772521972656,
+      281.1612548828125
+    ],
+    "neighbors_truncated": false,
+    "score": 220.88424335959397,
+    "width_arcsec": 0.15,
+    "bands": {
+      "euclid_VIS": {
+        "delta_weighted_rss": 170.8779514926615,
+        "flux": 0.45716574288278505,
+        "null_weighted_rss": 726.2114497744609,
+        "source_weighted_rss": 555.3334982817994,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      },
+      "euclid_Y": {
+        "delta_weighted_rss": 38.54689612207808,
+        "flux": 185.80699666842318,
+        "null_weighted_rss": 130.78570211806988,
+        "source_weighted_rss": 92.2388059959918,
+        "n_pixels": 1085,
+        "n_neighbors": 0
+      },
+      "euclid_J": {
+        "delta_weighted_rss": 4.131666115048134,
+        "flux": 66.72318586461347,
+        "null_weighted_rss": 43.0623726276287,
+        "source_weighted_rss": 38.930706512580564,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      },
+      "euclid_H": {
+        "delta_weighted_rss": 7.327729629806271,
+        "flux": 116.57364155859338,
+        "null_weighted_rss": 60.075911421428515,
+        "source_weighted_rss": 52.748181791622244,
+        "n_pixels": 1079,
+        "n_neighbors": 0
+      }
+    }
+  },
+  {
+    "tile_id": "tile_x01792_y02560_tract5063_patch_4",
+    "group": "seed_matched_control",
+    "xy_vis": [
+      995.1407470703125,
+      236.75245666503906
+    ],
+    "neighbors_truncated": false,
+    "score": 11.773994433628204,
+    "width_arcsec": 0.15,
+    "bands": {
+      "euclid_VIS": {
+        "delta_weighted_rss": 0.0,
+        "flux": 0.0,
+        "null_weighted_rss": 450.6198017167151,
+        "source_weighted_rss": 450.6198017167151,
+        "n_pixels": 1089,
+        "n_neighbors": 1
+      },
+      "euclid_Y": {
+        "delta_weighted_rss": 2.9310751567808992,
+        "flux": 43.34662756427753,
+        "null_weighted_rss": 54.69842136803252,
+        "source_weighted_rss": 51.76734621125162,
+        "n_pixels": 1089,
+        "n_neighbors": 1
+      },
+      "euclid_J": {
+        "delta_weighted_rss": 5.087562682067386,
+        "flux": 63.587646675785116,
+        "null_weighted_rss": 88.39909308488694,
+        "source_weighted_rss": 83.31153040281956,
+        "n_pixels": 1089,
+        "n_neighbors": 1
+      },
+      "euclid_H": {
+        "delta_weighted_rss": 3.7553565947799186,
+        "flux": 53.40781644493746,
+        "null_weighted_rss": 54.24098125910759,
+        "source_weighted_rss": 50.48562466432767,
+        "n_pixels": 1089,
+        "n_neighbors": 1
+      }
+    }
+  },
+  {
+    "tile_id": "tile_x01792_y02560_tract5063_patch_4",
+    "group": "blank_position_control",
+    "xy_vis": [
+      273.15337940010807,
+      364.5721860133939
+    ],
+    "neighbors_truncated": false,
+    "score": 0.5415301247380171,
+    "width_arcsec": 0.6,
+    "bands": {
+      "euclid_VIS": {
+        "delta_weighted_rss": 0.5415301247380171,
+        "flux": 0.09125216789320723,
+        "null_weighted_rss": 463.07129009277986,
+        "source_weighted_rss": 462.52975996804184,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      },
+      "euclid_Y": {
+        "delta_weighted_rss": 0.0,
+        "flux": 0.0,
+        "null_weighted_rss": 54.94139070955169,
+        "source_weighted_rss": 54.94139070955169,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      },
+      "euclid_J": {
+        "delta_weighted_rss": 0.0,
+        "flux": 0.0,
+        "null_weighted_rss": 50.934871938181224,
+        "source_weighted_rss": 50.934871938181224,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      },
+      "euclid_H": {
+        "delta_weighted_rss": 0.0,
+        "flux": 0.0,
+        "null_weighted_rss": 59.81520198564218,
+        "source_weighted_rss": 59.81520198564218,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      }
+    }
+  },
+  {
+    "tile_id": "tile_x01792_y02560_tract5063_patch_4",
+    "group": "blank_position_control",
+    "xy_vis": [
+      796.7386421553895,
+      582.8877732252356
+    ],
+    "neighbors_truncated": false,
+    "score": 4.721240540735749,
+    "width_arcsec": 0.3,
+    "bands": {
+      "euclid_VIS": {
+        "delta_weighted_rss": 0.0,
+        "flux": 0.0,
+        "null_weighted_rss": 443.13777393314365,
+        "source_weighted_rss": 443.13777393314365,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      },
+      "euclid_Y": {
+        "delta_weighted_rss": 1.1455047893484291,
+        "flux": 40.6662988949845,
+        "null_weighted_rss": 47.52782149604708,
+        "source_weighted_rss": 46.38231670669865,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      },
+      "euclid_J": {
+        "delta_weighted_rss": 3.057912340542522,
+        "flux": 68.6166220427676,
+        "null_weighted_rss": 44.543524840086825,
+        "source_weighted_rss": 41.4856124995443,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      },
+      "euclid_H": {
+        "delta_weighted_rss": 0.5178234108447981,
+        "flux": 27.24689081734708,
+        "null_weighted_rss": 51.50295049229637,
+        "source_weighted_rss": 50.98512708145157,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      }
+    }
+  },
+  {
+    "tile_id": "tile_x01792_y02560_tract5063_patch_4",
+    "group": "blank_position_control",
+    "xy_vis": [
+      323.23990648827896,
+      943.6577571570441
+    ],
+    "neighbors_truncated": false,
+    "score": 2.8443125037248507,
+    "width_arcsec": 0.6,
+    "bands": {
+      "euclid_VIS": {
+        "delta_weighted_rss": 0.0,
+        "flux": 0.0,
+        "null_weighted_rss": 446.8618086075795,
+        "source_weighted_rss": 446.8618086075795,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      },
+      "euclid_Y": {
+        "delta_weighted_rss": 0.25163153057757626,
+        "flux": 38.76256202599069,
+        "null_weighted_rss": 46.109554558863444,
+        "source_weighted_rss": 45.85792302828587,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      },
+      "euclid_J": {
+        "delta_weighted_rss": 0.5827465728571184,
+        "flux": 62.52790310359494,
+        "null_weighted_rss": 43.15269411411331,
+        "source_weighted_rss": 42.56994754125619,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      },
+      "euclid_H": {
+        "delta_weighted_rss": 2.009934400290156,
+        "flux": 110.24132906606955,
+        "null_weighted_rss": 43.892431695641,
+        "source_weighted_rss": 41.882497295350845,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      }
+    }
+  },
+  {
+    "tile_id": "tile_x01792_y02560_tract5063_patch_4",
+    "group": "blank_position_control",
+    "xy_vis": [
+      955.8826570104468,
+      571.4261020037783
+    ],
+    "neighbors_truncated": false,
+    "score": 0.1726180298441946,
+    "width_arcsec": 0.6,
+    "bands": {
+      "euclid_VIS": {
+        "delta_weighted_rss": 0.0,
+        "flux": 0.0,
+        "null_weighted_rss": 423.51453373115874,
+        "source_weighted_rss": 423.51453373115874,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      },
+      "euclid_Y": {
+        "delta_weighted_rss": 0.114969712822095,
+        "flux": 26.42316300235763,
+        "null_weighted_rss": 44.060521060120685,
+        "source_weighted_rss": 43.94555134729859,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      },
+      "euclid_J": {
+        "delta_weighted_rss": 0.057648317022099604,
+        "flux": 19.795304507695768,
+        "null_weighted_rss": 44.062448642162316,
+        "source_weighted_rss": 44.004800325140216,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      },
+      "euclid_H": {
+        "delta_weighted_rss": 0.0,
+        "flux": 0.0,
+        "null_weighted_rss": 52.870635337391015,
+        "source_weighted_rss": 52.870635337391015,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      }
+    }
+  },
+  {
+    "tile_id": "tile_x02816_y02816_tract5063_patch_5",
+    "group": "unlabelled_score_ge_03",
+    "xy_vis": [
+      731.9971923828125,
+      38.30377197265625
+    ],
+    "neighbors_truncated": false,
+    "score": 2497.629332445665,
+    "width_arcsec": 0.15,
+    "bands": {
+      "euclid_VIS": {
+        "delta_weighted_rss": 2152.9684293995488,
+        "flux": 2.0944043850043106,
+        "null_weighted_rss": 4547.442557469623,
+        "source_weighted_rss": 2394.4741280700746,
+        "n_pixels": 1089,
+        "n_neighbors": 2
+      },
+      "euclid_Y": {
+        "delta_weighted_rss": 95.56319257312376,
+        "flux": 310.8069097898453,
+        "null_weighted_rss": 193.24311981406444,
+        "source_weighted_rss": 97.67992724094069,
+        "n_pixels": 1089,
+        "n_neighbors": 2
+      },
+      "euclid_J": {
+        "delta_weighted_rss": 115.87585853881374,
+        "flux": 352.4850029062329,
+        "null_weighted_rss": 197.72372233910951,
+        "source_weighted_rss": 81.84786380029577,
+        "n_pixels": 1089,
+        "n_neighbors": 2
+      },
+      "euclid_H": {
+        "delta_weighted_rss": 133.22185193417894,
+        "flux": 378.56486613558246,
+        "null_weighted_rss": 240.88759605439827,
+        "source_weighted_rss": 107.66574412021933,
+        "n_pixels": 1089,
+        "n_neighbors": 2
+      }
+    }
+  },
+  {
+    "tile_id": "tile_x02816_y02816_tract5063_patch_5",
+    "group": "unlabelled_score_ge_03",
+    "xy_vis": [
+      441.4386901855469,
+      941.3221435546875
+    ],
+    "neighbors_truncated": false,
+    "score": 39.87868699293384,
+    "width_arcsec": 0.0,
+    "bands": {
+      "euclid_VIS": {
+        "delta_weighted_rss": 32.49963080561719,
+        "flux": 0.10380947500093356,
+        "null_weighted_rss": 480.4459285054347,
+        "source_weighted_rss": 447.94629769981753,
+        "n_pixels": 1089,
+        "n_neighbors": 1
+      },
+      "euclid_Y": {
+        "delta_weighted_rss": 3.0128142005406886,
+        "flux": 34.66905476813849,
+        "null_weighted_rss": 57.595574059751726,
+        "source_weighted_rss": 54.58275985921104,
+        "n_pixels": 1089,
+        "n_neighbors": 1
+      },
+      "euclid_J": {
+        "delta_weighted_rss": 1.212536819083951,
+        "flux": 25.438908467259413,
+        "null_weighted_rss": 54.614071973210194,
+        "source_weighted_rss": 53.40153515412624,
+        "n_pixels": 1089,
+        "n_neighbors": 1
+      },
+      "euclid_H": {
+        "delta_weighted_rss": 3.15370516769201,
+        "flux": 41.546174379990774,
+        "null_weighted_rss": 71.49805961012905,
+        "source_weighted_rss": 68.34435444243704,
+        "n_pixels": 1089,
+        "n_neighbors": 1
+      }
+    }
+  },
+  {
+    "tile_id": "tile_x02816_y02816_tract5063_patch_5",
+    "group": "unlabelled_score_ge_03",
+    "xy_vis": [
+      459.49053955078125,
+      820.432373046875
+    ],
+    "neighbors_truncated": false,
+    "score": 35.28731707714661,
+    "width_arcsec": 0.15,
+    "bands": {
+      "euclid_VIS": {
+        "delta_weighted_rss": 19.208945068518346,
+        "flux": 0.13444244981589704,
+        "null_weighted_rss": 511.1627618546052,
+        "source_weighted_rss": 491.95381678608686,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      },
+      "euclid_Y": {
+        "delta_weighted_rss": 7.168100880361756,
+        "flux": 66.70023916744435,
+        "null_weighted_rss": 52.49399714098991,
+        "source_weighted_rss": 45.325896260628156,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      },
+      "euclid_J": {
+        "delta_weighted_rss": 5.9821037659185805,
+        "flux": 68.59096493071955,
+        "null_weighted_rss": 46.835951592220724,
+        "source_weighted_rss": 40.85384782630214,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      },
+      "euclid_H": {
+        "delta_weighted_rss": 2.928167362347928,
+        "flux": 46.99452174316134,
+        "null_weighted_rss": 52.52949801574099,
+        "source_weighted_rss": 49.60133065339306,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      }
+    }
+  },
+  {
+    "tile_id": "tile_x02816_y02816_tract5063_patch_5",
+    "group": "unlabelled_score_ge_03",
+    "xy_vis": [
+      683.3794555664062,
+      785.2487182617188
+    ],
+    "neighbors_truncated": false,
+    "score": 35.82424515244428,
+    "width_arcsec": 0.15,
+    "bands": {
+      "euclid_VIS": {
+        "delta_weighted_rss": 24.022599650791562,
+        "flux": 0.1793251794606019,
+        "null_weighted_rss": 547.8552852294373,
+        "source_weighted_rss": 523.8326855786457,
+        "n_pixels": 1089,
+        "n_neighbors": 1
+      },
+      "euclid_Y": {
+        "delta_weighted_rss": 2.304115954653959,
+        "flux": 37.78074899194175,
+        "null_weighted_rss": 48.7791555207109,
+        "source_weighted_rss": 46.47503956605694,
+        "n_pixels": 1089,
+        "n_neighbors": 1
+      },
+      "euclid_J": {
+        "delta_weighted_rss": 6.741025865911261,
+        "flux": 73.59563296931975,
+        "null_weighted_rss": 57.385475769656374,
+        "source_weighted_rss": 50.64444990374511,
+        "n_pixels": 1089,
+        "n_neighbors": 1
+      },
+      "euclid_H": {
+        "delta_weighted_rss": 2.7565036810874943,
+        "flux": 47.246031671150625,
+        "null_weighted_rss": 59.12428787362369,
+        "source_weighted_rss": 56.3677841925362,
+        "n_pixels": 1089,
+        "n_neighbors": 1
+      }
+    }
+  },
+  {
+    "tile_id": "tile_x02816_y02816_tract5063_patch_5",
+    "group": "unlabelled_score_015_03",
+    "xy_vis": [
+      4.1459574699401855,
+      1076.3370361328125
+    ],
+    "neighbors_truncated": false,
+    "score": null,
+    "width_arcsec": null,
+    "bands": {}
+  },
+  {
+    "tile_id": "tile_x02816_y02816_tract5063_patch_5",
+    "group": "unlabelled_score_015_03",
+    "xy_vis": [
+      1031.3035888671875,
+      1040.1009521484375
+    ],
+    "neighbors_truncated": false,
+    "score": 16.337776146770118,
+    "width_arcsec": 0.15,
+    "bands": {
+      "euclid_VIS": {
+        "delta_weighted_rss": 5.933917197855692,
+        "flux": 0.0757782211096244,
+        "null_weighted_rss": 502.30034281613933,
+        "source_weighted_rss": 496.36642561828364,
+        "n_pixels": 1089,
+        "n_neighbors": 1
+      },
+      "euclid_Y": {
+        "delta_weighted_rss": 4.272269311435096,
+        "flux": 51.172013600885734,
+        "null_weighted_rss": 57.69191557054512,
+        "source_weighted_rss": 53.419646259110024,
+        "n_pixels": 1089,
+        "n_neighbors": 1
+      },
+      "euclid_J": {
+        "delta_weighted_rss": 1.408881204615433,
+        "flux": 32.85488220211599,
+        "null_weighted_rss": 55.81078483266154,
+        "source_weighted_rss": 54.40190362804611,
+        "n_pixels": 1089,
+        "n_neighbors": 1
+      },
+      "euclid_H": {
+        "delta_weighted_rss": 4.722708432863897,
+        "flux": 60.74345746816722,
+        "null_weighted_rss": 52.470679390543104,
+        "source_weighted_rss": 47.74797095767921,
+        "n_pixels": 1089,
+        "n_neighbors": 1
+      }
+    }
+  },
+  {
+    "tile_id": "tile_x02816_y02816_tract5063_patch_5",
+    "group": "unlabelled_score_015_03",
+    "xy_vis": [
+      1071.127685546875,
+      568.6235961914062
+    ],
+    "neighbors_truncated": false,
+    "score": null,
+    "width_arcsec": null,
+    "bands": {}
+  },
+  {
+    "tile_id": "tile_x02816_y02816_tract5063_patch_5",
+    "group": "unlabelled_score_015_03",
+    "xy_vis": [
+      737.1353149414062,
+      491.1099548339844
+    ],
+    "neighbors_truncated": false,
+    "score": 55.152556495242095,
+    "width_arcsec": 0.6,
+    "bands": {
+      "euclid_VIS": {
+        "delta_weighted_rss": 7.524393095795517,
+        "flux": 0.37498791654257635,
+        "null_weighted_rss": 443.5878863463266,
+        "source_weighted_rss": 436.0634932505311,
+        "n_pixels": 1089,
+        "n_neighbors": 2
+      },
+      "euclid_Y": {
+        "delta_weighted_rss": 15.060474028293456,
+        "flux": 329.7661916772519,
+        "null_weighted_rss": 81.17657291311797,
+        "source_weighted_rss": 66.11609888482451,
+        "n_pixels": 1089,
+        "n_neighbors": 2
+      },
+      "euclid_J": {
+        "delta_weighted_rss": 11.846413530393662,
+        "flux": 307.247658328404,
+        "null_weighted_rss": 80.26666404484455,
+        "source_weighted_rss": 68.42025051445088,
+        "n_pixels": 1089,
+        "n_neighbors": 2
+      },
+      "euclid_H": {
+        "delta_weighted_rss": 20.72127584075946,
+        "flux": 397.9921962040256,
+        "null_weighted_rss": 78.39279860464654,
+        "source_weighted_rss": 57.67152276388708,
+        "n_pixels": 1089,
+        "n_neighbors": 2
+      }
+    }
+  },
+  {
+    "tile_id": "tile_x02816_y02816_tract5063_patch_5",
+    "group": "seed_matched_control",
+    "xy_vis": [
+      926.373779296875,
+      44.973655700683594
+    ],
+    "neighbors_truncated": false,
+    "score": 61.362129428893574,
+    "width_arcsec": 0.3,
+    "bands": {
+      "euclid_VIS": {
+        "delta_weighted_rss": 34.38896820667634,
+        "flux": 0.3182664593263636,
+        "null_weighted_rss": 478.78171524885323,
+        "source_weighted_rss": 444.3927470421769,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      },
+      "euclid_Y": {
+        "delta_weighted_rss": 9.161290964157715,
+        "flux": 109.80047513302942,
+        "null_weighted_rss": 58.3259343811501,
+        "source_weighted_rss": 49.164643416992384,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      },
+      "euclid_J": {
+        "delta_weighted_rss": 8.379550364329567,
+        "flux": 114.08255802069176,
+        "null_weighted_rss": 58.296378156232656,
+        "source_weighted_rss": 49.91682779190309,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      },
+      "euclid_H": {
+        "delta_weighted_rss": 9.432319893729954,
+        "flux": 118.64536802343076,
+        "null_weighted_rss": 56.05732849705327,
+        "source_weighted_rss": 46.625008603323316,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      }
+    }
+  },
+  {
+    "tile_id": "tile_x02816_y02816_tract5063_patch_5",
+    "group": "seed_matched_control",
+    "xy_vis": [
+      726.7789306640625,
+      673.06787109375
+    ],
+    "neighbors_truncated": false,
+    "score": 6406.713675442722,
+    "width_arcsec": 0.3,
+    "bands": {
+      "euclid_VIS": {
+        "delta_weighted_rss": 4078.816653694956,
+        "flux": 4.348824113961014,
+        "null_weighted_rss": 6170.676333787954,
+        "source_weighted_rss": 2091.8596800929977,
+        "n_pixels": 1089,
+        "n_neighbors": 1
+      },
+      "euclid_Y": {
+        "delta_weighted_rss": 619.6433115532149,
+        "flux": 1143.8792491323502,
+        "null_weighted_rss": 750.5805920824284,
+        "source_weighted_rss": 130.93728052921355,
+        "n_pixels": 1089,
+        "n_neighbors": 1
+      },
+      "euclid_J": {
+        "delta_weighted_rss": 788.947825861407,
+        "flux": 1476.8145516220586,
+        "null_weighted_rss": 925.6487491637871,
+        "source_weighted_rss": 136.7009233023801,
+        "n_pixels": 1089,
+        "n_neighbors": 1
+      },
+      "euclid_H": {
+        "delta_weighted_rss": 919.3058843331434,
+        "flux": 1590.8641496892392,
+        "null_weighted_rss": 1068.9318667539071,
+        "source_weighted_rss": 149.62598242076376,
+        "n_pixels": 1089,
+        "n_neighbors": 1
+      }
+    }
+  },
+  {
+    "tile_id": "tile_x02816_y02816_tract5063_patch_5",
+    "group": "seed_matched_control",
+    "xy_vis": [
+      437.3772277832031,
+      566.5830078125
+    ],
+    "neighbors_truncated": false,
+    "score": 84.9089298329707,
+    "width_arcsec": 0.15,
+    "bands": {
+      "euclid_VIS": {
+        "delta_weighted_rss": 73.32003334874696,
+        "flux": 0.27543198416952364,
+        "null_weighted_rss": 568.5824881697386,
+        "source_weighted_rss": 495.2624548209916,
+        "n_pixels": 1089,
+        "n_neighbors": 1
+      },
+      "euclid_Y": {
+        "delta_weighted_rss": 1.18741872222666,
+        "flux": 26.540626161622594,
+        "null_weighted_rss": 55.16973800647462,
+        "source_weighted_rss": 53.98231928424796,
+        "n_pixels": 1089,
+        "n_neighbors": 1
+      },
+      "euclid_J": {
+        "delta_weighted_rss": 7.285959346373609,
+        "flux": 75.51588929832926,
+        "null_weighted_rss": 54.40421932330696,
+        "source_weighted_rss": 47.11825997693335,
+        "n_pixels": 1089,
+        "n_neighbors": 1
+      },
+      "euclid_H": {
+        "delta_weighted_rss": 3.115518415623491,
+        "flux": 50.115725446727495,
+        "null_weighted_rss": 64.2571374892668,
+        "source_weighted_rss": 61.141619073643305,
+        "n_pixels": 1089,
+        "n_neighbors": 1
+      }
+    }
+  },
+  {
+    "tile_id": "tile_x02816_y02816_tract5063_patch_5",
+    "group": "seed_matched_control",
+    "xy_vis": [
+      508.6201477050781,
+      492.5905456542969
+    ],
+    "neighbors_truncated": false,
+    "score": 99.07133387399664,
+    "width_arcsec": 0.0,
+    "bands": {
+      "euclid_VIS": {
+        "delta_weighted_rss": 84.76326357719836,
+        "flux": 0.1667365975092516,
+        "null_weighted_rss": 547.3258914305904,
+        "source_weighted_rss": 462.5626278533921,
+        "n_pixels": 1089,
+        "n_neighbors": 2
+      },
+      "euclid_Y": {
+        "delta_weighted_rss": 4.011205535027408,
+        "flux": 39.318911702201504,
+        "null_weighted_rss": 48.907904588956164,
+        "source_weighted_rss": 44.89669905392876,
+        "n_pixels": 1089,
+        "n_neighbors": 2
+      },
+      "euclid_J": {
+        "delta_weighted_rss": 1.7772704775879618,
+        "flux": 30.74185044680236,
+        "null_weighted_rss": 46.587034273669005,
+        "source_weighted_rss": 44.80976379608104,
+        "n_pixels": 1089,
+        "n_neighbors": 2
+      },
+      "euclid_H": {
+        "delta_weighted_rss": 8.5195942841829,
+        "flux": 68.96107240992578,
+        "null_weighted_rss": 61.05721115033821,
+        "source_weighted_rss": 52.53761686615531,
+        "n_pixels": 1089,
+        "n_neighbors": 2
+      }
+    }
+  },
+  {
+    "tile_id": "tile_x02816_y02816_tract5063_patch_5",
+    "group": "blank_position_control",
+    "xy_vis": [
+      490.4779133721754,
+      939.0900296532615
+    ],
+    "neighbors_truncated": false,
+    "score": 1.3881789284872141,
+    "width_arcsec": 0.6,
+    "bands": {
+      "euclid_VIS": {
+        "delta_weighted_rss": 1.195226871800287,
+        "flux": 0.13359753385475928,
+        "null_weighted_rss": 459.6041447176843,
+        "source_weighted_rss": 458.408917845884,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      },
+      "euclid_Y": {
+        "delta_weighted_rss": 0.0,
+        "flux": 0.0,
+        "null_weighted_rss": 64.67856818332505,
+        "source_weighted_rss": 64.67856818332505,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      },
+      "euclid_J": {
+        "delta_weighted_rss": 0.028033418814708,
+        "flux": 13.669129529711487,
+        "null_weighted_rss": 52.08120730507806,
+        "source_weighted_rss": 52.05317388626335,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      },
+      "euclid_H": {
+        "delta_weighted_rss": 0.16491863787221916,
+        "flux": 32.11717684147752,
+        "null_weighted_rss": 40.222901762609794,
+        "source_weighted_rss": 40.057983124737575,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      }
+    }
+  },
+  {
+    "tile_id": "tile_x02816_y02816_tract5063_patch_5",
+    "group": "blank_position_control",
+    "xy_vis": [
+      573.322191148008,
+      703.5756631455662
+    ],
+    "neighbors_truncated": false,
+    "score": 0.7813521739356517,
+    "width_arcsec": 0.3,
+    "bands": {
+      "euclid_VIS": {
+        "delta_weighted_rss": 0.08048182622957256,
+        "flux": 0.015371344561371023,
+        "null_weighted_rss": 430.70371339239983,
+        "source_weighted_rss": 430.62323156617026,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      },
+      "euclid_Y": {
+        "delta_weighted_rss": 0.7008703477060791,
+        "flux": 30.541248920677322,
+        "null_weighted_rss": 50.52204052293396,
+        "source_weighted_rss": 49.821170175227884,
+        "n_pixels": 1072,
+        "n_neighbors": 0
+      },
+      "euclid_J": {
+        "delta_weighted_rss": 0.0,
+        "flux": 0.0,
+        "null_weighted_rss": 40.842647582117664,
+        "source_weighted_rss": 40.842647582117664,
+        "n_pixels": 1086,
+        "n_neighbors": 0
+      },
+      "euclid_H": {
+        "delta_weighted_rss": 0.0,
+        "flux": 0.0,
+        "null_weighted_rss": 52.11685538473052,
+        "source_weighted_rss": 52.11685538473052,
+        "n_pixels": 1087,
+        "n_neighbors": 0
+      }
+    }
+  },
+  {
+    "tile_id": "tile_x02816_y02816_tract5063_patch_5",
+    "group": "blank_position_control",
+    "xy_vis": [
+      341.4125247927212,
+      994.8535624616502
+    ],
+    "neighbors_truncated": false,
+    "score": 0.837830708789042,
+    "width_arcsec": 0.0,
+    "bands": {
+      "euclid_VIS": {
+        "delta_weighted_rss": 0.0,
+        "flux": 0.0,
+        "null_weighted_rss": 431.9781701346552,
+        "source_weighted_rss": 431.9781701346552,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      },
+      "euclid_Y": {
+        "delta_weighted_rss": 0.0,
+        "flux": 0.0,
+        "null_weighted_rss": 52.99324914811985,
+        "source_weighted_rss": 52.99324914811985,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      },
+      "euclid_J": {
+        "delta_weighted_rss": 0.001823148059472146,
+        "flux": 0.9482484927815183,
+        "null_weighted_rss": 69.22444925717429,
+        "source_weighted_rss": 69.22262610911481,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      },
+      "euclid_H": {
+        "delta_weighted_rss": 0.8360075607295698,
+        "flux": 20.952902537609017,
+        "null_weighted_rss": 52.91422381029297,
+        "source_weighted_rss": 52.0782162495634,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      }
+    }
+  },
+  {
+    "tile_id": "tile_x02816_y02816_tract5063_patch_5",
+    "group": "blank_position_control",
+    "xy_vis": [
+      892.0056596049116,
+      75.77703855914277
+    ],
+    "neighbors_truncated": false,
+    "score": 0.7795835510231655,
+    "width_arcsec": 0.6,
+    "bands": {
+      "euclid_VIS": {
+        "delta_weighted_rss": 0.0,
+        "flux": 0.0,
+        "null_weighted_rss": 451.11510975362006,
+        "source_weighted_rss": 451.11510975362006,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      },
+      "euclid_Y": {
+        "delta_weighted_rss": 0.22443136174327094,
+        "flux": 35.49763177461547,
+        "null_weighted_rss": 55.995164783808384,
+        "source_weighted_rss": 55.77073342206511,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      },
+      "euclid_J": {
+        "delta_weighted_rss": 0.022773385470813423,
+        "flux": 12.156071666973501,
+        "null_weighted_rss": 58.72565303566876,
+        "source_weighted_rss": 58.70287965019795,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      },
+      "euclid_H": {
+        "delta_weighted_rss": 0.5323788038090811,
+        "flux": 56.313523716259354,
+        "null_weighted_rss": 55.50426042968886,
+        "source_weighted_rss": 54.97188162587978,
+        "n_pixels": 1089,
+        "n_neighbors": 0
+      }
+    }
+  }
+]

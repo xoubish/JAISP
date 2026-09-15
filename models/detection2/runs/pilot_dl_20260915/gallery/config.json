@@ -1,0 +1,42 @@
+{
+  "prepared": "/home/shemmati/Work/Projects/JAISP/models/detection2/runs/pilot_dl_20260915/prepared",
+  "tiles": 4,
+  "per_group": 2,
+  "experiment_config": {
+    "experiment": "unknown_regions_v1",
+    "seed": 42,
+    "feature_dir": "data/cached_features_v11_q1",
+    "euclid_dir": "data/euclid_tiles_all_q1",
+    "rubin_dir": "data/rubin_tiles_all",
+    "vis_labels": "data/cached_features_v11_q1/pseudo_labels_vis_sep.pt",
+    "nir_labels": "experiments/visnir_head_20260914/labels/nir_extra_labels.pt",
+    "initial_checkpoint": "experiments/visnir_head_20260914/visnir/final.pt",
+    "gaia": "data/gaia_ecdfs_astrometry_cache.npz",
+    "excluded_patch": 25,
+    "expected_train_tiles": 682,
+    "expected_validation_tiles": 108,
+    "proposal_floor": 0.15,
+    "label_match_radius_vis_px": 5.0,
+    "ignore_radius_vis_px": 5.0,
+    "max_ignore_fraction": 0.2,
+    "epochs": 4,
+    "batch_size": 2,
+    "lr": 3e-05,
+    "weight_decay": 0.0001,
+    "workers": 4,
+    "validation_tiles": 12,
+    "validation_thresholds": [
+      0.2,
+      0.3,
+      0.4,
+      0.5
+    ],
+    "primary_threshold": 0.3,
+    "wandb": {
+      "entity": "AI-Astro",
+      "project": "JAISP-Detection-Q1",
+      "group": "detection2-unknown-regions-v1",
+      "mode": "online"
+    }
+  }
+}

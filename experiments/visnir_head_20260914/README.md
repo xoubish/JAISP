@@ -1,5 +1,7 @@
 # VIS + NISP detection-head experiment
 
+See [RESULTS.md](RESULTS.md) for the measured comparison and validation status.
+
 The production detection head was supervised with VIS-derived SEP centroids.
 An unlabelled NIR-only source therefore contributes negative heatmap loss even
 though the frozen representation includes all ten bands. This experiment tests

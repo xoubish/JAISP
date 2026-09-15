@@ -1,0 +1,16 @@
+{
+  "training_complete": true,
+  "training_epochs": 4,
+  "matched_control": true,
+  "encoder_frozen": true,
+  "held_out_tiles": {
+    "ECDFS_patch25": 108,
+    "EDF-S": 72
+  },
+  "catalogue_reference_counts_identical_across_heads": true,
+  "baseline_reproduced_exactly": true,
+  "injection_tiles": 27,
+  "injected_per_mode_per_magnitude": 405,
+  "all_faint_control_recoveries_zero": true,
+  "production_checkpoint_sha256": "dea388761bc56f5c3ad7387efd30a928da48e8ad7d51d45985ac64d1c6835d73"
+}

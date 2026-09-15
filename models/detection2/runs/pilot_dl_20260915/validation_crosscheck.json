@@ -1,0 +1,23 @@
+{
+  "detection_counts_match_previous_evaluation": true,
+  "counts_by_threshold": {
+    "0.2": {
+      "saved_previous": 392,
+      "new_monitor": 392
+    },
+    "0.3": {
+      "saved_previous": 310,
+      "new_monitor": 310
+    },
+    "0.4": {
+      "saved_previous": 252,
+      "new_monitor": 252
+    },
+    "0.5": {
+      "saved_previous": 205,
+      "new_monitor": 205
+    }
+  },
+  "previous_predictions": "experiments/visnir_head_20260914/evaluation_ECDFS_patch25/ECDFS_patch25/visnir__tile_x00000_y00000_tract5063_patch_25.npz",
+  "note": "One tile, four thresholds; execution check restores BatchNorm buffers before validation."
+}

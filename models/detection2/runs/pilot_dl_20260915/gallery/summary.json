@@ -1,0 +1,9 @@
+{
+  "n_candidates": 24,
+  "groups": {
+    "unlabelled_ge_03": 8,
+    "unlabelled_015_03": 8,
+    "seed_matched_control": 8
+  },
+  "interpretation": "Illustrative teacher proposals; scores are not calibrated probabilities; unlabelled refers to seed labels, not MER matching or source truth."
+}

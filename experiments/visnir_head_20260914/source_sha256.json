@@ -3,9 +3,10 @@
   "models/detection/visnir_train_experiment.py": "2daafa295daea4b11a5783586dab10f9368ba18629ddac296e4aa88f818bc831",
   "models/detection/visnir_labels_experiment.py": "f473fa7f4ea85bd07f73763d7d80a456e0a41c7745b46418e526552c3bce3ecb",
   "models/detection/visnir_eval_experiment.py": "94d36c6c7a2206c672fa6ee21c431a51ac5bee7169e300e6f744c0eca84c1acb",
+  "experiments/visnir_head_20260914/summarize.py": "2d5ed25f9f3fc05dfcfca1d915961bbf079f3dfc473677e5bf9cb8574b7e1bcb",
   "experiments/visnir_head_20260914/run_after_training.py": "5781a7a18f950e6be6234c14fcd1932b9ac6b2c767019de23c6c29e6bc07a337",
-  "experiments/visnir_head_20260914/summarize.py": "9fd9f6721e88ec5b0bb17f77c46bda8525cc1e82165e2228ae87c902fd1bc8d3",
-  "checkpoints/q1_detection_v11/centernet_vis_sep.pt": "dea388761bc56f5c3ad7387efd30a928da48e8ad7d51d45985ac64d1c6835d73",
   "experiments/visnir_head_20260914/training_fit_check.py": "9a9224296d216d538020929969af439367fa4ef0bf39183226c916bfc426b128",
-  "experiments/visnir_head_20260914/check_nir_coverage.py": "4ed1d82335ac23fd46526eb4f7f0529ba3a462e8f05ff39f8aa381eb0279df2c"
+  "experiments/visnir_head_20260914/check_nir_coverage.py": "4ed1d82335ac23fd46526eb4f7f0529ba3a462e8f05ff39f8aa381eb0279df2c",
+  "experiments/visnir_head_20260914/audit_label_thresholds.py": "dce6b2de8a9f01d6d7dee972643a36cdcbd55bc0b54fb0939cb80b8363daa99b",
+  "checkpoints/q1_detection_v11/centernet_vis_sep.pt": "dea388761bc56f5c3ad7387efd30a928da48e8ad7d51d45985ac64d1c6835d73"
 }

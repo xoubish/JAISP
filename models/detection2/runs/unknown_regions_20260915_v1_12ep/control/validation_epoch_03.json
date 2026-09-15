@@ -1,0 +1,109 @@
+{
+  "metrics": {
+    "val/t0.20/vis_bright_completeness": 0.9716981132075472,
+    "val/t0.20/vis_all_completeness": 0.9689530685920578,
+    "val/t0.20/nir_only_completeness": 0.8644859813084113,
+    "val/t0.20/full_mer_completeness": 0.93984375,
+    "val/t0.20/mer_match_fraction": 0.8484709128535296,
+    "val/t0.20/n_detections": 4349,
+    "val/t0.30/vis_bright_completeness": 0.9594339622641509,
+    "val/t0.30/vis_all_completeness": 0.9418772563176895,
+    "val/t0.30/nir_only_completeness": 0.7588785046728972,
+    "val/t0.30/full_mer_completeness": 0.8908854166666667,
+    "val/t0.30/mer_match_fraction": 0.9189839572192513,
+    "val/t0.30/n_detections": 3740,
+    "val/t0.40/vis_bright_completeness": 0.909433962264151,
+    "val/t0.40/vis_all_completeness": 0.8938628158844766,
+    "val/t0.40/nir_only_completeness": 0.6280373831775701,
+    "val/t0.40/full_mer_completeness": 0.8197916666666667,
+    "val/t0.40/mer_match_fraction": 0.9608083282302511,
+    "val/t0.40/n_detections": 3266,
+    "val/t0.50/vis_bright_completeness": 0.8122641509433962,
+    "val/t0.50/vis_all_completeness": 0.8093862815884476,
+    "val/t0.50/nir_only_completeness": 0.4691588785046729,
+    "val/t0.50/full_mer_completeness": 0.7145833333333333,
+    "val/t0.50/mer_match_fraction": 0.9774758670003575,
+    "val/t0.50/n_detections": 2797
+  },
+  "counts": {
+    "0.2": {
+      "recovered": {
+        "vis_bright": 1030,
+        "vis_all": 2684,
+        "nir_only": 925,
+        "full_mer": 3609
+      },
+      "total": {
+        "vis_bright": 1060,
+        "vis_all": 2770,
+        "nir_only": 1070,
+        "full_mer": 3840
+      },
+      "n_det": 4349,
+      "n_matched": 3690
+    },
+    "0.3": {
+      "recovered": {
+        "vis_bright": 1017,
+        "vis_all": 2609,
+        "nir_only": 812,
+        "full_mer": 3421
+      },
+      "total": {
+        "vis_bright": 1060,
+        "vis_all": 2770,
+        "nir_only": 1070,
+        "full_mer": 3840
+      },
+      "n_det": 3740,
+      "n_matched": 3437
+    },
+    "0.4": {
+      "recovered": {
+        "vis_bright": 964,
+        "vis_all": 2476,
+        "nir_only": 672,
+        "full_mer": 3148
+      },
+      "total": {
+        "vis_bright": 1060,
+        "vis_all": 2770,
+        "nir_only": 1070,
+        "full_mer": 3840
+      },
+      "n_det": 3266,
+      "n_matched": 3138
+    },
+    "0.5": {
+      "recovered": {
+        "vis_bright": 861,
+        "vis_all": 2242,
+        "nir_only": 502,
+        "full_mer": 2744
+      },
+      "total": {
+        "vis_bright": 1060,
+        "vis_all": 2770,
+        "nir_only": 1070,
+        "full_mer": 3840
+      },
+      "n_det": 2797,
+      "n_matched": 2734
+    }
+  },
+  "tiles_scored": [
+    "tile_x00000_y00000_tract5063_patch_25",
+    "tile_x00000_y02304_tract5063_patch_25",
+    "tile_x00256_y01792_tract5063_patch_25",
+    "tile_x00512_y01280_tract5063_patch_25",
+    "tile_x00768_y00512_tract5063_patch_25",
+    "tile_x01024_y00000_tract5063_patch_25",
+    "tile_x01024_y02560_tract5063_patch_25",
+    "tile_x01280_y02048_tract5063_patch_25",
+    "tile_x01536_y01280_tract5063_patch_25",
+    "tile_x01792_y00768_tract5063_patch_25",
+    "tile_x02048_y00256_tract5063_patch_25",
+    "tile_x02048_y02816_tract5063_patch_25"
+  ],
+  "definition": "tile-pooled nearest matches <0.5 arcsec; VIS bright <24.5; NIR/full have no magnitude cut; match fraction uses full MER including flagged; development monitoring, not independent truth or final test"
+}

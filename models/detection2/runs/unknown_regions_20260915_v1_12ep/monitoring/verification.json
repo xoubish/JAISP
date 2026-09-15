@@ -1,0 +1,35 @@
+{
+  "checked_utc": "2026-09-15T17:06:18.936781+00:00",
+  "report_url": "https://wandb.ai/AI-Astro/JAISP-Detection-Q1/reports/Detection2-detection-progress--VmlldzoxNzkzOTM5NQ==",
+  "quality_panels": 4,
+  "tradeoff_panels": 2,
+  "percentage_expressions_verified": true,
+  "runs": {
+    "mfviwjw1": {
+      "state": "running",
+      "epoch": 5,
+      "epochs_config": 12
+    },
+    "rj1onedv": {
+      "state": "running",
+      "epoch": 5,
+      "epochs_config": 12
+    },
+    "wlymkj1t": {
+      "state": "running",
+      "epoch": 4,
+      "epochs_config": 12
+    }
+  },
+  "monitor_latest_shared_epoch": 4,
+  "tables": {
+    "full_mer": {
+      "rows": 12,
+      "downloaded_values_match_local_counts": true
+    },
+    "nir_only": {
+      "rows": 12,
+      "downloaded_values_match_local_counts": true
+    }
+  }
+}

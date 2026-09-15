@@ -1,0 +1,18 @@
+{
+  "blank_position_control": {
+    "n": 16,
+    "median_delta_weighted_rss": 1.151614048439658
+  },
+  "seed_matched_control": {
+    "n": 16,
+    "median_delta_weighted_rss": 145.7426621350172
+  },
+  "unlabelled_score_015_03": {
+    "n": 14,
+    "median_delta_weighted_rss": 37.70308079282673
+  },
+  "unlabelled_score_ge_03": {
+    "n": 15,
+    "median_delta_weighted_rss": 35.82424515244428
+  }
+}
