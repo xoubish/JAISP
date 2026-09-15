@@ -1,0 +1,11 @@
+{
+  "checkpoint": [
+    "vis_control=/home/shemmati/Work/Projects/JAISP/experiments/visnir_head_20260914/vis_control/final.pt",
+    "visnir=/home/shemmati/Work/Projects/JAISP/experiments/visnir_head_20260914/visnir/final.pt"
+  ],
+  "out": "/home/shemmati/Work/Projects/JAISP/experiments/visnir_head_20260914/evaluation_ECDFS_patch25",
+  "device": "cuda:0",
+  "field": "ECDFS_patch25",
+  "limit": 0,
+  "encoder": "/home/shemmati/Work/Projects/JAISP/models/checkpoints/jaisp_v11_q1_soft/checkpoint_best.pt"
+}

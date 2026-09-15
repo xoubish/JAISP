@@ -1,0 +1,14 @@
+{
+  "ECDFS_patch25": {
+    "nir_only_references": 9183,
+    "valid_all_three": 9141,
+    "valid_at_least_one": 9183,
+    "valid_all_percent": 99.54263312642927
+  },
+  "EDF-S": {
+    "nir_only_references": 5125,
+    "valid_all_three": 5076,
+    "valid_at_least_one": 5125,
+    "valid_all_percent": 99.0439024390244
+  }
+}

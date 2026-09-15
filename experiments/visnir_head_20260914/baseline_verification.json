@@ -1,0 +1,6 @@
+{
+  "ECDFS_patch25": "all five group counts identical to saved production exports",
+  "EDF-S": "all four clean group counts identical to saved production exports",
+  "smoke_detection_coordinates": "all coordinates exactly equal on first four patch-25 tiles",
+  "threshold": 0.3
+}

@@ -38,7 +38,7 @@ FIELDS = {
         gaia='data/gaia_edfs_cache.npz', glob='tile_*_euclid.npz'),
 }
 ENCODER = ROOT/'models/checkpoints/jaisp_v11_q1_soft/checkpoint_best.pt'
-CONFS = (0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.50)
+CONFS = (0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.50, 0.60, 0.70, 0.80, 0.90)
 
 
 @torch.no_grad()

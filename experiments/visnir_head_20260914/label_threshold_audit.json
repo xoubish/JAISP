@@ -1,0 +1,27 @@
+{
+  "scope": "four training tiles only; threshold 4 was tested after seeing the primary head purity trade-off; no new head was trained",
+  "tiles": [
+    "tile_x00000_y00000_tract5063_patch_14",
+    "tile_x00768_y00256_tract5063_patch_5",
+    "tile_x01280_y02816_tract5063_patch_5",
+    "tile_x02048_y02304_tract5063_patch_5"
+  ],
+  "results": {
+    "threshold3": {
+      "added": 527,
+      "added_mer_matches": 359,
+      "nir_recovered": 264,
+      "nir_total": 342,
+      "added_label_mer_match_percent": 68.1214421252372,
+      "nir_reference_label_coverage_percent": 77.19298245614036
+    },
+    "threshold4": {
+      "added": 294,
+      "added_mer_matches": 242,
+      "nir_recovered": 177,
+      "nir_total": 342,
+      "added_label_mer_match_percent": 82.31292517006803,
+      "nir_reference_label_coverage_percent": 51.75438596491228
+    }
+  }
+}

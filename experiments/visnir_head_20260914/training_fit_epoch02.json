@@ -1,0 +1,35 @@
+{
+  "scope": "four training tiles; diagnostic only, not held-out performance",
+  "counts": {
+    "baseline": {
+      "old_vis": [
+        747,
+        1001
+      ],
+      "added_nisp": [
+        123,
+        527
+      ]
+    },
+    "vis_control": {
+      "old_vis": [
+        720,
+        1001
+      ],
+      "added_nisp": [
+        112,
+        527
+      ]
+    },
+    "visnir": {
+      "old_vis": [
+        757,
+        1001
+      ],
+      "added_nisp": [
+        300,
+        527
+      ]
+    }
+  }
+}

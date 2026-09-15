@@ -28,6 +28,17 @@ whether adding NISP image detections to the supervision improves NIR recovery.
   masks, four-pixel catalogue margin, and EDF-S purity footprint.
 - Report clean VIS <24.5 completeness, all clean VIS completeness, NIR-only
   completeness, full clean MER completeness, and full-MER match purity.
+  Retain a diagnostic score-threshold curve (0.15 through 0.90) to inspect
+  recovery versus purity; this does not change the primary 0.30 comparison.
+- For an initial paired injection check, use every fourth sorted patch-25 tile
+  (27 tiles), 15 injections per magnitude, modes all/VIS/NISP, and identical
+  positions/stamps for all heads. Use the existing tapered isolated-star library
+  with 60-pixel radius. Place each magnitude in a separate pass, avoiding full
+  MER, the union of all heads' existing detections, and invalid/masked centers.
+  Magnitudes: 23.5, 24.5, 25, 25.5, 26, 26.5, 27, 27.5, and faint control 35.
+  The original injection recovery radius is 0.3 arcsec. This pilot has a different
+  placement/sample protocol from the published full injection analysis and must
+  not silently replace the paper's depth measurements.
 
 ## Interpretation
 
@@ -42,6 +53,16 @@ The manuscript, paper figures and production checkpoint are unchanged.
 Training histories, per-run configuration, checkpoints and evaluation detections
 are saved under this directory. Baseline measurements preceding this experiment
 are in `baseline_full_mer.json` and `baseline_nir_diagnosis.json`.
+
+The baseline evaluator reproduces all clean-group completeness counts exactly
+on both fields (`baseline_verification.json`). A variance-coverage audit finds
+that every scored NIR-only reference has valid data in at least one NISP band;
+99.54% on patch 25 and 99.04% on EDF-S have valid data in all three. Missing NISP
+coverage therefore affects only a small fraction of this reference sample.
+
+`training_label_examples.png` illustrates four clean MER NIR-only objects newly
+covered by the image-derived labels on training tiles. These examples were
+selected for illustration and do not estimate the overall label purity.
 
 ## Commands
 

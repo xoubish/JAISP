@@ -1,0 +1,28 @@
+{
+  "checkpoint": [
+    "baseline=/home/shemmati/Work/Projects/JAISP/checkpoints/q1_detection_v11/centernet_vis_sep.pt",
+    "vis_control=/home/shemmati/Work/Projects/JAISP/experiments/visnir_head_20260914/vis_control/final.pt",
+    "visnir=/home/shemmati/Work/Projects/JAISP/experiments/visnir_head_20260914/visnir/final.pt"
+  ],
+  "out": "/home/shemmati/Work/Projects/JAISP/experiments/visnir_head_20260914/injections_00_14",
+  "device": "cuda:0",
+  "start_index": 0,
+  "stop_index": 14,
+  "tile_stride": 4,
+  "mags": "23.5,24.5,25,25.5,26,26.5,27,27.5,35",
+  "modes": "all,vis,nisp",
+  "n_per_mag": 15,
+  "checkpoint_sha256": {
+    "baseline": "dea388761bc56f5c3ad7387efd30a928da48e8ad7d51d45985ac64d1c6835d73",
+    "vis_control": "84f3c826d48d977bf0a916b3a77dc05bd69383f1542c7b7d329948f56d664a4d",
+    "visnir": "9bb5d695169013c8a08df1f10b500f8a1c30a81ca22d766b2a2d94c91ba3a78a"
+  },
+  "encoder": "/home/shemmati/Work/Projects/JAISP/models/checkpoints/jaisp_v11_q1_soft/checkpoint_best.pt",
+  "library": "checkpoints/q1_detection_v11/donor_library_r60.npz",
+  "confidence": 0.3,
+  "match_px": 3.0,
+  "new_detection_px": 4.0,
+  "pre_floor": 0.02,
+  "magnitude_definition": "donor VIS-equivalent; NOT physical NISP magnitude",
+  "placement": "shared; excludes full MER, union of pre-detections, masked/invalid centers"
+}

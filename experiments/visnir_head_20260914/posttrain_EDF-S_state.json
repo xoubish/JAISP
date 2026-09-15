@@ -1,0 +1,5 @@
+{
+  "stage": "evaluating_paired_injections",
+  "field": "EDF-S",
+  "device": "cuda:1"
+}

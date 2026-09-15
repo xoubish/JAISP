@@ -1,0 +1,512 @@
+{
+  "baseline": {
+    "all": {
+      "23.5": {
+        "recovered": 11,
+        "injected": 15,
+        "artifacts": 0,
+        "threshold_flips": 2
+      },
+      "24.5": {
+        "recovered": 15,
+        "injected": 15,
+        "artifacts": 0,
+        "threshold_flips": 1
+      },
+      "25.0": {
+        "recovered": 14,
+        "injected": 15,
+        "artifacts": 0,
+        "threshold_flips": 0
+      },
+      "25.5": {
+        "recovered": 14,
+        "injected": 15,
+        "artifacts": 0,
+        "threshold_flips": 0
+      },
+      "26.0": {
+        "recovered": 15,
+        "injected": 15,
+        "artifacts": 0,
+        "threshold_flips": 1
+      },
+      "26.5": {
+        "recovered": 11,
+        "injected": 15,
+        "artifacts": 0,
+        "threshold_flips": 0
+      },
+      "27.0": {
+        "recovered": 2,
+        "injected": 15,
+        "artifacts": 0,
+        "threshold_flips": 1
+      },
+      "27.5": {
+        "recovered": 0,
+        "injected": 15,
+        "artifacts": 0,
+        "threshold_flips": 2
+      },
+      "35.0": {
+        "recovered": 0,
+        "injected": 15,
+        "artifacts": 0,
+        "threshold_flips": 2
+      }
+    },
+    "vis": {
+      "23.5": {
+        "recovered": 15,
+        "injected": 15,
+        "artifacts": 0,
+        "threshold_flips": 2
+      },
+      "24.5": {
+        "recovered": 15,
+        "injected": 15,
+        "artifacts": 0,
+        "threshold_flips": 0
+      },
+      "25.0": {
+        "recovered": 14,
+        "injected": 15,
+        "artifacts": 0,
+        "threshold_flips": 0
+      },
+      "25.5": {
+        "recovered": 14,
+        "injected": 15,
+        "artifacts": 0,
+        "threshold_flips": 0
+      },
+      "26.0": {
+        "recovered": 13,
+        "injected": 15,
+        "artifacts": 0,
+        "threshold_flips": 0
+      },
+      "26.5": {
+        "recovered": 9,
+        "injected": 15,
+        "artifacts": 0,
+        "threshold_flips": 0
+      },
+      "27.0": {
+        "recovered": 2,
+        "injected": 15,
+        "artifacts": 0,
+        "threshold_flips": 0
+      },
+      "27.5": {
+        "recovered": 0,
+        "injected": 15,
+        "artifacts": 0,
+        "threshold_flips": 1
+      },
+      "35.0": {
+        "recovered": 0,
+        "injected": 15,
+        "artifacts": 0,
+        "threshold_flips": 0
+      }
+    },
+    "nisp": {
+      "23.5": {
+        "recovered": 2,
+        "injected": 15,
+        "artifacts": 0,
+        "threshold_flips": 3
+      },
+      "24.5": {
+        "recovered": 2,
+        "injected": 15,
+        "artifacts": 0,
+        "threshold_flips": 1
+      },
+      "25.0": {
+        "recovered": 1,
+        "injected": 15,
+        "artifacts": 0,
+        "threshold_flips": 0
+      },
+      "25.5": {
+        "recovered": 0,
+        "injected": 15,
+        "artifacts": 0,
+        "threshold_flips": 0
+      },
+      "26.0": {
+        "recovered": 0,
+        "injected": 15,
+        "artifacts": 0,
+        "threshold_flips": 0
+      },
+      "26.5": {
+        "recovered": 0,
+        "injected": 15,
+        "artifacts": 0,
+        "threshold_flips": 0
+      },
+      "27.0": {
+        "recovered": 0,
+        "injected": 15,
+        "artifacts": 0,
+        "threshold_flips": 0
+      },
+      "27.5": {
+        "recovered": 0,
+        "injected": 15,
+        "artifacts": 0,
+        "threshold_flips": 0
+      },
+      "35.0": {
+        "recovered": 0,
+        "injected": 15,
+        "artifacts": 0,
+        "threshold_flips": 1
+      }
+    }
+  },
+  "vis_control": {
+    "all": {
+      "23.5": {
+        "recovered": 11,
+        "injected": 15,
+        "artifacts": 0,
+        "threshold_flips": 2
+      },
+      "24.5": {
+        "recovered": 15,
+        "injected": 15,
+        "artifacts": 0,
+        "threshold_flips": 1
+      },
+      "25.0": {
+        "recovered": 14,
+        "injected": 15,
+        "artifacts": 0,
+        "threshold_flips": 0
+      },
+      "25.5": {
+        "recovered": 14,
+        "injected": 15,
+        "artifacts": 0,
+        "threshold_flips": 0
+      },
+      "26.0": {
+        "recovered": 14,
+        "injected": 15,
+        "artifacts": 0,
+        "threshold_flips": 1
+      },
+      "26.5": {
+        "recovered": 8,
+        "injected": 15,
+        "artifacts": 0,
+        "threshold_flips": 0
+      },
+      "27.0": {
+        "recovered": 3,
+        "injected": 15,
+        "artifacts": 0,
+        "threshold_flips": 1
+      },
+      "27.5": {
+        "recovered": 0,
+        "injected": 15,
+        "artifacts": 0,
+        "threshold_flips": 0
+      },
+      "35.0": {
+        "recovered": 0,
+        "injected": 15,
+        "artifacts": 0,
+        "threshold_flips": 0
+      }
+    },
+    "vis": {
+      "23.5": {
+        "recovered": 15,
+        "injected": 15,
+        "artifacts": 0,
+        "threshold_flips": 1
+      },
+      "24.5": {
+        "recovered": 15,
+        "injected": 15,
+        "artifacts": 0,
+        "threshold_flips": 1
+      },
+      "25.0": {
+        "recovered": 14,
+        "injected": 15,
+        "artifacts": 0,
+        "threshold_flips": 2
+      },
+      "25.5": {
+        "recovered": 14,
+        "injected": 15,
+        "artifacts": 0,
+        "threshold_flips": 0
+      },
+      "26.0": {
+        "recovered": 13,
+        "injected": 15,
+        "artifacts": 0,
+        "threshold_flips": 0
+      },
+      "26.5": {
+        "recovered": 8,
+        "injected": 15,
+        "artifacts": 0,
+        "threshold_flips": 0
+      },
+      "27.0": {
+        "recovered": 2,
+        "injected": 15,
+        "artifacts": 0,
+        "threshold_flips": 0
+      },
+      "27.5": {
+        "recovered": 0,
+        "injected": 15,
+        "artifacts": 0,
+        "threshold_flips": 0
+      },
+      "35.0": {
+        "recovered": 0,
+        "injected": 15,
+        "artifacts": 0,
+        "threshold_flips": 0
+      }
+    },
+    "nisp": {
+      "23.5": {
+        "recovered": 2,
+        "injected": 15,
+        "artifacts": 0,
+        "threshold_flips": 1
+      },
+      "24.5": {
+        "recovered": 1,
+        "injected": 15,
+        "artifacts": 0,
+        "threshold_flips": 0
+      },
+      "25.0": {
+        "recovered": 1,
+        "injected": 15,
+        "artifacts": 0,
+        "threshold_flips": 0
+      },
+      "25.5": {
+        "recovered": 0,
+        "injected": 15,
+        "artifacts": 0,
+        "threshold_flips": 0
+      },
+      "26.0": {
+        "recovered": 0,
+        "injected": 15,
+        "artifacts": 0,
+        "threshold_flips": 0
+      },
+      "26.5": {
+        "recovered": 0,
+        "injected": 15,
+        "artifacts": 0,
+        "threshold_flips": 0
+      },
+      "27.0": {
+        "recovered": 0,
+        "injected": 15,
+        "artifacts": 0,
+        "threshold_flips": 0
+      },
+      "27.5": {
+        "recovered": 0,
+        "injected": 15,
+        "artifacts": 0,
+        "threshold_flips": 0
+      },
+      "35.0": {
+        "recovered": 0,
+        "injected": 15,
+        "artifacts": 0,
+        "threshold_flips": 0
+      }
+    }
+  },
+  "visnir": {
+    "all": {
+      "23.5": {
+        "recovered": 15,
+        "injected": 15,
+        "artifacts": 0,
+        "threshold_flips": 4
+      },
+      "24.5": {
+        "recovered": 15,
+        "injected": 15,
+        "artifacts": 0,
+        "threshold_flips": 1
+      },
+      "25.0": {
+        "recovered": 15,
+        "injected": 15,
+        "artifacts": 1,
+        "threshold_flips": 1
+      },
+      "25.5": {
+        "recovered": 14,
+        "injected": 15,
+        "artifacts": 0,
+        "threshold_flips": 0
+      },
+      "26.0": {
+        "recovered": 14,
+        "injected": 15,
+        "artifacts": 0,
+        "threshold_flips": 0
+      },
+      "26.5": {
+        "recovered": 12,
+        "injected": 15,
+        "artifacts": 0,
+        "threshold_flips": 1
+      },
+      "27.0": {
+        "recovered": 9,
+        "injected": 15,
+        "artifacts": 0,
+        "threshold_flips": 1
+      },
+      "27.5": {
+        "recovered": 0,
+        "injected": 15,
+        "artifacts": 0,
+        "threshold_flips": 0
+      },
+      "35.0": {
+        "recovered": 0,
+        "injected": 15,
+        "artifacts": 0,
+        "threshold_flips": 0
+      }
+    },
+    "vis": {
+      "23.5": {
+        "recovered": 15,
+        "injected": 15,
+        "artifacts": 0,
+        "threshold_flips": 2
+      },
+      "24.5": {
+        "recovered": 15,
+        "injected": 15,
+        "artifacts": 0,
+        "threshold_flips": 0
+      },
+      "25.0": {
+        "recovered": 14,
+        "injected": 15,
+        "artifacts": 0,
+        "threshold_flips": 0
+      },
+      "25.5": {
+        "recovered": 14,
+        "injected": 15,
+        "artifacts": 0,
+        "threshold_flips": 1
+      },
+      "26.0": {
+        "recovered": 13,
+        "injected": 15,
+        "artifacts": 0,
+        "threshold_flips": 0
+      },
+      "26.5": {
+        "recovered": 8,
+        "injected": 15,
+        "artifacts": 0,
+        "threshold_flips": 1
+      },
+      "27.0": {
+        "recovered": 1,
+        "injected": 15,
+        "artifacts": 0,
+        "threshold_flips": 0
+      },
+      "27.5": {
+        "recovered": 0,
+        "injected": 15,
+        "artifacts": 0,
+        "threshold_flips": 0
+      },
+      "35.0": {
+        "recovered": 0,
+        "injected": 15,
+        "artifacts": 0,
+        "threshold_flips": 0
+      }
+    },
+    "nisp": {
+      "23.5": {
+        "recovered": 14,
+        "injected": 15,
+        "artifacts": 0,
+        "threshold_flips": 4
+      },
+      "24.5": {
+        "recovered": 15,
+        "injected": 15,
+        "artifacts": 0,
+        "threshold_flips": 1
+      },
+      "25.0": {
+        "recovered": 11,
+        "injected": 15,
+        "artifacts": 1,
+        "threshold_flips": 0
+      },
+      "25.5": {
+        "recovered": 12,
+        "injected": 15,
+        "artifacts": 0,
+        "threshold_flips": 0
+      },
+      "26.0": {
+        "recovered": 9,
+        "injected": 15,
+        "artifacts": 0,
+        "threshold_flips": 0
+      },
+      "26.5": {
+        "recovered": 8,
+        "injected": 15,
+        "artifacts": 0,
+        "threshold_flips": 0
+      },
+      "27.0": {
+        "recovered": 6,
+        "injected": 15,
+        "artifacts": 0,
+        "threshold_flips": 1
+      },
+      "27.5": {
+        "recovered": 0,
+        "injected": 15,
+        "artifacts": 0,
+        "threshold_flips": 0
+      },
+      "35.0": {
+        "recovered": 0,
+        "injected": 15,
+        "artifacts": 0,
+        "threshold_flips": 0
+      }
+    }
+  }
+}

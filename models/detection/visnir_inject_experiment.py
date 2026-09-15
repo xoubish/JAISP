@@ -144,6 +144,8 @@ def main():
     p.add_argument('--device', default='cuda:0')
     p.add_argument('--start-index', type=int, default=0)
     p.add_argument('--stop-index', type=int, default=108)
+    p.add_argument('--tile-stride', type=int, default=1,
+                   help='Take every Nth sorted tile before applying start/stop indices')
     p.add_argument('--mags', default='23.5,24.5,25,25.5,26,26.5,27,27.5,35')
     p.add_argument('--modes', default='all,vis,nisp')
     p.add_argument('--n-per-mag', type=int, default=15)
@@ -164,6 +166,9 @@ def main():
     catalog = fits.getdata(ROOT/'data/edf_s_ood/catalogs_compact/mer_FINAL_q1_ECDFS_footprint.fits')
     gaia = load_gaia_cache(str(ROOT/'data/gaia_ecdfs_astrometry_cache.npz'))
     paths = sorted((ROOT/'data/euclid_tiles_all_q1').glob('*_patch_25_euclid.npz'))
+    if args.tile_stride < 1:
+        raise ValueError('--tile-stride must be positive')
+    paths = paths[::args.tile_stride]
     paths = paths[args.start_index:args.stop_index]
     mags = tuple(float(x) for x in args.mags.split(','))
     modes = tuple(args.modes.split(','))
