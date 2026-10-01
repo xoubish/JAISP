@@ -87,6 +87,8 @@ are ignored by git. The configurations are `configs/q1_cpu_pilot.json` (V2) and
 configuration and output directory to reproduce the comparison. The control cache
 can be regenerated independently or copied from the V2 run because selection is identical.
 
+For the before/after residual plots, open [nb_photometry_before_after.ipynb](nb_photometry_before_after.ipynb). It overlays both models with running medians and central 68% bands, excludes magnitudes brighter than 20, and exports magnitude and fractional-flux views to PNG/PDF. The expanded evaluation contains 2,712 sources from all available tiles within the original guarded test region; neither model was retrained. Regenerate it with `python -m simple_regressor.expand_holdout --before-dir runs/q1_v1_control --after-dir runs/q1_v2_pilot --output runs/q1_expanded_holdout`.
+
 ## What's in the pack
 
 | path | what |
@@ -162,3 +164,5 @@ These results are from ECDFS, tract 5063, 240 tiles, with the MER Q1 catalogue. 
   - the input normalisation (one global asinh scale);
   - whether the centre prior and integer centring are enough;
   - capacity vs optimisation.
+
+The plotting notebook also overlays a single 1.5-arcsec aperture (one training-fitted scalar calibration) and the three-aperture initialization, both without CNN inference. It plots the CNN contribution separately. Flux plots retain negative aperture estimates; magnitude plots use the shared positive subset and report exclusions.
