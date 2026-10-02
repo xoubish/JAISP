@@ -8,6 +8,7 @@ import matplotlib.patheffects as path_effects
 from matplotlib.colors import TwoSlopeNorm
 from astropy.visualization import AsinhStretch, ImageNormalize
 from .report import running_quantiles
+from scipy.ndimage import distance_transform_edt
 
 OUT=Path('models/photometry/self_supervised/runs/real_mer')
 EUCLID=('euclid_VIS','euclid_Y','euclid_J','euclid_H')
@@ -141,15 +142,61 @@ def make_plots(d):
     return figures
 
 
-def diagnostic_tile(d, region=None):
-    """Show real image pixels and MER positions for a high-offset VIS region."""
+def _diagnostic_region(d, region=None):
+    """Select clean, isolated MER sources well away from masked VIS pixels."""
+    candidates=[]
+    folders=([OUT/f'region_{region:03d}'] if region is not None else
+             sorted(OUT.glob('region_*')))
+    for folder in folders:
+        if not (folder/'scene.npz').exists() or not (folder/'references.csv').exists():
+            continue
+        refs=pd.read_csv(folder/'references.csv')
+        with np.load(folder/'scene.npz') as z:
+            valid=z['euclid_VIS__mask'].astype(bool)
+            positions=z['euclid_VIS__positions']
+            good_coverage=all(float(z[f'euclid_{band}__mask'].mean())>=.995
+                              for band in ('VIS','Y','J','H'))
+        if not good_coverage:
+            continue
+        xy=np.rint(positions).astype(int)
+        inside=(xy[:,0]>=0)&(xy[:,1]>=0)&(xy[:,0]<valid.shape[1])&(xy[:,1]<valid.shape[0])
+        distance=distance_transform_edt(valid)
+        away=np.zeros(len(refs),dtype=bool)
+        away[inside]=distance[xy[inside,1],xy[inside,0]]>=30  # 0.1 arcsec/pixel
+        ra=refs.ra.to_numpy(float);dec=refs.dec.to_numpy(float)
+        dra=(ra[:,None]-ra[None,:])*3600*np.cos(np.deg2rad(dec[:,None]))
+        ddec=(dec[:,None]-dec[None,:])*3600
+        separation=np.hypot(dra,ddec)
+        bright=refs.flux_vis_sersic.to_numpy(float)>=1.0  # 1 microJy (AB 23.9)
+        nearest_bright=np.where(bright[None,:],separation,np.inf).min(axis=1)
+        safe=(refs.clean_geometry.to_numpy(bool)&~refs.is_star.to_numpy(bool)&away&
+              (refs.neighbor_arcsec.to_numpy(float)>=3)&~bright&(nearest_bright>=7))
+        region_id=int(folder.name[-3:])
+        vis=d[(d.region==region_id)&(d.band=='euclid_VIS')&
+              (d.model=='foundation')].set_index('source').delta_ab
+        offsets=vis.reindex(np.arange(len(refs))).to_numpy()
+        measured=safe&np.isfinite(offsets)
+        candidates.append((int(measured.sum()),
+                           float(np.median(np.abs(offsets[measured]))) if measured.any() else -np.inf,
+                           region_id,refs,safe))
+    if not candidates:
+        raise ValueError('No real-image regions with references and scene products')
     if region is None:
-        vis=d[(d.band=='euclid_VIS')&(d.model=='foundation')&np.isfinite(d.delta_ab)]
-        region=int(vis.groupby('region').delta_ab.apply(lambda x:np.median(np.abs(x))).idxmax())
+        # Prefer a well-populated, uncontaminated region; break ties with the
+        # median absolute offset so the tile remains useful for diagnosing fits.
+        candidates.sort(key=lambda c:(c[0],c[1]),reverse=True)
+    count,_,region_id,refs,safe=max(candidates,key=lambda c:(c[0],c[1])) if region is not None else candidates[0]
+    if count < 1:
+        raise ValueError(f'Region {region_id:03d} has no clean sources away from masked pixels')
+    return region_id,refs,safe,count
+
+
+def diagnostic_tile(d, region=None):
+    """Show a clean real-image region, avoiding bright-star and masked pixels."""
+    region,refs,safe,count=_diagnostic_region(d,region)
     folder=OUT/f'region_{region:03d}'
     with np.load(folder/'scene.npz') as z:
         scene={k:z[k] for k in z.files}
-    refs=pd.read_csv(folder/'references.csv').sort_values('region')
     fig,axes=plt.subplots(2,2,figsize=(13,10))
     cmap=plt.get_cmap('coolwarm');norm=TwoSlopeNorm(vmin=-1.5,vcenter=0,vmax=1.5)
     for band,ax in zip(EUCLID,axes.flat):
@@ -163,7 +210,7 @@ def diagnostic_tile(d, region=None):
                   interpolation='nearest')
         positions=scene[band+'__positions']
         subset=d[(d.region==region)&(d.band==band)&(d.model=='foundation')].set_index('source')
-        for i,ref in refs.iterrows():
+        for i,ref in refs[safe].iterrows():
             x,y=positions[int(ref.name)]
             value=subset.loc[int(ref.name),'delta_ab'] if int(ref.name) in subset.index else np.nan
             marker='o' if bool(ref.clean_geometry) else 's'
@@ -181,14 +228,11 @@ def diagnostic_tile(d, region=None):
     scalar=plt.cm.ScalarMappable(norm=norm,cmap=cmap);scalar.set_array([])
     cbar=fig.colorbar(scalar,cax=fig.add_axes([.925,.20,.018,.53]))
     cbar.set_label('Foundation − MER ΔAB (color clipped at ±1.5 mag)')
-    handles=[plt.Line2D([],[],marker='o',linestyle='none',markerfacecolor='white',markeredgecolor='black',label='Clean geometry'),
-             plt.Line2D([],[],marker='s',linestyle='none',markerfacecolor='white',markeredgecolor='black',label='Edge / flagged / masked'),
+    handles=[plt.Line2D([],[],marker='o',linestyle='none',markerfacecolor='white',markeredgecolor='black',label='Clean target, isolated from masks and bright MER sources'),
              plt.Line2D([],[],marker='x',linestyle='none',color='#555555',label='No positive AB offset')]
-    fig.legend(handles=handles,loc='lower center',ncol=3,bbox_to_anchor=(.48,.015),fontsize=9)
-    count=int((refs.neighbor_arcsec<1).sum());bad=int((~refs.clean_geometry).sum())
+    fig.legend(handles=handles,loc='lower center',ncol=2,bbox_to_anchor=(.48,.015),fontsize=9)
     fig.suptitle(f'Real Euclid cutout region {region:03d}: MER objects overlaid on all four bands\n'
-                 f'Worst median |VIS foundation ΔAB| region; {count} sources have a neighbor within 1″, '
-                 f'{bad}/{len(refs)} fail the clean-geometry screen',y=.99)
+                 f'{count} clean targets; ≥3″ from masks/any source and ≥7″ from bright MER sources',y=.99)
     fig.subplots_adjust(left=.07,right=.90,bottom=.10,top=.82,wspace=.16,hspace=.24)
     fig.savefig(OUT/'real_mer_diagnostic_tile.png',dpi=180)
     return fig
@@ -196,9 +240,7 @@ def diagnostic_tile(d, region=None):
 
 def diagnostic_residuals(d, region=None):
     """Compare observed VIS pixels with both fitted models in noise units."""
-    if region is None:
-        vis=d[(d.band=='euclid_VIS')&(d.model=='foundation')&np.isfinite(d.delta_ab)]
-        region=int(vis.groupby('region').delta_ab.apply(lambda x:np.median(np.abs(x))).idxmax())
+    region,refs,safe,count=_diagnostic_region(d,region)
     folder=OUT/f'region_{region:03d}'
     with np.load(folder/'scene.npz') as z:
         image=z['euclid_VIS__image'].astype(float)
@@ -207,7 +249,6 @@ def diagnostic_residuals(d, region=None):
         positions=z['euclid_VIS__positions']
     with np.load(folder/'tractor_models.npz') as z:tractor=z['euclid_VIS__tractor_upstream'].astype(float)
     with np.load(folder/'mixture_models.npz') as z:foundation=z['euclid_VIS__foundation'].astype(float)
-    refs=pd.read_csv(folder/'references.csv')
     models=[('Observed VIS',None),('Tractor residual',tractor),('Foundation residual',foundation)]
     fig,axes=plt.subplots(1,3,figsize=(15,5.3))
     vals=image[valid];lo,hi=np.percentile(vals,[2,99.7])
@@ -224,7 +265,7 @@ def diagnostic_residuals(d, region=None):
         ax.imshow(clipped,origin='lower',cmap='coolwarm',vmin=-5,vmax=5,interpolation='nearest')
         ax.set_title(f'{label}  (RMS residual / σ = {np.sqrt(np.mean(residual[valid]**2)):.2f})')
     for ax in axes:
-        for i,row in refs.iterrows():
+        for i,row in refs[safe].iterrows():
             x,y=positions[i]
             ax.scatter([x],[y],s=64,marker='o' if bool(row.clean_geometry) else 's',
                        facecolors='none',edgecolors='black',linewidths=.75,zorder=4)
@@ -235,7 +276,8 @@ def diagnostic_residuals(d, region=None):
     cbar=fig.colorbar(plt.cm.ScalarMappable(norm=TwoSlopeNorm(vmin=-5,vcenter=0,vmax=5),cmap='coolwarm'),
                       cax=fig.add_axes([.925,.20,.018,.60]))
     cbar.set_label('(observed − model) / pixel σ, clipped at ±5')
-    fig.suptitle(f'Region {region:03d}: actual VIS data and model residuals; labels match the four-band tile',y=.99)
+    fig.suptitle(f'Region {region:03d}: actual VIS data and model residuals for {count} clean targets; '
+                 'labels match the four-band tile',y=.99)
     fig.subplots_adjust(left=.055,right=.90,bottom=.10,top=.84,wspace=.14)
     fig.savefig(OUT/'real_mer_diagnostic_residuals.png',dpi=180)
     return fig
