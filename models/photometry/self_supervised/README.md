@@ -4,6 +4,89 @@ The current implementation fits **Rubin u/g/r/i/z/y and Euclid VIS/Y/J/H** with 
 
 Open [nb_multiband_flux_recovery.ipynb](nb_multiband_flux_recovery.ipynb) for the executed real-scene comparison and the independent known-flux benchmark. The earlier Gaussian experiment is preserved in [nb_all_band_photometry.ipynb](nb_all_band_photometry.ipynb).
 
+## Flux-path audit and stellar profiles
+
+[nb_flux_path_audit.ipynb](nb_flux_path_audit.ipynb) records the normalization and centering audit. Prepared science pixels match 30 source-array cutouts exactly; native WCS positions agree within 0.000007 pixel. All ten production v11 stems use `asinh50`. Compression is confined to feature extraction, and the final flux fit uses original native-unit science pixels. The compression/inverse round trip, signed flux recovery, masked cores, cropped wings, column preconditioning, source ordering, unit scaling and repeat calls pass their checks. Repeated A→changed-input→A calls return identical features and fluxes on CPU.
+
+**The unmodified mixture is inappropriate for stars.** Its minimum intrinsic Gaussian sigma is 0.025 arcsec, rather than zero. Independently rendered noiseless stellar tests give +3.2% VIS flux error with the calibrated Gaussian PSF and +3.5% with one archive GRID stamp even without a learned prior. At peak pixel S/N 5, the foundation galaxy-profile prior gives about +28%/+31% VIS error. These are deterministic diagnostics with supplied variance, not ensemble faint-end bias estimates or measurements of real stars.
+
+Mixture photometers now accept a supplied boolean `scene["point_sources"]` mask, one flag per source. Flagged stars have zero intrinsic size and use PSF-only profiles in every band; galaxy profiles retain their seven-component dictionary. This removes the stellar bias to below 0.001% in all 14 audit scenes, including blended stars and archive PSFs. It requires independent stellar classifications; there is no automatic classifier, and this restricted test is not an end-to-end performance claim. Existing checkpoints and historical benchmark files are retained.
+
+```python
+# Supply independently established stellar classes in the scene's source order.
+scene["point_sources"] = np.asarray(stellar_flags, dtype=bool)
+measurements = photometer(scene)  # MixturePhotometry or BandPriorPhotometry
+```
+
+Two additional diagnostics need follow-up before a realistic benchmark. The foundation fuses bands by resizing arrays, without WCS registration; central Rubin/VIS offsets from independently rounded scene crops have median 0.081 arcsec and maximum 0.164 arcsec in the prepared scenes. These are feature-alignment offsets, not errors in the native flux-template centers. The separate experimental amortised-scarlet renderer conserves total mass to approximately 0.1% in the tested cases but adds compact-profile smoothing: flux errors range from +0.3% to +5.3% against independently pixel-integrated Gaussians. It integrates intrinsic morphology before convolving a PSF stamp that already includes pixel response. Same-grid point-sampling controls isolate that extra smoothing; using a single sample is not a general repair on rotated/coarser grids. Its renderer and checkpoint convention require a deliberate revision before comparison.
+
+```bash
+OPENBLAS_NUM_THREADS=2 OMP_NUM_THREADS=2 python -m models.photometry.self_supervised.audit_flux_path
+python -m unittest discover -s models/photometry/self_supervised/tests -v
+```
+
+Diagnostics are saved separately in `runs/flux_path_audit`, with per-source measurements, source-pixel identity and compression checks, encoder-alignment offsets, and renderer controls. There is no new claim of beating Tractor or MER. A future realistic test needs independent rendering, clumpy morphology, observed joint SED distributions, local empirical PSFs and PSF mismatch, real backgrounds/correlated noise, blends and detection/centroid errors, with models frozen before testing. MER must be run on the injected images to be a truth-scored simulation competitor; its catalog alone is a real-data reference.
+
+## Expanded band-specific prior experiment
+
+[nb_expanded_multiband_prior.ipynb](nb_expanded_multiband_prior.ipynb) reports a separate experiment in `runs/q1_multiband_expanded`. It prepares 300 training scenes and all 142 available nonoverlapping validation scenes within the original guarded sky partitions. There are 580 independent reliable VIS training profiles, versus 51 in the earlier prior. Whole validation scenes separate regression selection from precision calibration; noise augmentation does not increase the independent-source counts.
+
+The head predicts seven positive profile weights independently for every band. Each band's teacher is a bright, jointly image-fitted profile, with no catalog flux labels. Inputs include 17×17 raw S/N and coverage windows in all ten bands, a 9×9 frozen VIS-stem window, and a 5×5 multiband bottleneck window. Controls use population profiles, VIS pixels, or raw ten-band pixels. The ten-band pixel and foundation heads have the same number of latent regression features. Every control uses the same native-pixel morphology fitter, background treatment and signed final flux solver. The earlier VIS-first foundation prior is also evaluated on the same fresh known-flux blends.
+
+```bash
+OPENBLAS_NUM_THREADS=2 OMP_NUM_THREADS=2 python -m models.photometry.self_supervised.try_multiband_prior prepare
+OPENBLAS_NUM_THREADS=2 OMP_NUM_THREADS=2 python -m models.photometry.self_supervised.try_multiband_prior train
+OPENBLAS_NUM_THREADS=2 OMP_NUM_THREADS=2 python -m models.photometry.self_supervised.try_multiband_prior benchmark
+```
+
+Preparation is resumable. Scene-count arguments are upper limits: overlapping footprints and guarded sky coverage can yield fewer scenes, with actual teacher coverage checked before training. The benchmark uses 256 new blends, including weak VIS and correlated noise, after all priors are frozen. `results.json`, per-source signed fluxes, paired whole-blend bootstrap intervals, and PNG/PDF plots are saved in the experiment directory. This remains a controlled simulation with known positions and approximate Gaussian PSFs, not a measurement of real-survey flux accuracy. u and y have especially small independent teacher samples; profile and PSF uncertainty are not included in conditional flux errors.
+
+The completed fresh benchmark **does not justify replacing the existing foundation head**. On 256 blends (512 sources), equal-band average median absolute fractional flux error is **10.39% for the existing foundation prior, 12.21% for expanded VIS pixels, 12.05% for expanded ten-band pixels, and 11.78% for the expanded foundation head**. The new head is worse than the existing head by **+1.39 percentage points (paired 95% interval +0.93 to +1.95)**. Its improvement over ten-band pixels is **−0.27 points (−0.53 to +0.16)**, so an extra benefit from foundation features is inconclusive. It does improve over the VIS-only control by **−0.42 points (−0.73 to −0.09)**.
+
+The expanded head predicts validation teacher profiles better, but this does not transfer into better simulated flux recovery. This experiment changes both training coverage and the VIS-first coupling, so it does not identify which change causes the regression. The existing `MixturePhotometry` checkpoint remains the recommended baseline; `BandPriorPhotometry` exposes the experimental controls for further study. No benchmark truth was used to select or refit these heads.
+
+```python
+from models.photometry.self_supervised.predict import BandPriorPhotometry
+photometer = BandPriorPhotometry(
+    "models/photometry/self_supervised/runs/q1_multiband_expanded/priors.pt",
+    mode="foundation",  # also population, vis_image, all_images
+)
+measurements = photometer(scene)
+```
+
+## Detection-head catalog comparison on real tiles
+
+[nb_detection_catalog_comparison.ipynb](nb_detection_catalog_comparison.ipynb) measures **the detection head's own source list** on 28 non-overlapping real Q1 tiles (19 in the patch-25 holdout, 9 in the prior's RA test partition; 6558 detections, 5339 photometered) with three methods and compares them with position-matched MER fluxes. Sources come from the production v11 CenterNet export, every position is the frozen anchored-astrometry VIS-canonical centroid projected through each band's WCS, and the pipeline in `detcat/` fetches the archive science/RMS/flag cutouts and GRID PSFs so that our calibrated mixture photometer (foundation and image priors, all ten bands) and the upstream Tractor VIS profile ladder with positions frozen at the same centroids see identical pixels, masks and PSFs. The archive cutouts are verified to be pixel-identical to the local tiles.
+
+On the 4732 MER-matched sources measured by all methods, NMAD scatter against MER is **0.125 / 0.125 mag for foundation / Tractor in VIS** and **0.151 / 0.185 (Y), 0.139 / 0.165 (J), 0.137 / 0.156 (H)**; the NISP differences have tile-bootstrap 95% intervals excluding zero, the VIS difference does not. The foundation prior beats the image-prior control by 0.012 mag in VIS and by 0.004–0.006 mag in J and H, with intervals excluding zero. Both JAISP priors measure systematically more flux than MER (medians −0.07 VIS, −0.03 to −0.04 NISP, growing faint-ward and present for isolated galaxies) while Tractor shows no offset; the free scene background and positive-only profile selection are the suspected causes, and this needs an injection test before it is called a bias. Detection completeness against MER is 0.90 at VIS 24, purity 0.97 to VIS 25. Rubin ugrizy fluxes are in the catalog with no external reference (nanojansky pixel units assumed).
+
+```bash
+python -m models.photometry.self_supervised.detcat.select_tiles
+python -m models.photometry.self_supervised.detcat.sources
+python -m models.photometry.self_supervised.detcat.fetch
+python -m models.photometry.self_supervised.detcat.prepare
+python -m models.photometry.self_supervised.detcat.mer
+OMP_NUM_THREADS=1 python -m models.photometry.self_supervised.detcat.photometer --workers 40
+OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 runs/tractor_env/bin/python -m models.photometry.self_supervised.detcat.tractor_run
+python -m models.photometry.self_supervised.detcat.report
+```
+
+Products are in `runs/detection_catalog`: `catalog_long.csv`, `catalog_wide.csv`, `summary.csv`, `paired_bootstrap.csv`, `detection_statistics.csv`, the figures, and per-region inputs, models and MER matches. The Tractor environment must be run with single-threaded BLAS or it starves the other steps. Offline tests are in `tests/test_detcat.py`.
+
+## Amortised scarlet head (experimental)
+
+[amortised_scarlet.py](amortised_scarlet.py) is a learned scarlet-style photometer on the frozen foundation encoder: positive source morphologies on a 0.1″ tangent-plane grid, explicit per-source PSFs (GRID stamps for Euclid, calibrated Gaussians for Rubin), and the same signed linear flux solve as the mixture photometer. The head reads the fused bottleneck window, the VIS stem window and the raw ten-band pixels at each source and outputs two centred monotone elliptical radial profiles with a per-band mixing weight and a bounded perturbation map; two unrolled steps feed the exact residual gradient back into the head. It trains on 43 real tiles (`runs/amortised_scarlet/training_tiles`, prepared with the `detcat` pipeline) with the mean over bands of log χ²/dof as the only signal and a fixed robust background. Checkpoints, histories and logs are in `runs/amortised_scarlet/{fixedbg,fixedbg_nostep,lr1e-3,v1_freeform}`.
+
+```bash
+JAISP_DETCAT_OUT=models/photometry/self_supervised/runs/amortised_scarlet/training_tiles python -m models.photometry.self_supervised.detcat.select_tiles --training 48 --exclude models/photometry/self_supervised/runs/detection_catalog/tiles.json
+# then detcat.sources / fetch / prepare with the same JAISP_DETCAT_OUT
+python -m models.photometry.self_supervised.amortised_scarlet --epochs 4 --lr 1e-3 --fixed-background --output models/photometry/self_supervised/runs/amortised_scarlet/fixedbg
+python -m models.photometry.self_supervised.injections --run models/photometry/self_supervised/runs/q1_mixture_calibrated --count 128 --seed 20261201 --weak-vis --scarlet <checkpoint> --suffix _scarlet
+python -m models.photometry.self_supervised.detcat.photometer --scarlet <checkpoint> --device cuda:0 --workers 3
+```
+
+Result of the first iteration: on the 128 known-flux blends the fixed-background head reaches **0.138** mean median |fractional error| (mixture 0.108; its epoch-1 checkpoint 0.109), better than the mixture below S/N 20 and worse above S/N 40 and for pairs closer than 0.7″. On the 28 real tiles it is worse than the mixture against MER in every band (NMAD VIS 0.242 vs 0.125, NISP 0.17–0.21 vs 0.14–0.15) and worse than Tractor in NISP; it matches the mixture at the bright end in NISP but under-fits bright galaxies in VIS. The epoch-1 checkpoint removes most of the offset on real tiles (VIS 0.000, NISP −0.03 mag) and lowers the NISP scatter to 0.167–0.189, still above the mixture, with the VIS scatter unchanged at 0.240. Three ablations determined the design: free-form morphologies let blended sources trade light freely (0.280 on injections despite matching the mixture's validation χ²), a free constant background inflates fluxes by about 10 % with any slightly too-broad template, and removing the unrolled refinement steps gives 0.227. Validation χ² improved monotonically while injection accuracy degraded after epoch 1, so χ² alone must not be used to select such a head. The notebook section "Amortised scarlet head" and `tests/test_amortised_scarlet.py` document the renderer conventions (flux conservation on rotated and coarser grids, placement, PSF convolution).
+
 ## Completed fresh-test result
 
 On 128 new controlled blends (256 sources), the equal-band average of median absolute fractional flux error falls from **33.61% with the old Gaussian model to 10.76% with the new foundation-assisted mixture model**, a **68.0% reduction**. The stronger image-only mixture reaches **10.93%**. The foundation-minus-image difference is −0.17 percentage points, with a paired blend-bootstrap 95% interval of **−0.65 to +0.45 points**: the foundation-specific gain remains inconclusive.

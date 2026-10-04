@@ -111,7 +111,14 @@ def main():
     p.add_argument('--count',type=int,default=64)
     p.add_argument('--seed',type=int,default=20261001)
     p.add_argument('--weak-vis',action='store_true',help='Reduce VIS S/N by three in half the scenes, balanced across noise types')
+    p.add_argument('--scarlet',type=str,default='',help='Amortised-scarlet checkpoint to evaluate alongside the mixture priors (model name "scarlet")')
+    p.add_argument('--suffix',type=str,default='',help='Output file suffix, e.g. _scarlet, to keep the original benchmark files untouched')
+    p.add_argument('--mixture-fixed-background',action='store_true',help='Also evaluate the mixture priors with a fixed robust background (models *_fixedbg)')
     args=p.parse_args();torch.set_num_threads(4)
+    scarlet=None
+    if args.scarlet:
+        from .amortised_scarlet import AmortisedScarletPhotometry
+        scarlet=AmortisedScarletPhotometry(args.scarlet)
     checkpoint=torch.load(args.run/'priors.pt',map_location='cpu',weights_only=False)
     meta=checkpoint['metadata'];source=Path(meta['source'])
     old=torch.load(source.parent/'q1_all_bands_constant/head.pt',map_location='cpu',weights_only=False)
@@ -132,6 +139,13 @@ def main():
                 precision=checkpoint.get('population_precision') if mode=='population' else checkpoint['heads'][mode].get('precision')
                 fits[mode]=fit_multiband(scene,prior,banks=banks,strength=meta['prior_strength'],band_strength=meta['band_strength'],prior_precision=precision)
             except (ValueError,RuntimeError) as exc:failures.append(dict(scene=i,model=mode,error=str(exc)))
+            if args.mixture_fixed_background and mode!='population':
+                try:fits[mode+'_fixedbg']=fit_multiband(scene,prior,banks=banks,strength=meta['prior_strength'],band_strength=meta['band_strength'],prior_precision=precision,fixed_background=True)
+                except (ValueError,RuntimeError) as exc:failures.append(dict(scene=i,model=mode+'_fixedbg',error=str(exc)))
+        if scarlet is not None:
+            try:
+                r=scarlet(scene);fits['scarlet']={b:v for b,v in r.items() if not b.startswith('_')}
+            except (ValueError,RuntimeError) as exc:failures.append(dict(scene=i,model='scarlet',error=str(exc)))
         with torch.no_grad():
             old_cov=baseline(torch.zeros(2,1),scene['covariance'])
             old_fit=fit_scene(scene,old_cov)
@@ -146,9 +160,10 @@ def main():
                                      true_snr=truth[band]['snr'][j],**config))
         if i<4:examples.append(dict(scene=scene,truth=truth,config=config,fits=fits))
         print('Injection',i+1,'/',args.count,flush=True)
-    frame=pd.DataFrame(rows);frame.to_csv(args.run/'injections.csv',index=False)
-    torch.save(examples,args.run/'injection_examples.pt')
-    (args.run/'injection_failures.json').write_text(json.dumps(failures,indent=2))
+    sfx=args.suffix
+    frame=pd.DataFrame(rows);frame.to_csv(args.run/f'injections{sfx}.csv',index=False)
+    torch.save(examples,args.run/f'injection_examples{sfx}.pt')
+    (args.run/f'injection_failures{sfx}.json').write_text(json.dumps(failures,indent=2))
     summary=[]
     for (mode,band),group in frame.groupby(['model','band']):
         error=group.fractional_error.to_numpy();med=np.median(error)
@@ -156,8 +171,8 @@ def main():
                             nmad=float(1.4826*np.median(np.abs(error-med))),
                             median_absolute_error=float(np.median(np.abs(error))),
                             p16=float(np.percentile(error,16)),p84=float(np.percentile(error,84))))
-    pd.DataFrame(summary).to_csv(args.run/'injection_summary.csv',index=False)
-    (args.run/'injection_protocol.json').write_text(json.dumps(dict(count=args.count,seed=args.seed,weak_vis_half=args.weak_vis,
+    pd.DataFrame(summary).to_csv(args.run/f'injection_summary{sfx}.csv',index=False)
+    (args.run/f'injection_protocol{sfx}.json').write_text(json.dumps(dict(count=args.count,seed=args.seed,weak_vis_half=args.weak_vis,
       renderer='Independent oversampled exponential core+disk; scipy Gaussian PSF convolution',
       encodings='Fresh native-scene encoder evaluation for every noisy injected scene; same protocol as prior training',
       source_positions='Known, fixed across models',noise='Alternating white and correlated (0.65 native pixel kernel); diagonal supplied variance',

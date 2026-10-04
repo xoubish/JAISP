@@ -11,7 +11,7 @@ import torch.nn.functional as F
 
 
 def windows(feature, positions, size=3):
-    off=torch.arange(-(size//2),size//2+1,dtype=positions.dtype)
+    off=torch.arange(-(size//2),size//2+1,dtype=positions.dtype,device=positions.device)
     yy,xx=torch.meshgrid(off,off,indexing='ij')
     grid=positions[:,None,None]+torch.stack((xx,yy),-1)
     grid=grid/positions.new_tensor([feature.shape[-1]-1,feature.shape[-2]-1])*2-1
@@ -41,7 +41,8 @@ class SceneEncoder:
         if missing:raise ValueError(f'Incomplete encoder checkpoint: {sorted(missing)[:5]}')
 
     @torch.no_grad()
-    def __call__(self, scene):
+    def feature_views(self, scene, bottleneck_window=3, stem_window=3):
+        """Separate spatial views; larger windows need a newly trained prior."""
         images={};rms={}
         for band,d in scene['bands'].items():
             valid=d['mask'] & torch.isfinite(d['image']) & torch.isfinite(d['variance']) & (d['variance']>0)
@@ -55,4 +56,10 @@ class SceneEncoder:
         # Pixel-center mapping matches interpolate(..., align_corners=False).
         ratio=pos.new_tensor([bn.shape[-1]/vis.shape[-1],bn.shape[-2]/vis.shape[-2]])
         bn_pos=(pos+.5)*ratio-.5
-        return torch.cat((windows(bn,bn_pos),windows(stem,pos)),dim=1).numpy()
+        out=dict(bottleneck=windows(bn,bn_pos,bottleneck_window),vis_stem=windows(stem,pos,stem_window))
+        # CPU callers (mixture prior) expect numpy; GPU callers keep tensors on the device.
+        return {k:(v.numpy() if v.device.type=='cpu' else v) for k,v in out.items()}
+
+    def __call__(self, scene):
+        views = self.feature_views(scene)
+        return np.concatenate((views['bottleneck'], views['vis_stem']), axis=1)

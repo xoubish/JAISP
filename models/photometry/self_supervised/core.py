@@ -59,7 +59,7 @@ def templates(positions, covariance_sky, sky_to_pixel, psf_sigma, shape, oversam
 
 
 
-def fit_flux(image, variance, template, mask=None):
+def fit_flux(image, variance, template, mask=None, fit_background=True):
     """Joint signed flux + constant sky WLS, with conditional covariance.
 
     Signed amplitudes avoid positivity bias at low S/N. Singular blends are
@@ -72,7 +72,8 @@ def fit_flux(image, variance, template, mask=None):
     valid = torch.isfinite(y) & torch.isfinite(v) & (v > 0)
     if mask is not None:
         valid = valid & mask.flatten().bool()
-    a = torch.cat((template, torch.ones_like(template[:, :1])), 1)[valid]
+    # Optional fixed background: callers subtract their own robust estimate and drop the constant column.
+    a = (torch.cat((template, torch.ones_like(template[:, :1])), 1) if fit_background else template)[valid]
     if int(valid.sum()) <= a.shape[1]:
         raise ValueError('Not enough valid pixels to fit scene')
     weight = torch.rsqrt(v[valid])
@@ -88,6 +89,10 @@ def fit_flux(image, variance, template, mask=None):
     coeff = torch.linalg.solve(normal, normalized.T @ yw) / scale
     cov = inverse / scale[:, None] / scale[None, :]
     residual = (aw @ coeff - yw)
+    if not fit_background:
+        return dict(flux=coeff, error=torch.sqrt(cov.diagonal().clamp_min(0)), covariance=cov, background=coeff.new_tensor(0.),
+                    loss=residual.square().mean(), chi2=residual.square().sum(), dof=int(valid.sum())-a.shape[1], condition=condition,
+                    model=(template @ coeff).reshape(image.shape))
     return dict(flux=coeff[:-1], error=torch.sqrt(cov.diagonal()[:-1].clamp_min(0)),
                 covariance=cov[:-1, :-1], background=coeff[-1],
                 loss=residual.square().mean(), chi2=residual.square().sum(),

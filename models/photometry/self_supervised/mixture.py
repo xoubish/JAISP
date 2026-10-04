@@ -52,10 +52,20 @@ def ellipse_from_pixels(scene):
 
 
 def dictionary(scene, band, ellipse=None):
-    """[pixels, sources, scales], full-profile unit flux with native PSF/WCS."""
+    """[pixels, sources, scales], full-profile unit flux with native PSF/WCS.
+
+    An optional scene['point_sources'] boolean mask fixes independently
+    classified stars to the PSF. Their seven columns have the same zero-size
+    intrinsic profile; regression weights cannot broaden these sources.
+    """
     d = scene['bands'][band]
     ellipse = ellipse_from_pixels(scene) if ellipse is None else ellipse
     cov = ellipse[:, None] * torch.tensor(SCALES**2, dtype=torch.float32)[None,:,None,None]
+    if 'point_sources' in scene:
+        flags = np.asarray(scene['point_sources'])
+        if flags.shape != (len(ellipse),) or flags.dtype != np.dtype(bool):
+            raise ValueError('point_sources must be a boolean mask matching the source list')
+        cov[torch.as_tensor(flags)] = 0
     positions = d['positions'][:, None].expand(-1, len(SCALES), -1).reshape(-1,2)
     if 'psf_kernels' in d:
         from .pixel_psf import convolved_profile
@@ -116,17 +126,25 @@ def positive_profile_fit(d, basis, prior=None, strength=0., reference_flux=None,
     return mixture,total
 
 
-def signed_measurement(d, basis, mixture):
+def signed_measurement(d, basis, mixture, fixed_background=False):
     profile=np.einsum('pnk,nk->pn',basis,mixture)
     active=profile.sum(0)>1e-5
-    fit=fit_flux(d['image'],d['variance'],torch.tensor(profile[:,active]),d['mask'])
+    background=None
+    if fixed_background:
+        from .amortised_scarlet import robust_background
+        background=robust_background(d)
+    if background is not None:
+        fit=fit_flux(d['image']-background,d['variance'],torch.tensor(profile[:,active]),d['mask'],fit_background=False)
+        fit['background']=background;fit['model']=fit['model']+background
+    else:
+        fit=fit_flux(d['image'],d['variance'],torch.tensor(profile[:,active]),d['mask'])
     n=len(mixture)
     flux=np.full(n,np.nan);error=flux.copy();footprint=np.zeros(n)
     flux[active]=fit['flux'].numpy();error[active]=fit['error'].numpy()
     footprint[active]=profile[:,active].sum(0)
     return dict(flux=flux,error=error,footprint=footprint,
                 reduced_chi2=float(fit['chi2']/fit['dof']),chi2=float(fit['chi2']),dof=fit['dof'],
-                model=fit['model'].numpy(),condition=float(fit['condition']),
+                model=fit['model'].numpy(),condition=float(fit['condition']),background=float(fit['background']),
                 covariance=fit['covariance'].numpy(),source_indices=np.flatnonzero(active))
 
 
@@ -166,7 +184,7 @@ class FeaturePrior:
         return softmax(np.clip(z@self.beta,-8,8),axis=1)
 
 
-def fit_multiband(scene, prior, strength=10., band_strength=100., banks=None, prior_precision=None):
+def fit_multiband(scene, prior, strength=10., band_strength=100., banks=None, prior_precision=None, fixed_background=False):
     """VIS morphology posterior -> band-specific profile refinement -> signed flux.
 
     Both population and foundation controls use this EXACT image fitter.
@@ -179,7 +197,7 @@ def fit_multiband(scene, prior, strength=10., band_strength=100., banks=None, pr
     d=scene['bands'][vis]
     reference=amplitude_scale(d,banks[vis],prior)
     weights,_=positive_profile_fit(d,banks[vis],prior,strength,reference,precision=prior_precision)
-    result={vis:signed_measurement(d,banks[vis],weights)}
+    result={vis:signed_measurement(d,banks[vis],weights,fixed_background)}
     result[vis]['weights']=weights
     for band in BANDS:
         if band==vis:continue
@@ -187,7 +205,7 @@ def fit_multiband(scene, prior, strength=10., band_strength=100., banks=None, pr
         d=scene['bands'][band]
         ref=amplitude_scale(d,banks[band],weights)
         w,_=positive_profile_fit(d,banks[band],weights,band_strength,ref)
-        result[band]=signed_measurement(d,banks[band],w)
+        result[band]=signed_measurement(d,banks[band],w,fixed_background)
         result[band]['weights']=w
     return result
 
