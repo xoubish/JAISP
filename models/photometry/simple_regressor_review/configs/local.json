@@ -1,0 +1,32 @@
+{
+  "tiles_root": "/path/to/tiles_product",
+  "catalog": "/path/to/mer_catalogue.fits",
+  "output_dir": "../runs/nb",
+  "tile_glob": "*_euclid.npz",
+  "img_key": "img_VIS",
+  "var_key": "var_VIS",
+  "wcs_key": "wcs_VIS",
+  "native_pixscale": 0.1,
+  "catalog_hdu": 1,
+  "flux_zeropoint": 23.9,
+  "id_column": "object_id",
+  "ra_column": "ra",
+  "dec_column": "dec",
+  "mag_column": "mag_detection_total",
+  "flux_column": "flux_detection_total",
+  "fluxerr_column": "fluxerr_detection_total",
+  "sel_flux_column": "flux_detection_total",
+  "sel_fluxerr_column": "fluxerr_detection_total",
+  "require_vis_det": true,
+  "require_spurious_zero": true,
+  "det_quality_mask": 0,
+  "split_by": "patch",
+  "val_patches": [
+    "patch_4"
+  ],
+  "test_patches": [
+    "patch_5"
+  ],
+  "stamp": 128,
+  "device": "auto"
+}

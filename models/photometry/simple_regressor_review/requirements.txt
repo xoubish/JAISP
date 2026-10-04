@@ -1,0 +1,4 @@
+numpy
+astropy
+torch>=2.0
+matplotlib
