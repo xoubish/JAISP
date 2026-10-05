@@ -2,3 +2,5 @@
 pandas
 threadpoolctl
 nbformat
+galsim==2.7.1
+sep
