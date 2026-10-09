@@ -138,13 +138,14 @@ def catalog_xy(folder, inputs, wc):
     return np.column_stack(wc.world_to_pixel_values(*sky.T))
 
 
-def make_library(out, source_root, minimum_snr=25.):
+def make_library(out, source_root, minimum_snr=25., regions=None):
+    """Donors from every region except the background regions, or from ``regions`` only."""
     folder_out = out/'donors'; folder_out.mkdir(parents=True, exist_ok=True)
     calibration = json.loads((HERE/'runs/q1_all_bands/psf_calibration.json').read_text())
     report = []; rejected = []; donor_id = 0
     for folder in sorted(source_root.glob('region_*')):
         region = int(folder.name.split('_')[-1])
-        if region in BACKGROUND_REGIONS or not (folder/'tile_inputs.npz').exists(): continue
+        if (region in BACKGROUND_REGIONS if regions is None else region not in regions) or not (folder/'tile_inputs.npz').exists(): continue
         inputs = load_inputs(folder); xy = inputs['euclid_VIS__positions']
         nearest = cKDTree(xy).query(xy, k=2)[0][:, 1]*.1
         matches = pd.read_csv(folder/'mer_match.csv').set_index('source')
@@ -253,10 +254,10 @@ def sky_object_mask(image, valid, scale):
     return valid & ~grown,np.column_stack((objects['x'],objects['y']))
 
 
-def make_backgrounds(out, source_root, per_region=50):
+def make_backgrounds(out, source_root, per_region=50, regions=BACKGROUND_REGIONS, minimum_per_region=20):
     target = out/'backgrounds'; target.mkdir(exist_ok=True)
     rng = np.random.default_rng(SEED+1); rows = []; idx = 0
-    for region in BACKGROUND_REGIONS:
+    for region in regions:
         folder = source_root/f'region_{region:03d}'; inputs = load_inputs(folder)
         wc = wcs(inputs['euclid_VIS__wcs']); xy = catalog_xy(folder, inputs, wc)
         tree = cKDTree(xy); chosen = []; h, w = inputs['euclid_VIS__image'].shape
@@ -305,7 +306,7 @@ def make_backgrounds(out, source_root, per_region=50):
             chosen.append(p); rows.append(dict(background=idx, region=region, ra=sky[0], dec=sky[1])); idx += 1
             if len(chosen) == per_region: break
         print(f'Background {region}: {len(chosen)} patches', flush=True)
-        if len(chosen) < 20: raise RuntimeError(f'Too few usable backgrounds: {region}')
+        if len(chosen) < minimum_per_region: raise RuntimeError(f'Too few usable backgrounds: {region}')
     pd.DataFrame(rows).to_csv(out/'backgrounds.csv', index=False)
     return idx
 

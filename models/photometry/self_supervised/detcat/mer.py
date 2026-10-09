@@ -26,11 +26,36 @@ def query_region(folder, margin_arcsec=20.):
     ra, dec = wc.pixel_to_world_values([0, w - 1, 0, w - 1], [0, 0, h - 1, h - 1])
     m = margin_arcsec / 3600; mra = m / np.cos(np.deg2rad(np.mean(dec)))
     query = _ADQL.format(ra_where=f'm.ra BETWEEN {ra.min() - mra} AND {ra.max() + mra}', dec_min=dec.min() - m, dec_max=dec.max() + m, flux_min=0, extra_where='')
-    cat = Irsa.query_tap(query, maxrec=100000).to_table()
+    cat = _query_split(Irsa, query)
     if len(cat) >= 100000: raise ValueError('Truncated MER query')
     cat['is_star'] = np.ma.filled(cat['point_like_prob'], 0) > .96
     cat.write(path); (folder / 'mer_query.adql').write_text(query)
     return cat
+
+
+MORPH_COLUMNS = ('sersic_sersic_vis_radius', 'sersic_sersic_vis_index', 'sersic_sersic_vis_axis_ratio', 'sersic_angle')
+
+
+def _query_split(irsa, query, chunk=500):
+    """The joined catalogue+morphology box query, run as a box query on the catalogue plus
+    morphology lookups by object_id. Same rows and columns as the join (IRSA can stall on
+    the join, observed 2026-10-09), so earlier tiles remain comparable."""
+    from astropy.table import join, vstack
+    lines = [l for l in query.splitlines() if 'morph' not in l]
+    catalogue = '\n'.join(lines).replace('m.gal_ebv, m.gal_ebv_err,\nFROM', 'm.gal_ebv, m.gal_ebv_err\nFROM')
+    cat = irsa.query_tap(catalogue, maxrec=100000).to_table()
+    if not len(cat):
+        for c in MORPH_COLUMNS: cat[c] = np.zeros(0)
+        return cat
+    ids = np.asarray(cat['object_id'], dtype='int64'); parts = []
+    for start in range(0, len(ids), chunk):
+        id_list = ','.join(str(i) for i in ids[start:start + chunk])
+        parts.append(irsa.query_tap(f"SELECT object_id, {', '.join(MORPH_COLUMNS)} FROM euclid_q1_mer_morphology WHERE object_id IN ({id_list})", maxrec=100000).to_table())
+    morph = vstack(parts)
+    order = np.argsort(np.argsort(-np.ma.filled(np.asarray(cat['flux_vis_psf'], float), -np.inf)))  # keep ORDER BY flux_vis_psf DESC
+    cat['_order'] = order
+    out = join(cat, morph, keys='object_id', join_type='left'); out.sort('_order'); out.remove_column('_order')
+    return out
 
 
 def match_sky(det_sky, ref_sky, center, radius=MATCH_RADIUS_ARCSEC):
