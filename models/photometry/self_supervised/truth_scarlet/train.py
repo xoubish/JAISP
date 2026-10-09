@@ -22,6 +22,7 @@ never on chi-square.
 import argparse
 import json
 import math
+import os
 import random
 import time
 from pathlib import Path
@@ -262,6 +263,7 @@ def main():
     p.add_argument('--foundation', default='models/checkpoints/jaisp_v11_q1_soft/checkpoint_best.pt')
     p.add_argument('--init', default='', help='head checkpoint to start from (required for A0)')
     p.add_argument('--eval-only', action='store_true')
+    p.add_argument('--resume', default='', help="checkpoint to continue from ('auto' = <output>/last.pt); continues the same W&B run")
     p.add_argument('--epochs', type=int, default=20); p.add_argument('--lr', type=float, default=3e-4); p.add_argument('--warmup', type=int, default=100)
     p.add_argument('--batch', type=int, default=8); p.add_argument('--width', type=int, default=64); p.add_argument('--steps', type=int, default=2)
     p.add_argument('--lambda-flux', type=float, default=1.); p.add_argument('--lambda-template', type=float, default=1.)
@@ -287,6 +289,15 @@ def main():
         missing, unexpected = head.load_state_dict(state, strict=False)
         if unexpected: raise ValueError(f'unexpected keys in {a.init}: {unexpected[:5]}')
         print(f'initialised from {a.init}; new parameters: {sorted({k.split(".")[0] for k in missing})}', flush=True)
+    resume = None; run_id = None
+    if a.resume:
+        resume_path = out_dir / 'last.pt' if a.resume == 'auto' else Path(a.resume)
+        resume = torch.load(resume_path, map_location=device, weights_only=False)
+        head.load_state_dict(resume['head'])
+        run_id = resume.get('wandb_id')
+        if run_id is None and (out_dir / 'wandb/latest-run').exists():   # checkpoints written before resume support
+            run_id = Path(os.path.realpath(out_dir / 'wandb/latest-run')).name.split('-')[-1]
+        print(f"resuming from {resume_path} at {resume['seen']} scenes, W&B run {run_id}", flush=True)
     encoder = None
     if flags['foundation']: encoder = SceneEncoder(ROOT / a.foundation); encoder.encoder.to(device)
     model = TruthScarlet(head, encoder, device, foundation=flags['foundation'])
@@ -308,14 +319,20 @@ def main():
 
     config = dict(vars(a), **flags, train_scenes=len(train_paths), val_scenes=len(val_paths), real_scenes=len(real_paths),
                   head_version=TruthScarletHead.version, n_parameters=sum(p.numel() for p in head.parameters()))
-    run = wandb.init(project=a.wandb_project, group=a.wandb_group, name=name, config=config, mode=a.wandb_mode, dir=str(out_dir))
+    run = wandb.init(project=a.wandb_project, group=a.wandb_group, name=name, config=config, mode=a.wandb_mode, dir=str(out_dir),
+                     **(dict(id=run_id, resume='allow') if run_id else {}))
     ref_metrics = {}
     if ref_inj is not None: ref_metrics.update(injection_metrics(ref_inj, 'mixture_val'))
     if ref_real is not None: ref_metrics.update(real_metrics(ref_real, 'mixture_real'))
     for k, v in ref_metrics.items(): run.summary[k] = v
     print(json.dumps(dict(variant=a.variant, train=len(train_paths), val=len(val_paths), real=len(real_paths), **{k: v for k, v in ref_metrics.items() if '/' in k and k.count('_') < 4})), flush=True)
 
-    best = math.inf; seen = 0
+    best = math.inf; seen = 0; optimizer = None
+    if resume is not None:
+        seen = int(resume['seen'])
+        best = resume.get('best', math.inf)
+        if best == math.inf and (out_dir / 'best.pt').exists():
+            best = torch.load(out_dir / 'best.pt', map_location='cpu', weights_only=False)['metrics']['val/median_abs_chi']
 
     def evaluate(epoch):
         nonlocal best
@@ -338,27 +355,36 @@ def main():
                    **({'gpu/max_memory_gb': torch.cuda.max_memory_allocated(device) / 1e9} if device.type == 'cuda' else {}))
         run.log(log, step=seen)
         print(json.dumps({k: (round(v, 4) if isinstance(v, float) else v) for k, v in log.items() if not k.startswith('plots/') and '_band/' not in k}), flush=True)
+        if log['val/median_abs_chi'] < best: best = log['val/median_abs_chi']; improved = True
+        else: improved = False
         state = dict(head=head.state_dict(), variant=a.variant, flags=flags, seen=seen, epoch=epoch, metrics={k: v for k, v in log.items() if not k.startswith('plots/')},
+                     optimizer=optimizer.state_dict() if optimizer is not None else None, best=best, wandb_id=run.id,
                      metadata=dict(foundation=a.foundation, width=a.width, steps=a.steps, head=TruthScarletHead.version, fixed_background=True,
                                    per_band=flags['per_band'], implicit_psf=flags['implicit_psf'], use_foundation=flags['foundation']))
         torch.save(state, out_dir / 'last.pt')
-        if log['val/median_abs_chi'] < best:
-            best = log['val/median_abs_chi']; torch.save(state, out_dir / 'best.pt'); run.summary['best/val_median_abs_chi'] = best; run.summary['best/seen_scenes'] = seen
+        if improved:
+            torch.save(state, out_dir / 'best.pt'); run.summary['best/val_median_abs_chi'] = best; run.summary['best/seen_scenes'] = seen
         head.train()
 
     if a.eval_only:
         evaluate(0); run.finish(); return
 
     optimizer = torch.optim.AdamW(head.parameters(), lr=a.lr, weight_decay=1e-4)
-    total_steps = max(1, a.epochs * len(train_paths[:a.train_limit] if a.train_limit else train_paths) // a.batch)
+    if resume is not None and resume.get('optimizer'): optimizer.load_state_dict(resume['optimizer'])
+    paths_all = train_paths[:a.train_limit] if a.train_limit else train_paths
+    total_steps = max(1, a.epochs * len(paths_all) // a.batch); step0 = seen // a.batch
     def lr_factor(s):
+        s = s + step0
         if s < a.warmup: return (s + 1) / a.warmup
         progress = min(1., (s - a.warmup) / max(1, total_steps - a.warmup))
         return a.lr_final + (1 - a.lr_final) * .5 * (1 + math.cos(math.pi * progress))
     schedule = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_factor)
-    evaluate(0); next_eval = a.eval_every; step = 0
-    for epoch in range(a.epochs):
-        paths = train_paths[:a.train_limit] if a.train_limit else train_paths
+    if resume is None: evaluate(0)
+    next_eval = (seen // a.eval_every + 1) * a.eval_every; step = step0
+    for epoch in range(seen // len(paths_all), a.epochs):
+        paths = paths_all
+        if seen > epoch * len(paths_all):   # resumed mid-epoch: the remaining number of scenes, freshly shuffled
+            paths = [paths_all[i] for i in np.random.default_rng([a.seed, epoch]).permutation(len(paths_all))[:(epoch + 1) * len(paths_all) - seen]]
         head.train(); batch = []; skipped = 0; t0 = time.time(); seen0 = seen
         for scene, truth_s, stem in loader(paths, True, a.workers):
             try:
