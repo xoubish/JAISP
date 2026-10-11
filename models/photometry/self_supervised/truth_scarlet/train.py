@@ -66,18 +66,21 @@ def scene_loss(out, scene, truth, device, a):
     """Per-scene loss terms and the normalised signed errors used by the batch bias penalty."""
     flux_terms, template_terms, chis, snrs = [], [], [], []
     for band, r in out['results'].items():
-        idx = r['source_indices']; t = truth[band]
+        t = truth[band]; keep = r['source_indices'] < len(t['flux'])   # truth only for injected sources (listed first)
+        if not bool(keep.any()): continue
+        idx = r['source_indices'][keep]; flux = r['flux'][keep]
         f_true = torch.as_tensor(t['flux'], device=device, dtype=torch.float64)[idx]
         sigma = torch.as_tensor(t['error'], device=device, dtype=torch.float64)[idx]
-        chi = (r['flux'] - f_true) / sigma
+        chi = (flux - f_true) / sigma
         flux_terms.append(F.huber_loss(chi, torch.zeros_like(chi), delta=a.huber, reduction='none'))
         chis.append(chi); snrs.append((f_true / sigma).detach())
         d = scene['bands'][band]
         w = torch.where(d['mask'].to(device), torch.rsqrt(d['variance'].to(device).clamp_min(1e-30)), torch.zeros_like(d['variance'].to(device))).flatten().double()
         target = torch.as_tensor(t['profiles'], device=device, dtype=torch.float64).reshape(len(t['flux']), -1)[idx] * f_true[:, None]
-        model = (out['templates'][band][:, idx].double() * r['flux'][None]).T
+        model = (out['templates'][band][:, idx].double() * flux[None]).T
         norm = ((target * w) ** 2).sum(1).clamp_min(a.template_floor)
         template_terms.append((((model - target) * w) ** 2).sum(1) / norm)
+    if not flux_terms: raise ValueError('no truth-labelled source inside any band')
     return dict(flux=torch.cat(flux_terms).mean(), template=torch.cat(template_terms).mean(), chi2=out['total'].double(),
                 chi=torch.cat(chis), snr=torch.cat(snrs))
 
@@ -108,7 +111,7 @@ def run_injections(model, paths, device):
 def injection_frame(rows, truth, manifest):
     d = rows.merge(truth, on=['name', 'source', 'band'], how='inner').merge(manifest, on='name', how='left')
     d['chi'] = (d.flux - d.truth_flux) / d.oracle_error; d['frac'] = (d.flux - d.truth_flux) / d.truth_flux
-    d['context'] = np.where(d.n_sources == 1, 'isolated', np.where(d.min_sep_arcsec < .7, 'blend <0.7"', 'blend >=0.7"'))
+    d['context'] = np.where(d.min_sep_arcsec > 2, 'isolated', np.where(d.min_sep_arcsec < .7, 'blend <0.7"', 'blend >=0.7"'))
     return d
 
 
@@ -239,7 +242,7 @@ def fig_residuals(model, paths, device, title):
             chi = np.where(db['mask'].numpy(), (db['image'].numpy() - rb['model'].detach().cpu().numpy()) / np.sqrt(db['variance'].numpy()), np.nan)
             a.imshow(chi, origin='lower', cmap='RdBu_r', vmin=-4, vmax=4)
             idx = rb['source_indices'].tolist()
-            tag = ', '.join(f'{f / truth[band]["flux"][j]:.2f}' for j, f in zip(idx, rb['flux'].tolist()))
+            tag = ', '.join(f'{f / truth[band]["flux"][j]:.2f}' for j, f in zip(idx, rb['flux'].tolist()) if j < len(truth[band]['flux']))
             a.set_title(f'{SHORT[band]} χ resid, χ²/dof {float(rb["chi2"] / max(rb["dof"], 1)):.2f}\nf/f* = {tag}', fontsize=8)
         for a in row: a.set_xticks([]); a.set_yticks([])
         for a in row[:2]: a.plot(*d['positions'].numpy().T, '+', c='c', ms=6)
@@ -249,8 +252,8 @@ def fig_residuals(model, paths, device, title):
 
 def gallery_paths(val_dir, manifest):
     picks = []
-    for sel in (manifest[(manifest.n_sources == 1) & (manifest.vis_snr < 4)], manifest[(manifest.n_sources == 1) & (manifest.vis_snr > 30)],
-                manifest[(manifest.n_sources == 2) & (manifest.min_sep_arcsec < .6) & (manifest.vis_snr > 8)], manifest[manifest.n_sources == 3]):
+    for sel in (manifest[(manifest.min_sep_arcsec > 2) & (manifest.vis_snr < 4)], manifest[(manifest.min_sep_arcsec > 2) & (manifest.vis_snr > 30)],
+                manifest[(manifest.min_sep_arcsec < .6) & (manifest.vis_snr > 8)], manifest.sort_values('n_sources').iloc[-1:]):
         if len(sel): picks.append(val_dir / 'scenes' / f'{sel.iloc[0]["name"]}.npz')
     return picks
 
@@ -260,6 +263,9 @@ def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('--variant', choices=sorted(VARIANTS), required=True)
     p.add_argument('--data', default=str(OUT)); p.add_argument('--output', default='')
+    p.add_argument('--train-dirs', nargs='+', default=['train'], help='training scene folders under --data')
+    p.add_argument('--val-dir', default='val', help='injected validation folder used for checkpoint selection (logged as val/*)')
+    p.add_argument('--extra-val', nargs='*', default=[], help='further injected validation folders, logged as extra_<name>/*')
     p.add_argument('--foundation', default='models/checkpoints/jaisp_v11_q1_soft/checkpoint_best.pt')
     p.add_argument('--init', default='', help='head checkpoint to start from (required for A0)')
     p.add_argument('--eval-only', action='store_true')
@@ -302,20 +308,26 @@ def main():
     if flags['foundation']: encoder = SceneEncoder(ROOT / a.foundation); encoder.encoder.to(device)
     model = TruthScarlet(head, encoder, device, foundation=flags['foundation'])
 
-    train_paths = sorted((data / 'train/scenes').glob('scene_*.npz'))
-    val_paths = sorted((data / 'val/scenes').glob('scene_*.npz'))[:a.val_limit]
+    train_paths = sorted(p for t in a.train_dirs for p in (data / t / 'scenes').glob('scene_*.npz'))
+
+    def injected_set(folder):
+        paths = sorted((data / folder / 'scenes').glob('scene_*.npz'))[:a.val_limit]
+        tr = pd.read_csv(data / folder / 'truth.csv'); tr['name'] = tr.scene.map(lambda s: f'scene_{s:05d}')
+        mf = pd.read_csv(data / folder / 'scenes.csv'); mf['name'] = mf.scene.map(lambda s: f'scene_{s:05d}')
+        ref = None
+        if (data / folder / 'reference_mixture.csv').exists():
+            ref = injection_frame(pd.read_csv(data / folder / 'reference_mixture.csv'), tr, mf); ref = ref[ref.name.isin({p.stem for p in paths})]
+        return dict(paths=paths, truth=tr, manifest=mf, ref=ref)
+    extras = {f: injected_set(f) for f in a.extra_val}
+    primary = injected_set(a.val_dir); val_paths = primary['paths']
     real_paths = sorted((data / 'val_real/scenes').glob('*.npz'))[:a.real_limit]
-    truth = pd.read_csv(data / 'val/truth.csv'); truth['name'] = truth.scene.map(lambda s: f'scene_{s:05d}')
-    manifest = pd.read_csv(data / 'val/scenes.csv'); manifest['name'] = manifest.scene.map(lambda s: f'scene_{s:05d}')
+    truth, manifest = primary['truth'], primary['manifest']
     real_manifest = pd.read_csv(data / 'val_real/manifest.csv') if (data / 'val_real/manifest.csv').exists() else None
-    ref_inj = ref_real = None
-    if (data / 'val/reference_mixture.csv').exists():
-        ref_inj = injection_frame(pd.read_csv(data / 'val/reference_mixture.csv'), truth, manifest)
-        ref_inj = ref_inj[ref_inj.name.isin({p.stem for p in val_paths})]
+    ref_inj = primary['ref']; ref_real = None
     if real_manifest is not None and (data / 'val_real/reference_mixture.csv').exists():
         rr = pd.read_csv(data / 'val_real/reference_mixture.csv'); rr = rr[(rr.source == 0) & rr.band.isin(EUCLID) & rr.name.isin({p.stem for p in real_paths})]
         ref_real = real_frame(rr, real_manifest)
-    gallery = gallery_paths(data / 'val', manifest)
+    gallery = gallery_paths(data / a.val_dir, manifest)
 
     config = dict(vars(a), **flags, train_scenes=len(train_paths), val_scenes=len(val_paths), real_scenes=len(real_paths),
                   head_version=TruthScarletHead.version, n_parameters=sum(p.numel() for p in head.parameters()))
@@ -323,6 +335,8 @@ def main():
                      **(dict(id=run_id, resume='allow') if run_id else {}))
     ref_metrics = {}
     if ref_inj is not None: ref_metrics.update(injection_metrics(ref_inj, 'mixture_val'))
+    for f, e in extras.items():
+        if e['ref'] is not None: ref_metrics.update(injection_metrics(e['ref'], f'mixture_extra_{f}'))
     if ref_real is not None: ref_metrics.update(real_metrics(ref_real, 'mixture_real'))
     for k, v in ref_metrics.items(): run.summary[k] = v
     print(json.dumps(dict(variant=a.variant, train=len(train_paths), val=len(val_paths), real=len(real_paths), **{k: v for k, v in ref_metrics.items() if '/' in k and k.count('_') < 4})), flush=True)
@@ -340,6 +354,9 @@ def main():
         rows, fail = run_injections(model, val_paths, device); d = injection_frame(rows, truth, manifest)
         log = injection_metrics(d, 'val'); log['val/failures'] = fail
         log['val/mean_reduced_chi2_log'] = float(np.log(rows.drop_duplicates(['name', 'band']).reduced_chi2).mean())
+        for f, e in extras.items():
+            erows, efail = run_injections(model, e['paths'], device)
+            log.update(injection_metrics(injection_frame(erows, e['truth'], e['manifest']), f'extra_{f}')); log[f'extra_{f}/failures'] = efail
         figs = dict(flux_scatter=fig_flux_scatter(d, ref_inj, f'{name}: injected validation, {seen} training scenes'),
                     frac_vs_snr=fig_frac_vs_snr(d, ref_inj, f'{name}: fractional flux error vs S/N, {seen} training scenes'),
                     residuals=fig_residuals(model, gallery, device, f'{name}: residual gallery, {seen} training scenes'))
@@ -348,7 +365,8 @@ def main():
             log.update(real_metrics(rd, 'real')); log['real/failures'] = rfail
             figs['real_vs_mer'] = fig_real(rd, ref_real, f'{name}: real validation tiles vs MER, {seen} training scenes')
         for k, v in ref_metrics.items():
-            if k in ('mixture_val/median_abs_chi', 'mixture_real/mean_nmad_mag'): log[k] = v   # flat reference lines on the same charts
+            if k in ('mixture_val/median_abs_chi', 'mixture_real/mean_nmad_mag') or (k.startswith('mixture_extra_') and k.endswith('/median_abs_chi')):
+                log[k] = v   # flat reference lines on the same charts
         plots = out_dir / 'plots'; plots.mkdir(exist_ok=True)
         for k, f in figs.items(): f.savefig(plots / f'{k}_{seen:07d}.png', dpi=90); log[f'plots/{k}'] = wandb.Image(f); plt.close(f)
         log.update(epoch=epoch, seen_scenes=seen, eval_seconds=time.time() - t0,

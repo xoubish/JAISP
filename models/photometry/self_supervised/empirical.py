@@ -138,8 +138,9 @@ def catalog_xy(folder, inputs, wc):
     return np.column_stack(wc.world_to_pixel_values(*sky.T))
 
 
-def make_library(out, source_root, minimum_snr=25., regions=None):
-    """Donors from every region except the background regions, or from ``regions`` only."""
+def make_library(out, source_root, minimum_snr=25., regions=None, exclude_point_like=True):
+    """Donors from every region except the background regions, or from ``regions`` only.
+    ``exclude_point_like=False`` keeps MER point-like sources (stars, compact galaxies) as donors."""
     folder_out = out/'donors'; folder_out.mkdir(parents=True, exist_ok=True)
     calibration = json.loads((HERE/'runs/q1_all_bands/psf_calibration.json').read_text())
     report = []; rejected = []; donor_id = 0
@@ -152,7 +153,7 @@ def make_library(out, source_root, minimum_snr=25., regions=None):
         for i in np.flatnonzero(inputs['scene_inside'] & inputs['central_valid'] & (nearest > 3.)):
             match = matches.loc[int(inputs['source'][i])]
             # Catalog used only for independently excluding likely stars.
-            if pd.notna(match.mer_point_like_prob) and match.mer_point_like_prob > .2: continue
+            if exclude_point_like and pd.notna(match.mer_point_like_prob) and match.mer_point_like_prob > .2: continue
             b = 'euclid_VIS'; im, var, valid, wc = band_data(inputs, b)
             crop = _crop(im, var, valid, xy[i], 40)
             if crop is None: continue
