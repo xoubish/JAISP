@@ -103,8 +103,13 @@ def world_wcs(matrix):
 
 
 def render(stamp, donor_matrix, target_matrix, position, shape, kernel=None,
-           angle=0., extra_sigma_arcsec=0., donor_center=None, kernel_matrix=None):
+           angle=0., extra_sigma_arcsec=0., donor_center=None, kernel_matrix=None,
+           intrinsic_angle=0., flip=False):
     """Render finite unit-mass intrinsic light or a PSF; never renormalize crops.
+
+    ``angle`` rotates the PSF-convolved object (source and PSF together); ``intrinsic_angle``
+    and ``flip`` (mirror in x) act on the intrinsic light only, before PSF convolution, so the
+    PSF stays that of the target position (augmentation of real-scene injections).
 
     Native PSF stamps already contain their pixel response: draw ``no_pixel``.
     Donor/target matrices map native x,y pixels to tangent-plane arcsec.
@@ -116,6 +121,10 @@ def render(stamp, donor_matrix, target_matrix, position, shape, kernel=None,
         offset = galsim.PositionD(*(np.asarray(donor_center)-(np.array(stamp.shape[::-1])-1)/2))
     obj = galsim.InterpolatedImage(galsim.ImageD(stamp, wcs=iwcs),
                                   x_interpolant=galsim.Lanczos(5), offset=offset)
+    if flip:
+        obj = obj.transform(-1., 0., 0., 1.)
+    if intrinsic_angle:
+        obj = obj.rotate(intrinsic_angle*galsim.radians)
     if kernel is not None:
         psf_wcs = iwcs if kernel_matrix is None else world_wcs(kernel_matrix)
         psf = galsim.InterpolatedImage(galsim.ImageD(unit(kernel), wcs=psf_wcs), x_interpolant=galsim.Lanczos(5))
@@ -138,9 +147,11 @@ def catalog_xy(folder, inputs, wc):
     return np.column_stack(wc.world_to_pixel_values(*sky.T))
 
 
-def make_library(out, source_root, minimum_snr=25., regions=None, exclude_point_like=True):
+def make_library(out, source_root, minimum_snr=25., regions=None, exclude_point_like=True, support_fn=None, support_radius=2.3):
     """Donors from every region except the background regions, or from ``regions`` only.
-    ``exclude_point_like=False`` keeps MER point-like sources (stars, compact galaxies) as donors."""
+    ``exclude_point_like=False`` keeps MER point-like sources (stars, compact galaxies) as donors.
+    ``support_fn(signal, variance, valid, center, scale)`` replaces the fixed reconstruction support disk;
+    ``support_radius`` (arcsec) sets that disk, with the cutout (radius + 1.7) and background annulus (radius + 0.7 to + 1.6) following it."""
     folder_out = out/'donors'; folder_out.mkdir(parents=True, exist_ok=True)
     calibration = json.loads((HERE/'runs/q1_all_bands/psf_calibration.json').read_text())
     report = []; rejected = []; donor_id = 0
@@ -171,22 +182,22 @@ def make_library(out, source_root, minimum_snr=25., regions=None, exclude_point_
                 image, variance, mask, wc = band_data(inputs, b)
                 pix = np.array(wc.world_to_pixel_values(*inputs['sky'][i]))
                 matrix = jacobian(wc, pix); scale = np.sqrt(abs(np.linalg.det(matrix)))
-                crop = _crop(image, variance, mask, pix, int(np.ceil(4/scale)))
+                crop = _crop(image, variance, mask, pix, int(np.ceil((support_radius+1.7)/scale)))
                 if crop is None: failure = 'edge_'+b; break
                 im, var, valid, origin = crop; center = pix-origin
                 yy, xx = np.indices(im.shape); rr = np.hypot(xx-center[0], yy-center[1])*scale
-                ann = valid & (rr > 3.) & (rr < 3.9)
+                ann = valid & (rr > support_radius+.7) & (rr < support_radius+1.6)
                 # Exclude neighbors in the background annulus (all known catalogs).
                 for q in catalog_xy(folder, inputs, wc)-origin:
                     if np.linalg.norm(q-center)*scale > .3:
                         ann &= np.hypot(xx-q[0], yy-q[1])*scale > 1.
-                if ann.sum() < 50 or valid[rr < 2.3].mean() < .98:
+                if ann.sum() < 50 or valid[rr < support_radius].mean() < .98:
                     failure = 'mask_or_annulus_'+b; break
                 bg = float(np.median(im[ann])); signal = np.where(valid, im-bg, 0)
                 if b.startswith('euclid_'):
                     kernel = unit(inputs[b+'__psf_stamps'][inputs[b+'__kernel_index'][i]])
                 else: kernel = gaussian_psf(calibration[b]['sigma_px'])
-                support = rr < 2.3
+                support = rr < support_radius if support_fn is None else support_fn(signal, var, valid, center, scale)
                 fallback = False
                 if b == 'euclid_VIS':
                     latent, chi2 = reconstruct(signal, var, valid, kernel, support)
@@ -312,13 +323,14 @@ def make_backgrounds(out, source_root, per_region=50, regions=BACKGROUND_REGIONS
     return idx
 
 
-def donor_quality(out, source_root):
-    """Data-only QA, independent of injection outcomes; retain every trial."""
+def donor_quality(out, source_root, region_dir=None):
+    """Data-only QA, independent of injection outcomes; retain every trial.
+    ``region_dir(region)`` optionally maps a donor's region number to its tile folder (several tile roots)."""
     bands = pd.read_csv(out/'donor_bands.csv'); cache = {}; rows = []
     for path in sorted((out/'donors').glob('donor_*.npz')):
         d = read_npz(path); region = int(d['region']); donor = int(d['donor'])
         if region not in cache:
-            folder = source_root/f'region_{region:03d}'
+            folder = region_dir(region) if region_dir is not None else source_root/f'region_{region:03d}'
             matches = pd.read_csv(folder/'mer_match.csv').set_index('source')
             with np.load(folder/'tile_inputs.npz') as z: wc = wcs(z['euclid_VIS__wcs'])
             cache[region] = matches, wc

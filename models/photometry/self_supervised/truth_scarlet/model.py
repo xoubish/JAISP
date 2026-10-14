@@ -6,6 +6,11 @@ Variants (see architecture_brainstorm/README.md):
     A2  A1 + per-band branch (band pixels, band residual, band PSF on the morphology grid)
     A3  A2 without foundation inputs (bottleneck and VIS stem replaced by zeros; encoder not run)
     A4  A2 without any PSF: the head outputs observed-space templates, no convolution, no PSF input
+    A5  A2 with free-er shapes: the CNN's modulation of the monotone profile may reach ~7x (|log| <= 2,
+        A2: 0.5) and the per-band modulation ~2.7x (A2: 0.2), so arms, bars and clumps can be represented;
+        relies on the truth loss (not the shape constraint) to stop blended sources trading light
+    A6  A5 + a bounded per-source centroid correction (|dx|,|dy| <= 0.2", refined with the shape),
+        applied to the template placement in every band; trained with realistic position jitter
 
 Fluxes are never predicted: every variant ends in the same signed linear solve
 with a fixed robust background (amortised_scarlet.scene_fit).
@@ -23,7 +28,9 @@ VARIANTS = dict(A0=dict(per_band=False, foundation=True, implicit_psf=False),
                 A1=dict(per_band=False, foundation=True, implicit_psf=False),
                 A2=dict(per_band=True, foundation=True, implicit_psf=False),
                 A3=dict(per_band=True, foundation=False, implicit_psf=False),
-                A4=dict(per_band=True, foundation=True, implicit_psf=True))
+                A4=dict(per_band=True, foundation=True, implicit_psf=True),
+                A5=dict(per_band=True, foundation=True, implicit_psf=False, perturbation=2.0, eps_bound=1.0),
+                A6=dict(per_band=True, foundation=True, implicit_psf=False, perturbation=2.0, eps_bound=1.0, centroid=True))
 
 
 def morph_grid_points(d, device):
@@ -66,8 +73,12 @@ class TruthScarletHead(ScarletHead):
     version = 'truth_v1'
 
     def __init__(self, width=64, steps=2, per_band=False, implicit_psf=False, band_width=48, embed=8,
-                 size_bound=.3, eps_bound=.2):
-        super().__init__(width=width, steps=steps)
+                 size_bound=.3, eps_bound=.2, perturbation=.5, centroid=False, centroid_bound=.2):
+        super().__init__(width=width, steps=steps, perturbation=perturbation)
+        self.centroid = centroid; self.centroid_bound = centroid_bound
+        if centroid:   # zero-initialised: the correction starts at exactly zero and is learned
+            self.centroid_out = nn.Linear(2 * width, 2); self.refine_centroid = nn.Linear(2 * width, 2)
+            for m in (self.centroid_out, self.refine_centroid): nn.init.zeros_(m.weight); nn.init.zeros_(m.bias)
         if implicit_psf and not per_band: raise ValueError('The implicit-PSF head needs the per-band branch for band-dependent widths')
         self.per_band = per_band; self.implicit_psf = implicit_psf; self.psf_input = per_band and not implicit_psf
         # Without a PSF the band widths differ by up to ~4x (Rubin vs VIS): allow a wide size range.
@@ -82,6 +93,22 @@ class TruthScarletHead(ScarletHead):
             self.band_vector = nn.Linear(2 * band_width, 3)      # mix-logit shift, log size, aperture factor
             for m in (self.band_eps, self.band_vector): nn.init.zeros_(m.weight); nn.init.zeros_(m.bias)
             with torch.no_grad(): self.band_vector.bias[2] = -4.  # aperture factor starts at ~0.995
+
+    def forward(self, bottleneck, stem, raw):
+        params, feat = super().forward(bottleneck, stem, raw)
+        if self.centroid: params['centroid'] = self.centroid_out(self.pooled(feat))
+        return params, feat
+
+    def refine_step(self, params, g, feat, scale):
+        bands, comps, mix = self.morphologies(params)
+        h = self.refine(torch.cat((comps * MORPH_SIZE, g, feat), 1))
+        out = dict(vector=params['vector'] + scale * self.refine_vector(self.pooled(h)), eps=params['eps'] + scale * self.refine_eps(h))
+        if self.centroid: out['centroid'] = params['centroid'] + scale * self.refine_centroid(self.pooled(h))
+        return out
+
+    def offsets(self, params):
+        """Per-source centroid correction in tangent-plane arcsec [N,2], or None."""
+        return self.centroid_bound * torch.tanh(params['centroid']) if self.centroid else None
 
     def band_branch(self, feat, raw, residual, psf=None):
         n, w, k, _ = feat.shape; nb = len(BANDS)
@@ -121,11 +148,13 @@ class TruthScarletHead(ScarletHead):
         return morph, norms
 
 
-def render(scene, morph, norms, device, convolve=True):
-    """{band: [H*W, N]} templates; no PSF convolution for the implicit-PSF head."""
+def render(scene, morph, norms, device, convolve=True, offsets=None):
+    """{band: [H*W, N]} templates; no PSF convolution for the implicit-PSF head.
+    ``offsets`` [N,2] (arcsec east/north) shifts every source's template placement in every band."""
     templates = {}
     for band, d in scene['bands'].items():
         m = morph[band]; n = m.shape[0]; s2p = d['sky_to_pixel'].to(device); pos = d['positions'].to(device)
+        if offsets is not None: pos = pos + offsets @ s2p.T
         scale = math.sqrt(abs(float(torch.linalg.det(torch.linalg.inv(s2p)))))
         oversample = max(2, int(math.ceil(2 * scale / MORPH_SCALE)))
         kernels = band_kernels(d, n, device) if convolve else None
@@ -160,11 +189,11 @@ class TruthScarlet:
         for k in range(steps + 1):
             band_out = head.band_branch(feat, raw, residual, psf) if head.per_band else None
             morph, norms = head.band_morphologies(params, band_out)
-            templates = render(scene, morph, norms, self.device, convolve=not head.implicit_psf)
+            templates = render(scene, morph, norms, self.device, convolve=not head.implicit_psf, offsets=head.offsets(params))
             results, total = scene_fit(scene, templates, self.device, fixed_background=True)
             if k == steps: break
             grad, = torch.autograd.grad(total, params['eps'], retain_graph=True)
             g = grad / grad.flatten(1).abs().amax(1).clamp_min(1e-30)[:, None, None, None]
             params = head.refine_step(params, g.detach(), feat, self.refine_scale)
             if head.per_band: residual = residual_windows(scene, results, self.device)
-        return dict(results=results, total=total, templates=templates, params=params)
+        return dict(results=results, total=total, templates=templates, params=params, offsets=head.offsets(params))

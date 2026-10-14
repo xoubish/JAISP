@@ -64,16 +64,22 @@ def loader(paths, shuffle, workers):
 # ----------------------------------------------------------------------------- loss
 def scene_loss(out, scene, truth, device, a):
     """Per-scene loss terms and the normalised signed errors used by the batch bias penalty."""
-    flux_terms, template_terms, chis, snrs = [], [], [], []
+    flux_terms, template_terms, chis, snrs, bands, fracs = [], [], [], [], [], []
     for band, r in out['results'].items():
         t = truth[band]; keep = r['source_indices'] < len(t['flux'])   # truth only for injected sources (listed first)
         if not bool(keep.any()): continue
         idx = r['source_indices'][keep]; flux = r['flux'][keep]
         f_true = torch.as_tensor(t['flux'], device=device, dtype=torch.float64)[idx]
         sigma = torch.as_tensor(t['error'], device=device, dtype=torch.float64)[idx]
-        chi = (flux - f_true) / sigma
+        chi = (flux - f_true) / sigma; snr = (f_true / sigma).detach()
         flux_terms.append(F.huber_loss(chi, torch.zeros_like(chi), delta=a.huber, reduction='none'))
-        chis.append(chi); snrs.append((f_true / sigma).detach())
+        chis.append(chi); snrs.append(snr); bands.append(torch.full_like(idx, BANDS.index(band)))
+        # Bright end: fractional error, scaled so that frac_scale * frac plays the role of chi (a 10% error at
+        # frac_scale 20 sits at 2, inside the Huber quadratic regime); the chi term alone saturates for bright sources.
+        bright = snr > a.frac_snr
+        if bool(bright.any()):
+            frac = (flux[bright] - f_true[bright]) / f_true[bright]
+            fracs.append(F.huber_loss(a.frac_scale * frac, torch.zeros_like(frac), delta=a.huber, reduction='none'))
         d = scene['bands'][band]
         w = torch.where(d['mask'].to(device), torch.rsqrt(d['variance'].to(device).clamp_min(1e-30)), torch.zeros_like(d['variance'].to(device))).flatten().double()
         target = torch.as_tensor(t['profiles'], device=device, dtype=torch.float64).reshape(len(t['flux']), -1)[idx] * f_true[:, None]
@@ -82,7 +88,47 @@ def scene_loss(out, scene, truth, device, a):
         template_terms.append((((model - target) * w) ** 2).sum(1) / norm)
     if not flux_terms: raise ValueError('no truth-labelled source inside any band')
     return dict(flux=torch.cat(flux_terms).mean(), template=torch.cat(template_terms).mean(), chi2=out['total'].double(),
-                chi=torch.cat(chis), snr=torch.cat(snrs))
+                frac=torch.cat(fracs).mean() if fracs else out['total'].new_zeros(()).double(),
+                chi=torch.cat(chis), snr=torch.cat(snrs), band=torch.cat(bands))
+
+
+class BiasTracker:
+    """Running (exponential) mean of the clipped signed error per (S/N bin, band). The penalty
+    sum_cells ema.detach() * batch_mean is a dual-ascent push: its gradient moves each cell's mean
+    error against the accumulated bias and vanishes once the running mean is zero. Clipping makes
+    the tracked statistic a robust mean (the plain mean is dominated by the positive tail at low S/N)."""
+    def __init__(self, clip, rate, device, minimum=2):
+        self.n_bins = len(SNR_BINS) - 1; self.clip = clip; self.rate = rate; self.minimum = minimum
+        self.ema = torch.zeros(self.n_bins * len(BANDS), dtype=torch.float64, device=device)
+
+    def __call__(self, chis, snrs, bands):
+        chi = torch.cat(chis).clamp(-self.clip, self.clip); snr = torch.cat(snrs); band = torch.cat(bands)
+        edges = torch.tensor(SNR_BINS[1:-1], dtype=snr.dtype, device=snr.device)
+        cell = torch.bucketize(snr, edges) * len(BANDS) + band
+        sums = torch.zeros_like(self.ema).index_add_(0, cell, chi); counts = torch.zeros_like(self.ema).index_add_(0, cell, torch.ones_like(chi))
+        valid = counts >= self.minimum; mean = sums / counts.clamp_min(1)
+        penalty = (self.ema * mean * valid).sum()
+        with torch.no_grad(): self.ema = torch.where(valid, (1 - self.rate) * self.ema + self.rate * mean, self.ema)
+        return penalty
+
+    def summary(self): return float(self.ema.abs().mean()), float(self.ema.abs().max())
+
+
+def jitter_pools():
+    """Empirical |our centroid - MER centroid| (arcsec) of matched galaxies in the training tiles, by VIS magnitude."""
+    from .scenes import tile_dir, regions_of
+    m = pd.concat([pd.read_csv(tile_dir(r) / 'mer_match.csv') for r in regions_of('train')])
+    m = m[m.matched & m.primary_match & (m.mer_flux_vis_sersic > 0)]; mag = 23.9 - 2.5 * np.log10(m.mer_flux_vis_sersic); sep = m.match_sep_arcsec.to_numpy()
+    return {'bright': sep[mag < 23], 'mid': sep[(mag >= 23) & (mag < 25)], 'faint': sep[(mag >= 25) & (mag < 26)], 'vfaint': sep[mag >= 26]}
+
+
+def jitter_scene(scene, truth, pools, rng):
+    """Shift each injected source (the first len(truth) sources) by a random real-sized offset, in every band; truth unchanged."""
+    t = truth['euclid_VIS']; snr = t['flux'] / t['error']
+    for j in range(len(t['flux'])):
+        pool = pools['bright' if snr[j] > 50 else 'mid' if snr[j] > 10 else 'faint' if snr[j] > 3 else 'vfaint']
+        r = float(rng.choice(pool)); th = rng.uniform(0, 2 * np.pi); off = torch.tensor([r * np.cos(th), r * np.sin(th)], dtype=torch.float32)
+        for d in scene['bands'].values(): d['positions'][j] = d['positions'][j] + d['sky_to_pixel'] @ off
 
 
 def bias_penalty(chis, snrs, clip):
@@ -275,6 +321,11 @@ def main():
     p.add_argument('--lambda-flux', type=float, default=1.); p.add_argument('--lambda-template', type=float, default=1.)
     p.add_argument('--lambda-chi2', type=float, default=.1); p.add_argument('--lambda-bias', type=float, default=.5)
     p.add_argument('--huber', type=float, default=3.); p.add_argument('--template-floor', type=float, default=25.)
+    p.add_argument('--lambda-frac', type=float, default=0., help='bright-end fractional-error term (sources with true S/N > --frac-snr)')
+    p.add_argument('--frac-snr', type=float, default=10.); p.add_argument('--frac-scale', type=float, default=20.)
+    p.add_argument('--bias-mode', choices=('batch', 'ema'), default='batch', help="'ema': running-mean dual-ascent bias correction per S/N bin and band")
+    p.add_argument('--bias-rate', type=float, default=.02)
+    p.add_argument('--jitter', action='store_true', help='perturb injected positions by the real centroid-error distribution (training only)')
     p.add_argument('--eval-every', type=int, default=8000, help='training scenes between validations')
     p.add_argument('--lr-final', type=float, default=.05, help='cosine decay to this fraction of --lr by the last step')
     p.add_argument('--val-limit', type=int, default=800); p.add_argument('--real-limit', type=int, default=500)
@@ -289,11 +340,22 @@ def main():
     name = a.name or a.variant; out_dir = Path(a.output or data / 'runs' / name); out_dir.mkdir(parents=True, exist_ok=True)
     if a.variant == 'A0' and not (a.eval_only and a.init): raise SystemExit('A0 is the existing chi-square checkpoint: use --eval-only --init <ckpt>')
 
-    head = TruthScarletHead(width=a.width, steps=a.steps, per_band=flags['per_band'], implicit_psf=flags['implicit_psf']).to(device)
+    shape_bounds = dict(perturbation=flags.get('perturbation', .5), eps_bound=flags.get('eps_bound', .2), centroid=flags.get('centroid', False))
+    head = TruthScarletHead(width=a.width, steps=a.steps, per_band=flags['per_band'], implicit_psf=flags['implicit_psf'], **shape_bounds).to(device)
     if a.init:
         state = torch.load(ROOT / a.init if not Path(a.init).is_absolute() else a.init, map_location=device, weights_only=False)['head']
         missing, unexpected = head.load_state_dict(state, strict=False)
         if unexpected: raise ValueError(f'unexpected keys in {a.init}: {unexpected[:5]}')
+        # Starting a freer-shape head (A5) from a constrained checkpoint: shrink the final modulation layers by the
+        # bound ratio so bound * tanh(x / ratio) ~ old_bound * tanh(x) and the initial shapes match the checkpoint.
+        old = torch.load(ROOT / a.init if not Path(a.init).is_absolute() else a.init, map_location='cpu', weights_only=False).get('metadata', {})
+        for layers, new_b, old_b in (((head.eps_out, head.refine_eps), shape_bounds['perturbation'], old.get('perturbation', .5)),
+                                     ((getattr(head, 'band_eps', None),), shape_bounds['eps_bound'], old.get('eps_bound', .2))):
+            if abs(new_b - old_b) > 1e-9:
+                with torch.no_grad():
+                    for layer in layers:
+                        if layer is not None: layer.weight.mul_(old_b / new_b); layer.bias.mul_(old_b / new_b)
+                print(f'rescaled shape-modulation layers for bound {old_b} -> {new_b}', flush=True)
         print(f'initialised from {a.init}; new parameters: {sorted({k.split(".")[0] for k in missing})}', flush=True)
     resume = None; run_id = None
     if a.resume:
@@ -341,7 +403,7 @@ def main():
     for k, v in ref_metrics.items(): run.summary[k] = v
     print(json.dumps(dict(variant=a.variant, train=len(train_paths), val=len(val_paths), real=len(real_paths), **{k: v for k, v in ref_metrics.items() if '/' in k and k.count('_') < 4})), flush=True)
 
-    best = math.inf; seen = 0; optimizer = None
+    best = math.inf; seen = 0; optimizer = None; tracker = None
     if resume is not None:
         seen = int(resume['seen'])
         best = resume.get('best', math.inf)
@@ -377,8 +439,9 @@ def main():
         else: improved = False
         state = dict(head=head.state_dict(), variant=a.variant, flags=flags, seen=seen, epoch=epoch, metrics={k: v for k, v in log.items() if not k.startswith('plots/')},
                      optimizer=optimizer.state_dict() if optimizer is not None else None, best=best, wandb_id=run.id,
+                     bias_ema=(tracker.ema.detach().cpu() if tracker is not None else None),
                      metadata=dict(foundation=a.foundation, width=a.width, steps=a.steps, head=TruthScarletHead.version, fixed_background=True,
-                                   per_band=flags['per_band'], implicit_psf=flags['implicit_psf'], use_foundation=flags['foundation']))
+                                   per_band=flags['per_band'], implicit_psf=flags['implicit_psf'], use_foundation=flags['foundation'], **shape_bounds))
         torch.save(state, out_dir / 'last.pt')
         if improved:
             torch.save(state, out_dir / 'best.pt'); run.summary['best/val_median_abs_chi'] = best; run.summary['best/seen_scenes'] = seen
@@ -397,6 +460,9 @@ def main():
         progress = min(1., (s - a.warmup) / max(1, total_steps - a.warmup))
         return a.lr_final + (1 - a.lr_final) * .5 * (1 + math.cos(math.pi * progress))
     schedule = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_factor)
+    pools = jitter_pools() if a.jitter else None; jitter_rng = np.random.default_rng(a.seed + 1)
+    tracker = BiasTracker(a.huber, a.bias_rate, device) if a.bias_mode == 'ema' else None
+    if resume is not None and resume.get('bias_ema') is not None and tracker is not None: tracker.ema = resume['bias_ema'].to(device)
     if resume is None: evaluate(0)
     next_eval = (seen // a.eval_every + 1) * a.eval_every; step = step0
     for epoch in range(seen // len(paths_all), a.epochs):
@@ -406,6 +472,7 @@ def main():
         head.train(); batch = []; skipped = 0; t0 = time.time(); seen0 = seen
         for scene, truth_s, stem in loader(paths, True, a.workers):
             try:
+                if pools is not None: jitter_scene(scene, truth_s, pools, jitter_rng)
                 out = model.run(scene)
                 batch.append(scene_loss(out, scene, truth_s, device, a))
             except (ValueError, RuntimeError) as exc:
@@ -413,13 +480,16 @@ def main():
                 skipped += 1
             seen += 1
             if len(batch) == a.batch:
-                L = {k: torch.stack([b[k] for b in batch]).mean() for k in ('flux', 'template', 'chi2')}
-                L['bias'] = bias_penalty([b['chi'] for b in batch], [b['snr'] for b in batch], a.huber)
-                total = a.lambda_flux * L['flux'] + a.lambda_template * L['template'] + a.lambda_chi2 * L['chi2'] + a.lambda_bias * L['bias']
+                L = {k: torch.stack([b[k] for b in batch]).mean() for k in ('flux', 'template', 'chi2', 'frac')}
+                L['bias'] = (tracker([b['chi'] for b in batch], [b['snr'] for b in batch], [b['band'] for b in batch]) if tracker is not None
+                             else bias_penalty([b['chi'] for b in batch], [b['snr'] for b in batch], a.huber))
+                total = (a.lambda_flux * L['flux'] + a.lambda_template * L['template'] + a.lambda_chi2 * L['chi2'] + a.lambda_bias * L['bias']
+                         + a.lambda_frac * L['frac'])
                 optimizer.zero_grad(); total.backward()
                 gn = torch.nn.utils.clip_grad_norm_(head.parameters(), 1.); optimizer.step(); schedule.step(); step += 1
                 if step % 10 == 0:
                     run.log({'train/loss': float(total), **{f'train/{k}': float(v) for k, v in L.items()}, 'train/grad_norm': float(gn),
+                             **({'train/bias_ema_mean': tracker.summary()[0], 'train/bias_ema_max': tracker.summary()[1]} if tracker is not None else {}),
                              'train/lr': schedule.get_last_lr()[0], 'train/skipped': skipped, 'epoch': epoch,
                              'train/scenes_per_s': (seen - seen0) / max(time.time() - t0, 1e-9)}, step=seen)
                 if step % 50 == 0: print(f'epoch {epoch} step {step} seen {seen} loss {float(total):.3f} ' + ' '.join(f'{k} {float(v):.3f}' for k, v in L.items()) + f' ({time.time() - t0:.0f}s, {(seen - seen0) / max(time.time() - t0, 1e-9):.2f} scenes/s)', flush=True)

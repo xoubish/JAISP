@@ -31,30 +31,31 @@ from ..data import jacobian
 from ..pixel_psf import normalize_kernel
 from ..detcat.common import tangent_arcsec
 from ..detcat.prepare import load_inputs, _crop
-from .scenes import OUT, TILES, SEED, HERE, regions_of, require_mer, _reference_one, load_scene
+from .scenes import OUT, TILES, SEED, HERE, regions_of, require_mer, _reference_one, load_scene, tile_dir, REGION_OFFSET
 
 SIGMAS = {b: v['sigma_px'] for b, v in json.loads((HERE.parent / 'runs/q1_all_bands/psf_calibration.json').read_text()).items()}
 NEIGHBOR_ARCSEC, MAX_SOURCES, HALF_ARCSEC = 14., 40, 6.
 EUCLID_K, RUBIN_RADIUS = 21, 18          # native GRID stamp size; Rubin Gaussian kernel radius (37 px)
 
 
-def split_dir(split): return OUT / f'{split}_v2'
+def split_dir(split, version='v2'): return OUT / f'{split}_{version}'
 
 
 # ----------------------------------------------------------------------------- donor library
 def _library_region(task):
-    out, region, snr = task
+    out, region, snr, support_fn = task[:4]; radius = task[4] if len(task) > 4 else 2.3
+    root = tile_dir(region).parent; local = region % REGION_OFFSET
     try:
-        emp.make_library(out, TILES, snr, regions={region}, exclude_point_like=False)
+        emp.make_library(out, root, snr, regions={local}, exclude_point_like=False, support_fn=support_fn, support_radius=radius)
         return region, None
     except RuntimeError as exc:   # 'No qualified donors'
         return region, str(exc)
 
 
-def library(split, snr, workers):
-    out = split_dir(split); tmp = out / 'by_region'; tmp.mkdir(parents=True, exist_ok=True)
-    regions = regions_of(split)
-    tasks = [(tmp / f'region_{r:03d}', r, snr) for r in regions if not (tmp / f'region_{r:03d}' / 'donor_bands.csv').exists()]
+def library(split, snr, workers, version='v2', support_fn=None, radius=2.3, regions=None):
+    out = split_dir(split, version); tmp = out / 'by_region'; tmp.mkdir(parents=True, exist_ok=True)
+    regions = regions_of(split) if regions is None else list(regions)
+    tasks = [(tmp / f'region_{r:03d}', r, snr, support_fn, radius) for r in regions if not (tmp / f'region_{r:03d}' / 'donor_bands.csv').exists()]
     with ProcessPoolExecutor(max_workers=workers) as pool:
         for region, err in pool.map(_library_region, tasks):
             print(f'region {region}: {err or "done"}', flush=True)
@@ -67,11 +68,11 @@ def library(split, snr, workers):
         if not (src / 'donor_bands.csv').exists(): continue
         b = pd.read_csv(src / 'donor_bands.csv')
         for path in sorted((src / 'donors').glob('donor_*.npz')):
-            d = emp.read_npz(path); old = int(d['donor']); d['donor'] = k
+            d = emp.read_npz(path); old = int(d['donor']); d['donor'] = k; d['region'] = r   # global region number (>= 1000 for the second root)
             np.savez_compressed(dest / f'donor_{k:05d}.npz', **d)
             bands.append(b[b.donor == old].assign(donor=k)); k += 1
     pd.concat(bands).to_csv(out / 'donor_bands.csv', index=False)
-    q = emp.donor_quality(out, TILES)
+    q = emp.donor_quality(out, TILES, region_dir=tile_dir)
     # v2 suitability: a unique MER match and a stable centre; stars and weak cross-band donors allowed.
     bad = q.reasons.fillna('').str.contains('no_unique_MER_galaxy_match|large_donor_center_shift')
     q['suitable_v2'] = ~bad; q['point_like'] = q.point_like_prob.fillna(0) > .5
@@ -90,17 +91,27 @@ def _pad_kernel(k, size):
     c = (size - n) // 2; out[c:c + n, c:c + n] = k; return emp.unit(out)
 
 
-def _design(rng, donor_snrs):
-    """Primary donor first; target S/N log-uniform, at most 3x the donor's own S/N (keeps smooth faint reconstructions from being shown very bright)."""
+def _design(rng, donor_snrs, native=False, big=None, p_big=0.):
+    """Primary donor first; target S/N log-uniform, at most 3x the donor's own S/N (keeps smooth faint reconstructions from being shown very bright).
+
+    native=True (v3): every injected source near its own measured S/N (bright donors within a factor 2,
+    donors below S/N 30 between 0.15x and 2x), so the size-brightness relation follows that of the real sky."""
     kind = str(rng.choice(['isolated', 'pair', 'triple'], p=[.35, .55, .10])); n = dict(isolated=1, pair=2, triple=3)[kind]
     picks = rng.choice(len(donor_snrs), n, replace=False)
+    if big is not None and p_big and rng.random() < p_big:    # v3b: oversample bright extended primaries
+        first = int(rng.choice(np.flatnonzero(big)))
+        picks = np.array([first] + [int(k) for k in picks if k != first][:n - 1], dtype=int)
+    # Compact faint donors (own S/N < 30) may be dimmed further (to 0.15x): they stay compact, so the faint end is
+    # populated without showing large bright galaxies at faint fluxes. Bright donors stay within a factor 2.
+    native_snr = lambda k: max(1.5, donor_snrs[k] * float(np.exp(rng.uniform(np.log(.15 if donor_snrs[k] < 30 else .5), np.log(2.)))))
     hi = min(80., 3 * donor_snrs[picks[0]])
-    snr = float(np.exp(rng.uniform(np.log(1.5), np.log(max(hi, 2.)))))
+    snr = native_snr(picks[0]) if native else float(np.exp(rng.uniform(np.log(1.5), np.log(max(hi, 2.)))))
     offsets = [rng.uniform(-.05, .05, 2)]
     for _ in range(n - 1):
         sep = rng.uniform(.3, 2.); ang = rng.uniform(0, 2 * np.pi); offsets.append(offsets[0] + sep * np.array([np.cos(ang), np.sin(ang)]))
     ratios = []
     for k in picks[1:]:
+        if native: ratios.append(native_snr(k) / snr); continue
         r = np.exp(rng.uniform(np.log(.1), np.log(10.)))
         ratios.append(min(r, 3 * donor_snrs[k] / snr))     # neighbour S/N also capped at 3x its own
     return dict(kind=kind, n=n, picks=picks, snr=snr, offsets=np.array(offsets), ratios=np.array(ratios))
@@ -110,7 +121,7 @@ _TILE = {}
 
 
 def _tile(region):
-    if region not in _TILE: _TILE.clear(); _TILE[region] = load_inputs(TILES / f'region_{region:03d}')
+    if region not in _TILE: _TILE.clear(); _TILE[region] = load_inputs(tile_dir(region))
     return _TILE[region]
 
 
@@ -141,7 +152,8 @@ def _render_scene(rng, design, ds, frame, real):
     for b in BANDS:
         f = frame[b]; shape = f['image'].shape
         pp = [emp.render(d[b + '__latent'], d[b + '__matrix'], f['matrix'], f['positions'][j], shape, kernel=f['inj_kernel'][j],
-                         angle=f['angle'], extra_sigma_arcsec=f['broadening'], donor_center=d[b + '__center'], kernel_matrix=f['kernel_matrix'][j])
+                         angle=f['angle'], extra_sigma_arcsec=f['broadening'], donor_center=d[b + '__center'], kernel_matrix=f['kernel_matrix'][j],
+                         intrinsic_angle=f.get('intrinsic_angle', [0.] * len(ds))[j], flip=bool(f.get('flip', [False] * len(ds))[j]))
               for j, d in enumerate(ds)]
         profiles[b] = np.array(pp)
     vis = frame['euclid_VIS']
@@ -201,8 +213,8 @@ def _real_frame(inputs, rng, design, ds):
     return frame, all_sky, meta
 
 
-def _blank_frame(bg, rng, design, ds):
-    angle = float(rng.uniform(0, 2 * np.pi)); be = float(rng.uniform(0, .05)); br = float(rng.uniform(0, .2))
+def _blank_frame(bg, rng, design, ds, rotate_psf=True):
+    angle = float(rng.uniform(0, 2 * np.pi)) if rotate_psf else 0.; be = float(rng.uniform(0, .05)); br = float(rng.uniform(0, .2))
     inj_sky = bg['sky'] + design['offsets'] / np.array([3600 * np.cos(np.deg2rad(bg['sky'][1])), 3600])
     frame = {}
     for b in BANDS:
@@ -219,13 +231,18 @@ def _blank_frame(bg, rng, design, ds):
 
 
 def _export_one(task):
-    out, scene_id, mode, where, donors, donor_snrs, split_seed = task
+    out, scene_id, mode, where, donors, donor_snrs, split_seed = task[:7]; native = task[7] if len(task) > 7 else False
+    opts = task[8] if len(task) > 8 else {}; augment = opts.get('augment', False)
     rng = np.random.default_rng([SEED, 20, split_seed, scene_id])
     for attempt in range(5):
         try:
-            design = _design(rng, donor_snrs); ds = [emp.read_npz(donors[k]) for k in design['picks']]
+            design = _design(rng, donor_snrs, native, opts.get('big'), opts.get('p_big', 0.)); ds = [emp.read_npz(donors[k]) for k in design['picks']]
             if mode == 'real': frame, sky, meta = _real_frame(_tile(where), rng, design, ds)
-            else: frame, sky, meta = _blank_frame(emp.read_npz(where), rng, design, ds)
+            else: frame, sky, meta = _blank_frame(emp.read_npz(where), rng, design, ds, rotate_psf=not augment)
+            if augment:   # v3b: every injected galaxy at a random orientation and handedness, PSF unchanged
+                angles = rng.uniform(0, 2 * np.pi, len(ds)); flips = rng.random(len(ds)) < .5
+                for b in BANDS: frame[b]['intrinsic_angle'] = angles; frame[b]['flip'] = flips
+                meta = dict(meta, augmented=True)
             arrays, rows = _render_scene(rng, design, ds, frame, mode == 'real')
             break
         except ValueError as exc:
@@ -238,26 +255,29 @@ def _export_one(task):
     return manifest, [dict(scene=scene_id, **r) for r in rows], None
 
 
-def export(split, count, workers, real_fraction=.75):
-    out = split_dir(split); (out / 'scenes').mkdir(parents=True, exist_ok=True)
-    q = pd.read_csv(out / 'donor_quality.csv'); q = q[q.suitable_v2].sort_values('donor')
-    donors = [out / 'donors' / f'donor_{int(k):05d}.npz' for k in q.donor]; snrs = q.selection_snr.to_numpy(float)
+def export(split, count, workers, real_fraction=.75, version='v2', native=False, augment=False, p_big=0., donors_from=None, regions=None):
+    out = split_dir(split, version); (out / 'scenes').mkdir(parents=True, exist_ok=True)
+    lib = split_dir(split, donors_from or version)       # v3b reuses the v3 donor library
+    q = pd.read_csv(lib / 'donor_quality.csv'); q = q[q.suitable_v2].sort_values('donor')
+    donors = [lib / 'donors' / f'donor_{int(k):05d}.npz' for k in q.donor]; snrs = q.selection_snr.to_numpy(float)
+    big = ((q.vis_mag < 23) & (q.r50_arcsec > .5)).to_numpy() if p_big else None
+    opts = dict(augment=augment, big=big, p_big=p_big)
     point_like = dict(zip(q.donor.astype(int), q.point_like))
     backgrounds = sorted((OUT / split / 'backgrounds').glob('background_*.npz'))
-    regions = regions_of(split); rng = np.random.default_rng([SEED, 21, {'train': 1, 'val': 2}[split]])
+    regions = regions_of(split) if regions is None else list(regions); rng = np.random.default_rng([SEED, 21, {'train': 1, 'val': 2}[split]])
     modes = np.where(rng.random(count) < real_fraction, 'real', 'blank')
     where = [int(regions[rng.integers(len(regions))]) if m == 'real' else str(backgrounds[rng.integers(len(backgrounds))]) for m in modes]
     done = set(pd.read_csv(out / 'scenes.csv').scene) if (out / 'scenes.csv').exists() else set()   # only scenes with a manifest row count as done
-    tasks = [(out, i, modes[i], where[i], donors, snrs, {'train': 1, 'val': 2}[split]) for i in range(count) if i not in done]
+    tasks = [(out, i, modes[i], where[i], donors, snrs, {'train': 1, 'val': 2}[split], native, opts) for i in range(count) if i not in done]
     tasks.sort(key=lambda t: (t[2], str(t[3])))     # group by tile so workers reuse the loaded tile
-    print(f'{split}_v2: {len(donors)} donors ({int(q.point_like.sum())} point-like), {len(regions)} tiles, {len(backgrounds)} blank patches; '
+    print(f'{split}_{version}: {len(donors)} donors ({int(q.point_like.sum())} point-like), {len(regions)} tiles, {len(backgrounds)} blank patches; '
           f'{len(tasks)} scenes to make ({(modes == "real").mean():.0%} real-scene)', flush=True)
     manifests, rows, failures = [], [], []; t0 = time.time()
     with ProcessPoolExecutor(max_workers=workers) as pool:
         for k, (m, r, f) in enumerate(pool.map(_export_one, tasks, chunksize=8)):
             if m: manifests.append(m); rows.extend(r)
             if f: failures.append(f)
-            if (k + 1) % 2000 == 0: print(f'{split}_v2: {k + 1}/{len(tasks)} ({time.time() - t0:.0f}s, {len(failures)} failed)', flush=True)
+            if (k + 1) % 2000 == 0: print(f'{split}_{version}: {k + 1}/{len(tasks)} ({time.time() - t0:.0f}s, {len(failures)} failed)', flush=True)
     for m in manifests: m['primary_point_like'] = bool(point_like[int(m['donors'].split(';')[0])])
     def merge(name, frame, keys):
         path = out / name
@@ -265,19 +285,19 @@ def export(split, count, workers, real_fraction=.75):
         frame.sort_values(keys).to_csv(path, index=False)
     if manifests: merge('scenes.csv', pd.DataFrame(manifests), ['scene']); merge('truth.csv', pd.DataFrame(rows), ['scene', 'source', 'band'])
     (out / 'export_failures.json').write_text(json.dumps(failures, indent=2))
-    print(f'{split}_v2: done, {len(failures)} failed scenes', flush=True)
+    print(f'{split}_{version}: done, {len(failures)} failed scenes', flush=True)
 
 
-def reference(workers, limit=800):
-    out = split_dir('val'); paths = sorted((out / 'scenes').glob('scene_*.npz'))[:limit]
+def reference(workers, limit=800, version='v2'):
+    out = split_dir('val', version); paths = sorted((out / 'scenes').glob('scene_*.npz'))[:limit]
     rows, failures = [], []
     with ProcessPoolExecutor(max_workers=workers) as pool:
         for k, (r, f) in enumerate(pool.map(_reference_one, paths, chunksize=2)):
             rows.extend(r); failures += [f] if f else []
-            if (k + 1) % 200 == 0: print(f'mixture reference val_v2: {k + 1}/{len(paths)}', flush=True)
+            if (k + 1) % 200 == 0: print(f'mixture reference val_{version}: {k + 1}/{len(paths)}', flush=True)
     pd.DataFrame(rows).to_csv(out / 'reference_mixture.csv', index=False)
     (out / 'reference_failures.json').write_text(json.dumps(failures, indent=2))
-    print(f'val_v2: {len(failures)} mixture failures', flush=True)
+    print(f'val_{version}: {len(failures)} mixture failures', flush=True)
 
 
 def main():

@@ -30,6 +30,17 @@ from .. import empirical as emp
 
 HERE = Path(__file__).resolve().parent
 TILES = HERE.parent / 'runs/amortised_scarlet/training_tiles'
+TILES2 = HERE.parent / 'runs/amortised_scarlet/training_tiles_2'   # 65 extra training tiles (v4); regions numbered 1000 + i
+REGION_OFFSET = 1000
+
+
+def tile_dir(region):
+    region = int(region)
+    return TILES2 / f'region_{region - REGION_OFFSET:03d}' if region >= REGION_OFFSET else TILES / f'region_{region:03d}'
+
+
+def extra_regions():
+    return [REGION_OFFSET + int(f.parent.name.split('_')[1]) for f in sorted(TILES2.glob('region_*/tile_inputs.npz'))]
 OUT = Path(os.environ.get('JAISP_TRUTH_SCARLET_OUT', HERE.parent / 'runs/truth_scarlet'))
 SEED = 20261009
 EUCLID = tuple(b for b in BANDS if b.startswith('euclid_'))
@@ -48,7 +59,7 @@ def make_split(n_val=8):
 
 
 def require_mer(regions):
-    missing = [r for r in regions if not (TILES / f'region_{r:03d}/mer_match.csv').exists()]
+    missing = [r for r in regions if not (tile_dir(r) / 'mer_match.csv').exists()]
     if missing: raise SystemExit(f'MER match missing for regions {missing}: run the `mer` stage until it completes')
 
 

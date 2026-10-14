@@ -9,6 +9,7 @@ with the VIS profiles held fixed. Positions are frozen at the astrometry-head
 values so both photometers measure the same source list at the same centroids.
 """
 import argparse
+import os
 import json
 import sys
 import time
@@ -31,7 +32,7 @@ from euclid_phot.selection import ModelSelector, run_model_selection  # noqa: E4
 from euclid_phot.nisp import _clone_for_band  # noqa: E402
 from euclid_phot.spatial_psf import SpatialPixelizedPSF  # noqa: E402
 
-OUT = ROOT / 'models/photometry/self_supervised/runs/detection_catalog'
+OUT = Path(os.environ.get('JAISP_DETCAT_OUT', ROOT / 'models/photometry/self_supervised/runs/detection_catalog'))   # same override as common.py
 EUCLID = ('VIS', 'Y', 'J', 'H')
 UJY_PER_NMGY = 3.631
 

@@ -29,6 +29,8 @@ def main():
     p.add_argument('--training', type=int, default=0, help='Select this many stride-2 tiles OUTSIDE the held-out partitions (for training a new head)')
     p.add_argument('--exclude', type=str, default='', help='tiles.json of another selection whose tiles must not overlap this one')
     p.add_argument('--seed', type=int, default=20261003)
+    p.add_argument('--exclude-same', type=str, default='', help='tiles.json whose own tiles (centres within 10") are excluded; neighbours sharing a 6" edge strip stay allowed')
+    p.add_argument('--allow-prior-tiles', action='store_true', help="Keep tiles overlapping the mixture prior's train/val tiles (fine for heads that never used them)")
     args = p.parse_args()
     OUT.mkdir(parents=True, exist_ok=True)
     pairs = discover_tile_pairs(str(ROOT / 'data/rubin_tiles_all'), str(ROOT / 'data/euclid_tiles_all_q1'))
@@ -50,13 +52,16 @@ def main():
             if partition is not None: continue
             partition = 'training'
         elif partition is None: continue
-        if name in prior_tiles: continue
-        if len(prior_centers) and np.abs(tangent_arcsec(prior_centers, (ra, dec))).max(axis=1).min() < 108.4 - 14: continue  # prior scenes stayed 14" inside their tiles
+        if name in prior_tiles and not args.allow_prior_tiles: continue
+        if not args.allow_prior_tiles and len(prior_centers) and np.abs(tangent_arcsec(prior_centers, (ra, dec))).max(axis=1).min() < 108.4 - 14: continue  # prior scenes stayed 14" inside their tiles
         chosen.append(dict(tile=name, rubin=str(rubin), euclid=str(euclid), ra=ra, dec=dec,
                            patch=patch, partition=partition, detections=int(len(labels[name][0]))))
     if args.exclude:
         other = np.array([[t['ra'], t['dec']] for t in read_json(args.exclude)['tiles']])
         chosen = [t for t in chosen if np.abs(tangent_arcsec(other, (t['ra'], t['dec']))).max(axis=1).min() >= 108.4 - 1]
+    if args.exclude_same:
+        other = np.array([[t['ra'], t['dec']] for t in read_json(args.exclude_same)['tiles']])
+        chosen = [t for t in chosen if np.linalg.norm(tangent_arcsec(other, (t['ra'], t['dec'])), axis=1).min() >= 10.]
     if args.training:
         rng = np.random.default_rng(args.seed); rng.shuffle(chosen); chosen = sorted(chosen[:args.training], key=lambda t: t['tile'])
     for i, item in enumerate(chosen): item['region'] = i
