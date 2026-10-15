@@ -196,4 +196,4 @@ class TruthScarlet:
             g = grad / grad.flatten(1).abs().amax(1).clamp_min(1e-30)[:, None, None, None]
             params = head.refine_step(params, g.detach(), feat, self.refine_scale)
             if head.per_band: residual = residual_windows(scene, results, self.device)
-        return dict(results=results, total=total, templates=templates, params=params, offsets=head.offsets(params))
+        return dict(results=results, total=total, templates=templates, params=params, offsets=head.offsets(params), morph=morph)
