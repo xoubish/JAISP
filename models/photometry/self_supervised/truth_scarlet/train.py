@@ -85,7 +85,10 @@ def scene_loss(out, scene, truth, device, a):
         target = torch.as_tensor(t['profiles'], device=device, dtype=torch.float64).reshape(len(t['flux']), -1)[idx] * f_true[:, None]
         model = (out['templates'][band][:, idx].double() * flux[None]).T
         norm = ((target * w) ** 2).sum(1).clamp_min(a.template_floor)
-        template_terms.append((((model - target) * w) ** 2).sum(1) / norm)
+        term = (((model - target) * w) ** 2).sum(1) / norm
+        # Bright sources: their shapes are measurable, so their per-source image error counts more (up to template_wmax x).
+        if a.template_snr > 0: term = term * (snr / a.template_snr).clamp(1., a.template_wmax)
+        template_terms.append(term)
     if not flux_terms: raise ValueError('no truth-labelled source inside any band')
     return dict(flux=torch.cat(flux_terms).mean(), template=torch.cat(template_terms).mean(), chi2=out['total'].double(),
                 frac=torch.cat(fracs).mean() if fracs else out['total'].new_zeros(()).double(),
@@ -321,6 +324,8 @@ def main():
     p.add_argument('--lambda-flux', type=float, default=1.); p.add_argument('--lambda-template', type=float, default=1.)
     p.add_argument('--lambda-chi2', type=float, default=.1); p.add_argument('--lambda-bias', type=float, default=.5)
     p.add_argument('--huber', type=float, default=3.); p.add_argument('--template-floor', type=float, default=25.)
+    p.add_argument('--template-snr', type=float, default=0., help='S/N at which the per-source image term starts to be up-weighted (0: off)')
+    p.add_argument('--template-wmax', type=float, default=10., help='maximum up-weight of the per-source image term for bright sources')
     p.add_argument('--lambda-frac', type=float, default=0., help='bright-end fractional-error term (sources with true S/N > --frac-snr)')
     p.add_argument('--frac-snr', type=float, default=10.); p.add_argument('--frac-scale', type=float, default=20.)
     p.add_argument('--bias-mode', choices=('batch', 'ema'), default='batch', help="'ema': running-mean dual-ascent bias correction per S/N bin and band")
@@ -340,7 +345,7 @@ def main():
     name = a.name or a.variant; out_dir = Path(a.output or data / 'runs' / name); out_dir.mkdir(parents=True, exist_ok=True)
     if a.variant == 'A0' and not (a.eval_only and a.init): raise SystemExit('A0 is the existing chi-square checkpoint: use --eval-only --init <ckpt>')
 
-    shape_bounds = dict(perturbation=flags.get('perturbation', .5), eps_bound=flags.get('eps_bound', .2), centroid=flags.get('centroid', False))
+    shape_bounds = dict(perturbation=flags.get('perturbation', .5), eps_bound=flags.get('eps_bound', .2), centroid=flags.get('centroid', False), point=flags.get('point', False))
     head = TruthScarletHead(width=a.width, steps=a.steps, per_band=flags['per_band'], implicit_psf=flags['implicit_psf'], **shape_bounds).to(device)
     if a.init:
         state = torch.load(ROOT / a.init if not Path(a.init).is_absolute() else a.init, map_location=device, weights_only=False)['head']

@@ -12,6 +12,10 @@ Variants (see architecture_brainstorm/README.md):
     A6  A5 + a bounded per-source centroid correction (|dx|,|dy| <= 0.2", refined with the shape),
         applied to the template placement in every band; trained with realistic position jitter
 
+    A7  A6 + a point-source template per source: the band PSF itself, Fourier-shifted to the corrected
+        sub-pixel position, mixed with the extended template by a learned point-like weight in [0,1].
+        A shape on the 0.1" grid cannot be a point source (it broadens the VIS PSF by ~8%); this can.
+
 Fluxes are never predicted: every variant ends in the same signed linear solve
 with a fixed robust background (amortised_scarlet.scene_fit).
 """
@@ -30,7 +34,8 @@ VARIANTS = dict(A0=dict(per_band=False, foundation=True, implicit_psf=False),
                 A3=dict(per_band=True, foundation=False, implicit_psf=False),
                 A4=dict(per_band=True, foundation=True, implicit_psf=True),
                 A5=dict(per_band=True, foundation=True, implicit_psf=False, perturbation=2.0, eps_bound=1.0),
-                A6=dict(per_band=True, foundation=True, implicit_psf=False, perturbation=2.0, eps_bound=1.0, centroid=True))
+                A6=dict(per_band=True, foundation=True, implicit_psf=False, perturbation=2.0, eps_bound=1.0, centroid=True),
+                A7=dict(per_band=True, foundation=True, implicit_psf=False, perturbation=2.0, eps_bound=1.0, centroid=True, point=True))
 
 
 def morph_grid_points(d, device):
@@ -73,9 +78,13 @@ class TruthScarletHead(ScarletHead):
     version = 'truth_v1'
 
     def __init__(self, width=64, steps=2, per_band=False, implicit_psf=False, band_width=48, embed=8,
-                 size_bound=.3, eps_bound=.2, perturbation=.5, centroid=False, centroid_bound=.2):
+                 size_bound=.3, eps_bound=.2, perturbation=.5, centroid=False, centroid_bound=.2, point=False):
         super().__init__(width=width, steps=steps, perturbation=perturbation)
-        self.centroid = centroid; self.centroid_bound = centroid_bound
+        self.centroid = centroid; self.centroid_bound = centroid_bound; self.point = point
+        if point:   # point-like weight starts at sigmoid(-4) ~ 0.02 so an A6 checkpoint is reproduced at initialisation
+            self.point_out = nn.Linear(2 * width, 1); self.refine_point = nn.Linear(2 * width, 1)
+            for m in (self.point_out, self.refine_point): nn.init.zeros_(m.weight); nn.init.zeros_(m.bias)
+            with torch.no_grad(): self.point_out.bias.fill_(-4.)
         if centroid:   # zero-initialised: the correction starts at exactly zero and is learned
             self.centroid_out = nn.Linear(2 * width, 2); self.refine_centroid = nn.Linear(2 * width, 2)
             for m in (self.centroid_out, self.refine_centroid): nn.init.zeros_(m.weight); nn.init.zeros_(m.bias)
@@ -97,6 +106,7 @@ class TruthScarletHead(ScarletHead):
     def forward(self, bottleneck, stem, raw):
         params, feat = super().forward(bottleneck, stem, raw)
         if self.centroid: params['centroid'] = self.centroid_out(self.pooled(feat))
+        if self.point: params['point'] = self.point_out(self.pooled(feat))[:, 0]
         return params, feat
 
     def refine_step(self, params, g, feat, scale):
@@ -104,7 +114,12 @@ class TruthScarletHead(ScarletHead):
         h = self.refine(torch.cat((comps * MORPH_SIZE, g, feat), 1))
         out = dict(vector=params['vector'] + scale * self.refine_vector(self.pooled(h)), eps=params['eps'] + scale * self.refine_eps(h))
         if self.centroid: out['centroid'] = params['centroid'] + scale * self.refine_centroid(self.pooled(h))
+        if self.point: out['point'] = params['point'] + scale * self.refine_point(self.pooled(h))[:, 0]
         return out
+
+    def point_weight(self, params):
+        """Per-source weight of the point-source template in [0,1], or None."""
+        return torch.sigmoid(params['point']) if self.point else None
 
     def offsets(self, params):
         """Per-source centroid correction in tangent-plane arcsec [N,2], or None."""
@@ -166,6 +181,35 @@ def render(scene, morph, norms, device, convolve=True, offsets=None):
     return templates
 
 
+def render_points(scene, device, offsets=None):
+    """Unit-flux PSF templates at each source's sub-pixel (corrected) position: {band: [H*W, N]}.
+    The band kernel is pasted at the nearest pixel and Fourier-shifted by the remaining fraction,
+    which keeps the template exact and differentiable in the position."""
+    templates = {}
+    for band, d in scene['bands'].items():
+        n = len(d['positions']); s2p = d['sky_to_pixel'].to(device); pos = d['positions'].to(device)
+        if offsets is not None: pos = pos + offsets @ s2p.T
+        kernels = band_kernels(d, n, device); k = kernels.shape[-1]; half = k // 2; h, w = d['image'].shape
+        ip = torch.floor(pos.detach() + .5); fp = pos - ip
+        canvas = torch.zeros(n, h, w, dtype=kernels.dtype, device=device)
+        for i in range(n):
+            x0, y0 = int(ip[i, 0]), int(ip[i, 1])
+            ys, ye = max(y0 - half, 0), min(y0 + half + 1, h); xs, xe = max(x0 - half, 0), min(x0 + half + 1, w)
+            if ye <= ys or xe <= xs: continue
+            canvas[i, ys:ye, xs:xe] = kernels[i, ys - (y0 - half):ye - (y0 - half), xs - (x0 - half):xe - (x0 - half)]
+        fy = torch.fft.fftfreq(h, device=device)[None, :, None]; fx = torch.fft.rfftfreq(w, device=device)[None, None, :]
+        phase = torch.exp(-2j * math.pi * (fy * fp[:, 1, None, None] + fx * fp[:, 0, None, None]))
+        shifted = torch.fft.irfft2(torch.fft.rfft2(canvas) * phase, s=(h, w))
+        templates[band] = shifted.reshape(n, -1).T
+    return templates
+
+
+def mix_templates(extended, points, weight):
+    """(1 - w) * extended + w * point template per source and band."""
+    if points is None or weight is None: return extended
+    return {b: extended[b] * (1 - weight)[None] + points[b] * weight[None] for b in extended}
+
+
 class TruthScarlet:
     """Encoder + head + renderer + linear solve, shared by training and evaluation."""
     def __init__(self, head, encoder, device, foundation=True):
@@ -190,10 +234,11 @@ class TruthScarlet:
             band_out = head.band_branch(feat, raw, residual, psf) if head.per_band else None
             morph, norms = head.band_morphologies(params, band_out)
             templates = render(scene, morph, norms, self.device, convolve=not head.implicit_psf, offsets=head.offsets(params))
+            if head.point: templates = mix_templates(templates, render_points(scene, self.device, head.offsets(params)), head.point_weight(params))
             results, total = scene_fit(scene, templates, self.device, fixed_background=True)
             if k == steps: break
             grad, = torch.autograd.grad(total, params['eps'], retain_graph=True)
             g = grad / grad.flatten(1).abs().amax(1).clamp_min(1e-30)[:, None, None, None]
             params = head.refine_step(params, g.detach(), feat, self.refine_scale)
             if head.per_band: residual = residual_windows(scene, results, self.device)
-        return dict(results=results, total=total, templates=templates, params=params, offsets=head.offsets(params), morph=morph)
+        return dict(results=results, total=total, templates=templates, params=params, offsets=head.offsets(params), morph=morph, point_weight=head.point_weight(params))
