@@ -21,7 +21,7 @@ Release 1 MER mosaics (VIS, NISP Y/J/H) served by IRSA.
 
 Load the foundation with `models/load_foundation.py:load_foundation(path)`; the
 heads are loaded by the scripts below. Inference does not need a GPU: the frozen
-encoder takes ~1 min per 512-px tile on 8 CPU cores, ~0.2 s on one GPU (bf16,
+encoder takes ~1 min per tile (102" on a side) on 8 CPU cores, ~0.2 s on one GPU (bf16,
 <5 GB).
 
 ## Catalogs (`catalogs/`)
