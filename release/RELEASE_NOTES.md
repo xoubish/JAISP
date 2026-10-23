@@ -5,6 +5,7 @@ Rubin–Euclid Foundation Model for Cross-Instrument Source Detection and
 Astrometry* (ApJ, submitted). Code is BSD 3-Clause; the attached assets are
 CC BY 4.0 (`LICENSE-DATA`). See `release/README.md` in the repository for a
 description of every file and the commands that reproduce the catalogs.
+Archived on Zenodo: https://doi.org/10.5281/zenodo.23598660
 
 ## Assets
 

@@ -15,6 +15,7 @@
   "license": "BSD-3-Clause",
   "keywords": ["astronomy", "Rubin Observatory", "Euclid", "foundation model", "source detection", "astrometry", "joint survey processing"],
   "related_identifiers": [
+    {"identifier": "https://github.com/xoubish/JAISP/releases/tag/v1.0", "relation": "isIdenticalTo", "resource_type": "software"},
     {"identifier": "https://github.com/xoubish/JAISP", "relation": "isSupplementTo", "resource_type": "software"}
   ]
 }

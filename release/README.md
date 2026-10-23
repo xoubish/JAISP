@@ -4,7 +4,7 @@ Trained weights, catalogs, and field maps accompanying
 Hemmati et al. (2026), *JAISP: A Joint Rubin–Euclid Foundation Model for
 Cross-Instrument Source Detection and Astrometry* (ApJ, submitted).
 Code: https://github.com/xoubish/JAISP (BSD 3-Clause). These products: CC BY 4.0
-(see `LICENSE-DATA`). Zenodo DOI: *to be added at the tagged release*.
+(see `LICENSE-DATA`). Zenodo DOI: https://doi.org/10.5281/zenodo.23598660
 
 All products were derived from public imaging only: Rubin LSST Data Preview 1
 `deep_coadd` tiles (tract 5063, ECDFS; EDF-S tract) and Euclid Quick Data
