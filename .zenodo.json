@@ -1,0 +1,20 @@
+{
+  "title": "JAISP: Joint AI Survey Processing. Rubin-Euclid foundation model, detection and astrometry heads, and catalogs",
+  "upload_type": "software",
+  "description": "Code, trained weights, detection lists, per-band positions, and cross-survey concordance-field maps accompanying Hemmati et al. (2026), 'JAISP: A Joint Rubin-Euclid Foundation Model for Cross-Instrument Source Detection and Astrometry'. The foundation model is a masked-band autoencoder trained on ten-band Rubin DP1 and Euclid Q1 imaging of the ECDFS field; frozen features drive a source-detection head and a VIS-anchored astrometry head. See release/README.md for a description of every file. Code: BSD 3-Clause. Weights, catalogs and maps: CC BY 4.0.",
+  "creators": [
+    {"name": "Hemmati, Shoubaneh", "affiliation": "IPAC, California Institute of Technology", "orcid": "0000-0003-2226-5395"},
+    {"name": "Helou, George", "affiliation": "IPAC, California Institute of Technology", "orcid": "0000-0003-3367-3415"},
+    {"name": "Lin, Yu-Heng", "affiliation": "IPAC, California Institute of Technology", "orcid": "0000-0001-8792-3091"},
+    {"name": "Akeson, Rachel", "affiliation": "IPAC, California Institute of Technology", "orcid": "0000-0001-9674-1564"},
+    {"name": "Dowell, Charles Darren", "affiliation": "Jet Propulsion Laboratory, California Institute of Technology", "orcid": "0009-0002-0098-6183"},
+    {"name": "Faisst, Andreas", "affiliation": "IPAC, California Institute of Technology", "orcid": "0000-0002-9382-9832"},
+    {"name": "Greene, Thomas", "affiliation": "IPAC, California Institute of Technology", "orcid": "0000-0002-8963-8056"},
+    {"name": "Shupe, David", "affiliation": "IPAC, California Institute of Technology", "orcid": "0000-0003-4401-0430"}
+  ],
+  "license": "BSD-3-Clause",
+  "keywords": ["astronomy", "Rubin Observatory", "Euclid", "foundation model", "source detection", "astrometry", "joint survey processing"],
+  "related_identifiers": [
+    {"identifier": "https://github.com/xoubish/JAISP", "relation": "isSupplementTo", "resource_type": "software"}
+  ]
+}
