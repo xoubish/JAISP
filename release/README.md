@@ -22,7 +22,10 @@ Release 1 MER mosaics (VIS, NISP Y/J/H) served by IRSA.
 Load the foundation with `models/load_foundation.py:load_foundation(path)`; the
 heads are loaded by the scripts below. Inference does not need a GPU: the frozen
 encoder takes ~1 min per tile (102" on a side) on 8 CPU cores, ~0.2 s on one GPU (bf16,
-<5 GB).
+<5 GB). CPU (fp32) and GPU (bf16) inference agree to numerical precision; detections
+scoring within ~0.01 of the 0.30 threshold can differ between the two.
+
+`SHA256SUMS` lists the checksum of every released file.
 
 ## Catalogs (`catalogs/`)
 
@@ -41,8 +44,11 @@ follow the paper's sign convention, VIS minus band (Eq. 2).
   (`ra_vis, dec_vis`), the raw and head-corrected offsets in mas
   (`dra_raw, ddec_raw, dra_head, ddec_head`), the head's predicted per-axis
   uncertainty (`sigma_head`, mas; uniformly conservative, see Sec. 5.3), and the
-  band S/N. The ECDFS table is deduplicated across tile overlaps (50 mas
-  clustering); the EDF-S table is not.
+  band S/N. Both tables are deduplicated across tile overlaps (50 mas
+  clustering of each band's entries, keeping the highest-S/N copy). ECDFS:
+  154,451 rows; EDF-S: 17,073 rows. Sky positions are stored in float64; the
+  paper's internal anchor files kept them in float32, so the clustering here
+  differs from the paper's by 32 entries out of 154k.
 * `jaisp_tiles_{ecdfs,edfs}.csv` — the tile grid (centres, Rubin pixel origins,
   MER tile ids) needed to regenerate the input tiles with the fetch scripts
   (`io/refetch_euclid_q1.py --tile-table ...` for Euclid from IRSA;

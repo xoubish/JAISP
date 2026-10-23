@@ -108,10 +108,12 @@ def dedup_anchors(
         keep = dedup_one_band(ra, dec, snr, radius_arcsec)
         before[band] = int(ra.size)
         after[band] = int(keep.sum())
-        for field in PER_BAND_FIELDS:
-            key = f"{band}_{field}"
-            arr = np.asarray(npz[key])
-            out[key] = arr[keep]
+        # Apply the mask to every per-band array of matching length (ra, dec,
+        # raw, head_resid, snr, tiles, and any extras such as sigma).
+        for key in list(npz.keys()):
+            if key.startswith(f"{band}_"):
+                arr = np.asarray(npz[key])
+                out[key] = arr[keep] if arr.shape[:1] == (ra.size,) else arr
 
     # Carry through any extra non-band keys (e.g. metadata) unchanged.
     for key, value in npz.items():
