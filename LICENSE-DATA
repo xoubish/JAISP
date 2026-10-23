@@ -1,0 +1,17 @@
+Trained model weights, catalogs, and field maps released with JAISP
+(the files attached to tagged GitHub releases and archived on Zenodo)
+are licensed under the Creative Commons Attribution 4.0 International
+License (CC BY 4.0): https://creativecommons.org/licenses/by/4.0/
+
+You are free to share and adapt these products for any purpose, provided
+you give appropriate credit by citing Hemmati et al. (2026), "JAISP: A Joint
+Rubin-Euclid Foundation Model for Cross-Instrument Source Detection and
+Astrometry", and the Zenodo DOI of the release you used.
+
+The source code in this repository is licensed separately under the
+BSD 3-Clause License (see LICENSE).
+
+The underlying imaging is public survey data: Rubin LSST Data Preview 1
+(NSF-DOE Vera C. Rubin Observatory) and Euclid Quick Data Release 1 (ESA /
+Euclid Consortium), each subject to its own data policy and acknowledgment
+requirements.

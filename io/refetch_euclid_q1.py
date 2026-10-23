@@ -32,6 +32,10 @@ Usage:
 
     # full EDF-S OOD set (72 tiles) -> data/edf_s_ood/euclid_tiles_edfs_q1/
     python io/refetch_euclid_q1.py --field edfs
+
+    # without the original tiles (public users): drive the fetch from the
+    # released tile-centre tables
+    python io/refetch_euclid_q1.py --field ecdfs --tile-table io/tile_tables/jaisp_tiles_ecdfs.csv
 """
 from __future__ import annotations
 
@@ -221,6 +225,10 @@ def main():
     ap.add_argument("--limit", type=int, default=None, help="max tiles per field (smoke test)")
     ap.add_argument("--smoke", action="store_true", help="write to *_q1_smoke dirs, don't touch real output")
     ap.add_argument("--overwrite", action="store_true", help="re-fetch tiles even if output NPZ exists")
+    ap.add_argument("--tile-table", type=str, default=None,
+                    help="CSV of tile centres (io/tile_tables/jaisp_tiles_<field>.csv) to use instead of "
+                         "existing NPZ files; this is the path for users without the original tiles")
+    ap.add_argument("--out-dir", type=str, default=None, help="override the output directory")
     args = ap.parse_args()
 
     fields = list(FIELDS) if args.field == "both" else [args.field]
@@ -230,7 +238,17 @@ def main():
         if args.smoke:
             out_dir = out_dir.parent / (out_dir.name + "_smoke")
         out_dir.mkdir(parents=True, exist_ok=True)
-        files = sorted(glob.glob(str(src / "*.npz")))
+        if args.out_dir:
+            out_dir = Path(args.out_dir)
+            out_dir.mkdir(parents=True, exist_ok=True)
+        if args.tile_table:
+            import csv
+            with open(args.tile_table) as fh:
+                rows = [r for r in csv.DictReader(l for l in fh if not l.startswith("#"))]
+            files = [(r["tile_id"], float(r["ra_center"]), float(r["dec_center"])) for r in rows]
+            src = args.tile_table
+        else:
+            files = sorted(glob.glob(str(src / "*.npz")))
         if args.limit:
             files = files[: args.limit]
         print(f"[{field}] {len(files)} tiles  src={src}  out={out_dir}", flush=True)
@@ -238,13 +256,17 @@ def main():
         n_ok = n_skip = n_fail = 0
         t0 = time.time()
         for i, f in enumerate(files):
-            tile_id = _tile_id_from_name(f)
+            if isinstance(f, tuple):
+                tile_id, ra, dec = f
+            else:
+                tile_id = _tile_id_from_name(f)
             out_fn = out_dir / f"{tile_id}_euclid.npz"
             if out_fn.exists() and not args.overwrite:
                 n_skip += 1
                 continue
-            d = np.load(f, allow_pickle=True)
-            ra, dec = float(d["ra_center"]), float(d["dec_center"])
+            if not isinstance(f, tuple):
+                d = np.load(f, allow_pickle=True)
+                ra, dec = float(d["ra_center"]), float(d["dec_center"])
             try:
                 bands, mer_tile_id = fetch_tile(ra, dec)
             except Exception as e:

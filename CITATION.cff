@@ -1,0 +1,33 @@
+cff-version: 1.2.0
+message: "If you use this software or its released weights and catalogs, please cite the paper below."
+title: "JAISP: Joint AI Survey Processing"
+authors:
+  - family-names: Hemmati
+    given-names: Shoubaneh
+    orcid: "https://orcid.org/0000-0003-2226-5395"
+    affiliation: "IPAC, California Institute of Technology"
+repository-code: "https://github.com/xoubish/JAISP"
+license: BSD-3-Clause
+preferred-citation:
+  type: article
+  title: "JAISP: A Joint Rubin-Euclid Foundation Model for Cross-Instrument Source Detection and Astrometry"
+  authors:
+    - family-names: Hemmati
+      given-names: Shoubaneh
+    - family-names: Helou
+      given-names: George
+    - family-names: Lin
+      given-names: Yu-Heng
+    - family-names: Akeson
+      given-names: Rachel
+    - family-names: Dowell
+      given-names: Charles Darren
+    - family-names: Faisst
+      given-names: Andreas
+    - family-names: Greene
+      given-names: Thomas
+    - family-names: Shupe
+      given-names: David
+  journal: "The Astrophysical Journal"
+  year: 2026
+  notes: "submitted"

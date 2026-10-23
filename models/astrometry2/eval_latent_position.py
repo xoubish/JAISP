@@ -604,8 +604,9 @@ def evaluate(args):
             ras, decs = vwcs.wcs_pix2world(
                 band_pos_valid[:, 0], band_pos_valid[:, 1], 0,
             )
-            anchors[band_name]['ra'].append(ras.astype(np.float32))
-            anchors[band_name]['dec'].append(decs.astype(np.float32))
+            # float64: float32 degrees quantize sky positions at ~10 mas
+            anchors[band_name]['ra'].append(np.asarray(ras, dtype=np.float64))
+            anchors[band_name]['dec'].append(np.asarray(decs, dtype=np.float64))
             anchors[band_name]['raw'].append(offset_valid.astype(np.float32))
             anchors[band_name]['head_resid'].append((offset_valid - pred_offset).astype(np.float32))
             anchors[band_name]['sigma'].append(pred_sigma.astype(np.float32))
