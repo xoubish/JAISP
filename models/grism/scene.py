@@ -8,6 +8,7 @@ smooth per-frame sensitivity ratio, and a background plane per frame region.
 from __future__ import annotations
 
 import glob
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -63,17 +64,85 @@ class TileStamps:
         return None, None
 
 
-def load_frame(base, dither, det, calib):
-    ptg = 13387 + dither
-    frame = glob.glob(str(Path(base) / f"products/3025/frames/EUC_SIR_W-SCIFRM_BKGSUB_3025_{ptg}_{dither}_*.fits.gz"))[0]
-    lt = h5py.File(sorted(glob.glob(str(Path(base) / f"products/3025/loctabs/EUC_SIR_W-LOCTAB_3025-{dither}-DET_{det}_*.h5")))[-1], "r")
-    geo = FrameGeometry.from_frame(frame, calib).set_yshifts(dict(lt["Yshifts"].attrs))
+def frame_key(obs, dither):
+    """Integer key for a (observation, dither) pair; keys < 10 mean observation 3025 (historical runs)."""
+    return int(dither) if int(obs) == 3025 else int(obs) * 10 + int(dither)
+
+
+def split_key(key):
+    key = int(key)
+    return (3025, key) if key < 10 else (key // 10, key % 10)
+
+
+def load_frame(base, key, det, calib):
+    """Load one BKGSUB frame (observation, dither) for one detector.  Location tables (Y-shifts) are
+    used when present (obs 3025); otherwise the per-detector Y-shift is 0 and the frame-level offset is
+    left to the alignment step."""
+    obs, dither = split_key(key)
+    frame = sorted(glob.glob(str(Path(base) / f"products/{obs}/frames/EUC_SIR_W-SCIFRM_BKGSUB_{obs}_[0-9][0-9][0-9][0-9][0-9]_{dither}_*.fits.gz")))[-1]
+    lts = sorted(glob.glob(str(Path(base) / f"products/{obs}/loctabs/EUC_SIR_W-LOCTAB_{obs}-{dither}-DET_{det}_*.h5")))
+    lt = h5py.File(lts[-1], "r") if lts else None
+    geo = FrameGeometry.from_frame(frame, calib)
+    if lt is not None:
+        geo.set_yshifts(dict(lt["Yshifts"].attrs))
     hd = fits.open(frame)
     sci = np.array(hd[f"DET{det}.SCI"].data, float); var = np.array(hd[f"DET{det}.VAR"].data, float)
     dq = np.array(hd[f"DET{det}.DQ"].data)
     bad = (dq != 0) | ~np.isfinite(var) | ~np.isfinite(sci) | (var <= 0)
-    return dict(dither=dither, det=det, geo=geo, lt=lt, sci=np.nan_to_num(sci), var=np.where(bad, 1e12, var), bad=bad,
-                grism=geo.grism, tilt=geo.tilt)
+    # cosmic rays / hot pixels not in DQ: sharp positive outliers against the 3x3 median
+    from scipy.ndimage import median_filter
+    s = np.nan_to_num(sci); med = median_filter(s, size=3)
+    sig = np.sqrt(np.where(bad, np.inf, np.maximum(var, 1e-3)))
+    cr = ((s - med) > 6 * sig) & ((s - med) > 2.0 * np.abs(med)) & ~bad
+    bad = bad | cr
+    return dict(dither=int(key), obs=obs, det=det, geo=geo, lt=lt, sci=np.nan_to_num(sci), var=np.where(bad, 1e12, var), bad=bad,
+                grism=geo.grism, tilt=geo.tilt, n_cr=int(cr.sum()), path=frame)
+
+
+def sky_catalog(base, obs=3025, cache=True):
+    """Union of the SIR location objects over every LOCTAB of `obs` (all dithers, all detectors):
+    the MER-selected source list of the pointing (id, ra, dec, type, sizes, Y/J/H mags)."""
+    cpath = Path(base) / f"products/{obs}/sky_catalog.json"
+    if cache and cpath.exists():
+        return json.loads(cpath.read_text())
+    cat = {}
+    for f in sorted(glob.glob(str(Path(base) / f"products/{obs}/loctabs/EUC_SIR_W-LOCTAB_{obs}-*-DET_*.h5"))):
+        with h5py.File(f, "r") as lt:
+            for s in catalog_from_loctab(lt):
+                if s["id"] not in cat:
+                    cat[s["id"]] = dict(id=s["id"], ra=s["ra"], dec=s["dec"], type=s["type"], amaj=s["amaj"], amin=s["amin"], mags=s["mags"])
+    out = list(cat.values())
+    if cache:
+        cpath.write_text(json.dumps(out))
+    return out
+
+
+def catalog_for_frame(fr, skycat, wrange=(11900.0, 19000.0), margin=40, max_sep_deg=0.6):
+    """Sources of `skycat` whose 1st or 0th order trace lands on this frame's detector, with bounding
+    boxes computed from our geometry (same dict format as catalog_from_loctab)."""
+    geo = fr["geo"]; det = fr["det"]
+    # keep only sources near the pointing: the 6x6 optical polynomials extrapolate far-off sources
+    # back onto the detectors (NISP half-diagonal 0.52 deg)
+    pra, pdec = [float(v) for v in geo.opt.wcs.wcs.crval]
+    skycat = [s for s in skycat
+              if ((s["ra"] - pra) * np.cos(np.deg2rad(pdec))) ** 2 + (s["dec"] - pdec) ** 2 < max_sep_deg ** 2]
+    ra = np.array([s["ra"] for s in skycat]); dec = np.array([s["dec"] for s in skycat])
+    out = []
+    boxes = {}
+    for order in (1, 0):
+        lam = np.array(wrange)
+        _, pos_mm, _ = geo.trace_mm(ra, dec, lam, order, det_id=det)
+        pix = np.stack([geo.det.mm_to_pix(pos_mm[i], det) for i in range(len(ra))])   # (N, 2, 2)
+        lo = pix.min(axis=1); hi = pix.max(axis=1)
+        on = (hi[:, 0] >= -margin) & (lo[:, 0] <= 2040 + margin) & (hi[:, 1] >= -margin) & (lo[:, 1] <= 2040 + margin)
+        boxes[order] = (lo, hi, on)
+    for i, s in enumerate(skycat):
+        bb1 = np.array([boxes[1][0][i], boxes[1][1][i]]) if boxes[1][2][i] else None
+        bb0 = np.array([boxes[0][0][i], boxes[0][1][i]]) if boxes[0][2][i] else None
+        if bb1 is None and bb0 is None:
+            continue
+        out.append(dict(s, bb1=bb1, bb0=bb0))
+    return out
 
 
 def catalog_from_loctab(lt):
@@ -151,7 +220,7 @@ class GrismScene:
         self.sources = {}
         self.pixmask = {}
         for fr in frames:
-            cat = catalog_from_loctab(fr["lt"])
+            cat = fr["cat"] if "cat" in fr else catalog_from_loctab(fr["lt"])
             if targets is None:
                 selected = sources_touching(cat, self.box_lo, self.box_hi)
             else:
@@ -218,6 +287,7 @@ class GrismScene:
                 src = SceneSource(id=s["id"], ra=s["ra"], dec=s["dec"], hmag=s["mags"].get("H", 99.0),
                                   stamp=torch.tensor(np.ascontiguousarray(stamp), dtype=torch.float32, device=device), wcs=wcs)
                 src.stamp_kind = kind
+                src.mags = dict(s["mags"])
                 self.sources[s["id"]] = src
         # traces per frame, and per-source coverage: in which frames does the 1st-order trace fall in the box
         for fr in frames:
@@ -225,7 +295,7 @@ class GrismScene:
             for src in self.sources.values():
                 for order, lam in ((1, self.lam), (0, self.lam0)):
                     try:
-                        tr = SourceTrace(fr["geo"], det, src.ra, src.dec, src.wcs, src.stamp.shape, lam, order=order)
+                        tr = SourceTrace(fr["geo"], fr.get("det", det), src.ra, src.dec, src.wcs, src.stamp.shape, lam, order=order)
                     except Exception:
                         continue
                     lo, hi = tr.bbox(src.stamp.shape, pad=0)
@@ -253,12 +323,31 @@ class GrismScene:
         self.lam0_n = torch.tensor((2 * self.lam0 - self.lam[0] - self.lam[-1]) / (self.lam[-1] - self.lam[0]), dtype=torch.float32, device=device)
 
     # ---- parameters ------------------------------------------------------ #
-    def init_params(self, init_counts=None):
-        """init_counts: per-source total e- guess for the 1st order (default from the data)."""
+    def init_params(self, init_counts=None, spec_step=1):
+        """init_counts: per-source total e- guess for the 1st order (default from the data).
+        spec_step: 1st-order spectra are parametrised on a grid every `spec_step` wavelength samples
+        (linear interpolation to the full grid); >1 removes the sub-resolution ringing."""
         tot = float(max(self.frames[0]["dat"].sum().item(), 1.0))
+        self.spec_step = int(spec_step)
+        if self.spec_step > 1:
+            nodes = np.arange(0, self.L - 1, self.spec_step).tolist()
+            if nodes[-1] != self.L - 1:
+                nodes.append(self.L - 1)
+            self.spec_nodes = np.array(nodes)
+            M = np.zeros((self.L, len(nodes)), np.float32)
+            for i in range(self.L):
+                j = np.searchsorted(self.spec_nodes, i, side="right") - 1
+                j = min(j, len(nodes) - 2)
+                a, b = self.spec_nodes[j], self.spec_nodes[j + 1]
+                wgt = (i - a) / max(b - a, 1)
+                M[i, j] = 1 - wgt; M[i, j + 1] = wgt
+            self._interp = torch.tensor(M, device=self.device)
+            Lc = len(nodes)
+        else:
+            Lc = self.L
         for src in self.sources.values():
             flux_guess = 10 ** (-0.4 * (src.hmag - 20.0)) * 2e4 if np.isfinite(src.hmag) else 1e3
-            src.logf1 = torch.full((self.L,), float(np.log(max(flux_guess / self.L, 1e-3))), device=self.device, requires_grad=True)
+            src.logf1 = torch.full((Lc,), float(np.log(max(flux_guess / self.L, 1e-3))), device=self.device, requires_grad=True)
             src.logf0 = torch.full((len(self.lam0),), float(np.log(max(0.05 * flux_guess / len(self.lam0), 1e-3))), device=self.device, requires_grad=True)
             src.shift = torch.zeros(2, device=self.device, requires_grad=True)
         # photometric prior: log10(sum f1) ~ zp - 0.4 H, zp learned (one scalar), width mag_prior_sigma dex
@@ -307,11 +396,64 @@ class GrismScene:
         # source's prior count on its own (per-source prior, the proper form)
         return x.sum() if getattr(self, "prior_reduce", "mean") == "sum" else x.mean()
 
+    def lf1(self, src):
+        """Log 1st-order spectrum on the full wavelength grid."""
+        return src.logf1 if getattr(self, "spec_step", 1) == 1 else self._interp @ src.logf1
+
     def mag_prior(self):
-        logs = torch.stack([torch.log10(torch.exp(s.logf1).sum() + 1e-6) for s in self.sources.values()])
+        logs = torch.stack([torch.log10(torch.exp(self.lf1(s)).sum() + 1e-6) for s in self.sources.values()])
         ok = torch.isfinite(self._h)
         d = (logs - (self.zp - 0.4 * self._h))[ok] / self.mag_prior_sigma
         return self._reduce(d ** 2)
+
+    # ---- photometric shape prior --------------------------------------- #
+    LAM_EFF = {"Y": 10800.0, "J": 13700.0, "H": 17700.0}   # NISP effective wavelengths [A]
+
+    def build_templates(self):
+        """Per-source continuum template f_nu(lambda) (arbitrary normalisation) from the NISP Y/J/H
+        magnitudes: a power law fitted in log-log to the available bands (slope from J,H when both
+        exist; flat otherwise).  Stored as log template on self.lam, mean-subtracted."""
+        lam = torch.as_tensor(self.lam, dtype=torch.float32, device=self.device)
+        loglam = torch.log10(lam)
+        for src in self.sources.values():
+            pts = [(np.log10(self.LAM_EFF[b]), -0.4 * src.mags[b]) for b in ("Y", "J", "H")
+                   if b in src.mags and np.isfinite(src.mags[b]) and src.mags[b] < 90]
+            if len(pts) >= 2:
+                x = np.array([p[0] for p in pts]); y = np.array([p[1] for p in pts])
+                slope = float(np.polyfit(x, y, 1)[0])
+                slope = float(np.clip(slope, -6, 6))
+            else:
+                slope = 0.0
+            t = slope * (loglam - float(np.log10(15000.0)))          # log10 f_nu shape, zero at 1.5 um
+            src.log_template = (t - t.mean()) * np.log(10.0)          # natural log, mean-subtracted
+        self.log_response = torch.zeros(self.L, device=self.device)  # instrumental response shape (log), self-calibrated
+
+    @torch.no_grad()
+    def calibrate_response(self, train_keys, hmax=20.0, min_cov=2):
+        """log_response(lambda) = median over well-fitted bright sources of (log f1 - log template), mean-subtracted,
+        smoothed; this absorbs the sensitivity x throughput shape so the shape prior lives in instrumental units."""
+        rows = []
+        for src in self.sources.values():
+            if sum(k in src.coverage for k in train_keys) >= min_cov and np.isfinite(src.hmag) and src.hmag < hmax:
+                r = self.lf1(src) - src.log_template
+                rows.append(r - r.mean())
+        if len(rows) < 5:
+            return 0
+        R = torch.stack(rows).median(0).values
+        k = 15; pad = torch.nn.functional.pad(R[None, None], (k // 2, k // 2), mode="replicate")
+        self.log_response = torch.nn.functional.avg_pool1d(pad, k, stride=1)[0, 0]
+        return len(rows)
+
+    def shape_prior(self, sigma_faint=0.15, sigma_bright=0.6, h_split=20.5):
+        """Pull each log spectrum toward (template + response + its own mean) with a width that is tight for
+        faint sources (whose shape the data cannot constrain) and loose for bright ones."""
+        tot = 0.0
+        for src in self.sources.values():
+            target = src.log_template + self.log_response
+            lf = self.lf1(src); d = lf - lf.mean() - (target - target.mean())
+            sig = sigma_faint if (np.isfinite(src.hmag) and src.hmag > h_split) else sigma_bright
+            tot = tot + ((d / sig) ** 2).mean()
+        return self._reduce(torch.stack([tot]) if not torch.is_tensor(tot) else tot[None]) if False else (tot / max(len(self.sources), 1) if getattr(self, "prior_reduce", "mean") == "mean" else tot)
 
     def shift_prior(self):
         sh = torch.stack([s.shift for s in self.sources.values()])
@@ -357,7 +499,7 @@ class GrismScene:
                 lo = np.maximum(lo, self.box_lo); hi = np.minimum(hi, self.box_hi)
                 if (hi <= lo).any():
                     continue
-                f = torch.exp(src.logf1) * s1 if order == 1 else torch.exp(src.logf0) * s0
+                f = torch.exp(self.lf1(src)) * s1 if order == 1 else torch.exp(src.logf0) * s0
                 kern = kern1 if order == 1 else kern0
                 sh = src.shift + fr["dxy"] if "dxy" in fr else src.shift     # optional per-frame global offset
                 if torch.is_grad_enabled():
@@ -386,11 +528,19 @@ class GrismScene:
         reg = 0.0
         for src in self.sources.values():
             reg = reg + smooth * ((src.logf1[1:] - src.logf1[:-1]) ** 2).mean() + smooth * ((src.logf0[1:] - src.logf0[:-1]) ** 2).mean()
-        return total + reg / max(len(self.sources), 1) + self.mag_prior_weight * (self.mag_prior() + self.shift_prior())
+        total = total + reg / max(len(self.sources), 1) + self.mag_prior_weight * (self.mag_prior() + self.shift_prior())
+        if getattr(self, "shape_prior_weight", 0.0) > 0:
+            total = total + self.shape_prior_weight * self.shape_prior()
+        return total
 
-    def fit(self, frames=None, iters=100, lr=0.1, smooth=1e-2, log_every=10, clip_sigma=None, mag_prior_weight=1.0):
+    def fit(self, frames=None, iters=100, lr=0.1, smooth=1e-2, log_every=10, clip_sigma=None, mag_prior_weight=1.0,
+            shape_prior_weight=0.0, recalibrate_every=20):
+        """shape_prior_weight > 0 enables the photometric shape prior (templates must be built); the
+        instrumental response is re-estimated from the bright sources every `recalibrate_every` iterations."""
         frames = self.frames if frames is None else frames
         self.mag_prior_weight = mag_prior_weight
+        self.shape_prior_weight = shape_prior_weight
+        train_keys = [fr["dither"] for fr in frames]
         opt = torch.optim.Adam([{"params": self.params(frames=False), "lr": lr},
                                 {"params": [p for fr in frames for p in (fr["bkg"], fr["sens"])], "lr": 0.05}])
         sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=iters, eta_min=lr * 0.05)
@@ -401,6 +551,10 @@ class GrismScene:
             loss = self.loss(frames, smooth=smooth, clip=clip)
             loss.backward(); opt.step(); sched.step()
             self.loss_history.append(float(loss.item()))
+            if shape_prior_weight > 0 and it > 0 and it % recalibrate_every == 0:
+                n = self.calibrate_response(train_keys)
+                if log_every:
+                    print(f"  response recalibrated from {n} bright sources", flush=True)
             with torch.no_grad():
                 for fr in frames:
                     if fr is frames[0]:
@@ -439,13 +593,13 @@ class GrismScene:
         for src in self.sources.values():
             n = sum(k in src.coverage for k in train_keys)
             if n >= 2 and np.isfinite(src.hmag) and src.hmag < 21:
-                f = torch.exp(src.logf1); tot = float(f.sum())
+                f = torch.exp(self.lf1(src)); tot = float(f.sum())
                 ratios.append(np.log10(tot) + 0.4 * src.hmag); shapes.append((f / f.mean()).cpu().numpy())
         if not ratios:
             return 0
         zp = float(np.median(ratios)); shape = np.median(np.array(shapes), axis=0); shape /= shape.mean()
         # 0th/1st order flux ratio from sources constrained in both orders
-        r0 = [float(torch.exp(src.logf0).sum() / torch.exp(src.logf1).sum()) for src in self.sources.values()
+        r0 = [float(torch.exp(src.logf0).sum() / torch.exp(self.lf1(src)).sum()) for src in self.sources.values()
               if sum(k in src.coverage for k in train_keys) >= 2 and sum(k in src.coverage0 for k in train_keys) >= 1]
         ratio0 = float(np.median(r0)) if r0 else 0.03
         n_set = 0; n_set0 = 0
@@ -453,10 +607,11 @@ class GrismScene:
             n = sum(k in src.coverage for k in train_keys)
             if n == 0:
                 tot = 10 ** (zp - 0.4 * src.hmag) if np.isfinite(src.hmag) else 0.0
-                src.logf1.copy_(torch.log(torch.as_tensor(np.clip(tot / self.L * shape, 1e-3, None), dtype=torch.float32, device=self.device)))
+                fine = torch.log(torch.as_tensor(np.clip(tot / self.L * shape, 1e-3, None), dtype=torch.float32, device=self.device))
+                src.logf1.copy_(fine if self.spec_step == 1 else fine[torch.as_tensor(self.spec_nodes, device=self.device)])
                 n_set += 1
             if sum(k in src.coverage0 for k in train_keys) == 0:
-                tot1 = float(torch.exp(src.logf1).sum())
+                tot1 = float(torch.exp(self.lf1(src)).sum())
                 src.logf0.fill_(float(np.log(max(ratio0 * tot1 / len(self.lam0), 1e-3))))
                 n_set0 += 1
         self.ratio0 = ratio0

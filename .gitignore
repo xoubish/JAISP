@@ -97,3 +97,6 @@ paper_figures/_fig3_recon_cache.pkl
 # release scratch (anchor reruns etc.)
 release/scratch/
 release/*.zip
+
+# grism decontamination data (copied from the Euclid cluster)
+data/sir_edff/

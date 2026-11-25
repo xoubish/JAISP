@@ -26,30 +26,64 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--tag", required=True)
     ap.add_argument("--det", default="23")
-    ap.add_argument("--sky-targets", default="0,1080,1170")
+    ap.add_argument("--sky-targets", default="0,1080,1170", help="'ref,y0,y1' or 'common' (multi-observation strip)")
     ap.add_argument("--holdout", type=int, default=3)
+    ap.add_argument("--dithers", default="0,1,2,3", help="frame keys, optionally key:DET (as in scene_test.py)")
+    ap.add_argument("--mer-stamps", action="store_true")
+    ap.add_argument("--mer-cat", action="store_true")
+    ap.add_argument("--mer-root", default="/tmp/shemmati_grism/products/mer")
     ap.add_argument("--kernel", default=str(REPO / "experiments/grism/nisps_kernel.npz"))
     ap.add_argument("--star-psf", action="store_true")
     ap.add_argument("--foundation-stamps", action="store_true")
     ap.add_argument("--device", default="cpu")
     args = ap.parse_args()
-    frames = [load_frame(BASE, d, args.det, CALIB) for d in (0, 1, 2, 3)]
-    rd, ty0, ty1 = [int(v) for v in args.sky_targets.split(",")]
-    ref = [fr for fr in frames if fr["dither"] == rd][0]
-    targets = {s["id"]: s for s in catalog_from_loctab(ref["lt"])
-               if s["bb1"] is not None and s["bb1"][0, 1] >= ty0 and s["bb1"][1, 1] <= ty1 and s["bb1"][0, 0] >= 0 and s["bb1"][1, 0] <= 2040}
+    dithers = [(int(d.split(":")[0]), d.split(":")[1] if ":" in d else args.det) for d in args.dithers.split(",")]
+    frames = [load_frame(BASE, d, det, CALIB) for d, det in dithers]
+    from models.grism.scene import sky_catalog, catalog_for_frame
+    skycat = sky_catalog(BASE)
+    if args.mer_cat:
+        from models.grism.mer_mosaic import mer_sky_catalog
+        skycat = skycat + mer_sky_catalog(args.mer_root, exclude=skycat)
+    for fr in frames:
+        fr["cat"] = catalog_for_frame(fr, skycat)
+    if args.sky_targets == "common":
+        from collections import Counter
+        def partial(s, frac=0.5):
+            if s["bb1"] is None:
+                return False
+            lo, hi = s["bb1"][0], s["bb1"][1]
+            return (min(hi[0], 2040) - max(lo[0], 0)) >= frac * max(hi[0] - lo[0], 1) and lo[1] >= 0 and hi[1] <= 2040
+        cnt = {}
+        for fr in frames:
+            cnt.setdefault(fr["obs"], Counter()).update({s["id"] for s in fr["cat"] if partial(s)})
+        common = set.intersection(*[{i for i, n in c.items() if n >= 2} for c in cnt.values()])
+        allcat = {}
+        for fr in frames:
+            for s in fr["cat"]:
+                allcat.setdefault(s["id"], s)
+        targets = {i: allcat[i] for i in common}
+    else:
+        rd, ty0, ty1 = [int(v) for v in args.sky_targets.split(",")]
+        ref = [fr for fr in frames if fr["dither"] == rd][0]
+        targets = {s["id"]: s for s in ref["cat"]
+                   if s["bb1"] is not None and s["bb1"][0, 1] >= ty0 and s["bb1"][1, 1] <= ty1 and s["bb1"][0, 0] >= 0 and s["bb1"][1, 0] <= 2040}
     tiles = TileStamps(str(REPO / "data/euclid_tiles_all/tile_*_euclid.npz"))
+    if args.mer_stamps:
+        from models.grism.mer_mosaic import MerMosaicStamps, StampUnion
+        tiles = StampUnion(tiles, MerMosaicStamps(args.mer_root))
     provider = None; star_psf = None
     if args.foundation_stamps:
         from models.grism.foundation_stamps import FoundationStamps
         provider = FoundationStamps(device=args.device)
     if args.star_psf:
         from models.grism.mer_psf import MerPsf, tile_for
-        root = BASE / "products/mer_psf"; star_psf = MerPsf(root, tile_for(root, 53.09, -28.1), "VIS", "GRID")
+        root = BASE / "products/mer_psf"
+        tc = (np.mean([s["ra"] for s in targets.values()]), np.mean([s["dec"] for s in targets.values()]))
+        star_psf = MerPsf(root, tile_for(root, *tc), "VIS", "GRID")
     scene = GrismScene(frames, args.det, (0, 0), (2040, 2040), tiles, kernel_npz=args.kernel, device=args.device,
                        lam_step=13.4, targets=targets, stamp_provider=provider, star_psf=star_psf)
     sp = torch.load(REPO / f"experiments/grism/scene_holdout_det{args.det}_d{args.holdout}{args.tag}_spectra.pt")
-    scene.init_params()
+    scene.init_params(spec_step=1)
     kt = REPO / f"experiments/grism/nisps_kernel_fit{args.tag}.npz"
     if kt.exists():
         scene.kernels = scene.kernels0 = None
