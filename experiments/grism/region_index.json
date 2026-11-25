@@ -1,0 +1,906 @@
+[
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles/region_000",
+"ra0": 53.06701151785625,
+"ra1": 53.100765813639306,
+"dec0": -28.198990625793684,
+"dec1": -28.169280691571224,
+"n": 200
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles/region_001",
+"ra0": 53.06703529531151,
+"ra1": 53.10102482020689,
+"dec0": -28.17072624086476,
+"dec1": -28.140703544578,
+"n": 214
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles/region_002",
+"ra0": 53.06713596342879,
+"ra1": 53.10107762935619,
+"dec0": -28.337381979021,
+"dec1": -28.30733811082154,
+"n": 221
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles/region_003",
+"ra0": 53.03469029756834,
+"ra1": 53.06858249477382,
+"dec0": -28.19888835846703,
+"dec1": -28.16933681528093,
+"n": 211
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles/region_004",
+"ra0": 53.22357961812548,
+"ra1": 53.25709041206285,
+"dec0": -28.032453109673597,
+"dec1": -28.002739951077352,
+"n": 225
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles/region_005",
+"ra0": 53.03463014397869,
+"ra1": 53.06872078006395,
+"dec0": -28.365803330751756,
+"dec1": -28.335804454192136,
+"n": 194
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles/region_006",
+"ra0": 53.03474878171103,
+"ra1": 53.0687242825932,
+"dec0": -28.170702465676857,
+"dec1": -28.14098258898356,
+"n": 264
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles/region_007",
+"ra0": 53.03482604411322,
+"ra1": 53.068520880924254,
+"dec0": -28.113760017710685,
+"dec1": -28.08383655245079,
+"n": 212
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles/region_008",
+"ra0": 53.2236212534813,
+"ra1": 53.257371975140025,
+"dec0": -27.9471179371276,
+"dec1": -27.917150980747564,
+"n": 194
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles/region_009",
+"ra0": 53.03463094166823,
+"ra1": 53.06871524399583,
+"dec0": -28.28016807001961,
+"dec1": -28.250640130985268,
+"n": 248
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles/region_010",
+"ra0": 53.22367336616362,
+"ra1": 53.25771161903516,
+"dec0": -28.085313598049453,
+"dec1": -28.055636849141663,
+"n": 234
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles/region_011",
+"ra0": 53.03471199534253,
+"ra1": 53.06878918097027,
+"dec0": -28.25207956028449,
+"dec1": -28.222070320265548,
+"n": 230
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles/region_012",
+"ra0": 53.22355732766759,
+"ra1": 53.25731181868592,
+"dec0": -28.05688970500547,
+"dec1": -28.02691761955418,
+"n": 229
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles/region_013",
+"ra0": 53.22343930604979,
+"ra1": 53.25736923275564,
+"dec0": -27.890202502675947,
+"dec1": -27.860279173729825,
+"n": 195
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles/region_014",
+"ra0": 53.03484500067403,
+"ra1": 53.06875847578859,
+"dec0": -28.22352653735651,
+"dec1": -28.193591103691407,
+"n": 241
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles/region_015",
+"ra0": 53.19168583483405,
+"ra1": 53.22581927402473,
+"dec0": -28.365393567270576,
+"dec1": -28.335753019391877,
+"n": 234
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles/region_016",
+"ra0": 53.00229630765576,
+"ra1": 53.03644922583099,
+"dec0": -28.365509622141925,
+"dec1": -28.33586999624271,
+"n": 211
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles/region_017",
+"ra0": 53.19146277018413,
+"ra1": 53.22546942047756,
+"dec0": -28.17064468210728,
+"dec1": -28.140670381543867,
+"n": 225
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles/region_018",
+"ra0": 53.19166185552528,
+"ra1": 53.22571563630122,
+"dec0": -28.337283033457943,
+"dec1": -28.30728625535062,
+"n": 206
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles/region_019",
+"ra0": 53.191491469951885,
+"ra1": 53.22550777428573,
+"dec0": -28.142200572836312,
+"dec1": -28.112218224897607,
+"n": 251
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles/region_020",
+"ra0": 53.00266315325763,
+"ra1": 53.03621851223735,
+"dec0": -28.11368129296356,
+"dec1": -28.08384015566827,
+"n": 200
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles/region_021",
+"ra0": 53.0023839675992,
+"ra1": 53.036326137490114,
+"dec0": -28.28043298315093,
+"dec1": -28.25043704141233,
+"n": 228
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles/region_022",
+"ra0": 53.19148150777892,
+"ra1": 53.22526714520273,
+"dec0": -28.08528980460862,
+"dec1": -28.05535597717709,
+"n": 189
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles/region_023",
+"ra0": 53.19165741774227,
+"ra1": 53.225217392758246,
+"dec0": -27.918728315607325,
+"dec1": -27.888760802922786,
+"n": 212
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles/region_024",
+"ra0": 53.002824613986114,
+"ra1": 53.03633790674939,
+"dec0": -28.251857620510208,
+"dec1": -28.22206373684918,
+"n": 235
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles/region_025",
+"ra0": 53.19122368931325,
+"ra1": 53.22519633026481,
+"dec0": -27.890257800292915,
+"dec1": -27.860319622799707,
+"n": 210
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles/region_026",
+"ra0": 53.191512394920345,
+"ra1": 53.22558224402989,
+"dec0": -28.22355994954929,
+"dec1": -28.194291116740256,
+"n": 276
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles/region_027",
+"ra0": 52.97017766615288,
+"ra1": 53.00424011718668,
+"dec0": -28.199145447767066,
+"dec1": -28.16936752976297,
+"n": 282
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles/region_028",
+"ra0": 53.159363257285925,
+"ra1": 53.193460186666485,
+"dec0": -28.365801695991102,
+"dec1": -28.335816663954382,
+"n": 232
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles/region_029",
+"ra0": 53.15930438499981,
+"ra1": 53.19335367293728,
+"dec0": -28.308905568621725,
+"dec1": -28.27889053502792,
+"n": 203
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles/region_030",
+"ra0": 52.97033334181212,
+"ra1": 53.004220618478826,
+"dec0": -28.08505440498225,
+"dec1": -28.05537136736119,
+"n": 237
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles/region_031",
+"ra0": 53.1590410499565,
+"ra1": 53.193041026606615,
+"dec0": -27.91866534195827,
+"dec1": -27.888744930384828,
+"n": 217
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles/region_032",
+"ra0": 53.159060207566,
+"ra1": 53.19301715541221,
+"dec0": -27.890312599652358,
+"dec1": -27.86058600156068,
+"n": 265
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles/region_033",
+"ra0": 53.12714563675221,
+"ra1": 53.16090200764532,
+"dec0": -28.142270253505565,
+"dec1": -28.11238727622367,
+"n": 204
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles/region_034",
+"ra0": 52.93797370155194,
+"ra1": 52.97201617343964,
+"dec0": -28.14221356738124,
+"dec1": -28.112253972686705,
+"n": 233
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles/region_035",
+"ra0": 53.12689834306284,
+"ra1": 53.16087320204204,
+"dec0": -27.947194655505097,
+"dec1": -27.91715919857848,
+"n": 207
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles/region_036",
+"ra0": 52.93819029529315,
+"ra1": 52.97182663131032,
+"dec0": -28.280426741151743,
+"dec1": -28.250422013788157,
+"n": 254
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles/region_037",
+"ra0": 52.938053419270425,
+"ra1": 52.97206751693524,
+"dec0": -28.085355852220992,
+"dec1": -28.05560964778912,
+"n": 257
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles/region_038",
+"ra0": 53.126895175405245,
+"ra1": 53.16085602519842,
+"dec0": -27.918703244341327,
+"dec1": -27.88874028154266,
+"n": 213
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles/region_039",
+"ra0": 53.12699228783101,
+"ra1": 53.16091264181775,
+"dec0": -28.05694153110949,
+"dec1": -28.026950093906475,
+"n": 199
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles/region_040",
+"ra0": 52.90561787164763,
+"ra1": 52.9393916420482,
+"dec0": -28.198712341059377,
+"dec1": -28.1690648761271,
+"n": 268
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles/region_041",
+"ra0": 53.09551140973471,
+"ra1": 53.12876493982072,
+"dec0": -28.170597149451662,
+"dec1": -28.140747157487933,
+"n": 223
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles/region_042",
+"ra0": 53.09473511851144,
+"ra1": 53.128801648061206,
+"dec0": -28.33737488805092,
+"dec1": -28.307424406763467,
+"n": 212
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles/region_043",
+"ra0": 52.90572066448472,
+"ra1": 52.93978437879733,
+"dec0": -28.14207785707895,
+"dec1": -28.112244108717903,
+"n": 247
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles/region_044",
+"ra0": 53.09545464581034,
+"ra1": 53.128335264097885,
+"dec0": -28.308972972049556,
+"dec1": -28.278912774643413,
+"n": 175
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles/region_045",
+"ra0": 53.09495851947485,
+"ra1": 53.12877506724721,
+"dec0": -28.113841720156568,
+"dec1": -28.08389248361767,
+"n": 253
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles/region_046",
+"ra0": 53.09476394754475,
+"ra1": 53.12876319308428,
+"dec0": -28.085387386570456,
+"dec1": -28.055643631094632,
+"n": 235
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles/region_047",
+"ra0": 52.905601820386615,
+"ra1": 52.93965334571836,
+"dec0": -28.223539253311,
+"dec1": -28.193549545685432,
+"n": 208
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles_2/region_000",
+"ra0": 53.06711618518341,
+"ra1": 53.10104723838116,
+"dec0": -28.36558611208925,
+"dec1": -28.33586374325169,
+"n": 227
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles_2/region_001",
+"ra0": 53.06723855110467,
+"ra1": 53.101099133639295,
+"dec0": -28.308792704469276,
+"dec1": -28.278955405404652,
+"n": 220
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles_2/region_002",
+"ra0": 53.06701154009021,
+"ra1": 53.10094591980237,
+"dec0": -28.113759228475907,
+"dec1": -28.08383991328085,
+"n": 197
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles_2/region_003",
+"ra0": 53.06732776138416,
+"ra1": 53.10097042600622,
+"dec0": -28.28049861126887,
+"dec1": -28.25050021042347,
+"n": 253
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles_2/region_004",
+"ra0": 53.06701179041287,
+"ra1": 53.10101765145166,
+"dec0": -28.08539035679195,
+"dec1": -28.0555805944332,
+"n": 211
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles_2/region_005",
+"ra0": 53.06700690668097,
+"ra1": 53.1010429866244,
+"dec0": -28.251834163711536,
+"dec1": -28.222129604881832,
+"n": 263
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles_2/region_006",
+"ra0": 53.067006034663,
+"ra1": 53.10104503478901,
+"dec0": -28.22360089288785,
+"dec1": -28.193628170832103,
+"n": 217
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles_2/region_007",
+"ra0": 53.223584696220506,
+"ra1": 53.257469353549006,
+"dec0": -28.00399357800797,
+"dec1": -27.973957012369212,
+"n": 234
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles_2/region_008",
+"ra0": 53.034751109501656,
+"ra1": 53.06877899921593,
+"dec0": -28.33736631187697,
+"dec1": -28.30735306041076,
+"n": 205
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles_2/region_009",
+"ra0": 53.034723416069305,
+"ra1": 53.0687158208486,
+"dec0": -28.14229827460926,
+"dec1": -28.11239560152618,
+"n": 248
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles_2/region_010",
+"ra0": 53.2235152370682,
+"ra1": 53.25741293142518,
+"dec0": -27.97556213835173,
+"dec1": -27.94568111707168,
+"n": 190
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles_2/region_011",
+"ra0": 53.03523475336001,
+"ra1": 53.06879175850189,
+"dec0": -28.308935549261115,
+"dec1": -28.278948982248966,
+"n": 253
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles_2/region_012",
+"ra0": 53.03476231012145,
+"ra1": 53.06876278610888,
+"dec0": -28.08518579650819,
+"dec1": -28.0553807804006,
+"n": 193
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles_2/region_013",
+"ra0": 53.22354819645358,
+"ra1": 53.25737622143029,
+"dec0": -27.91845509993076,
+"dec1": -27.88863009450496,
+"n": 203
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles_2/region_014",
+"ra0": 53.00245761669491,
+"ra1": 53.036525596287085,
+"dec0": -28.19916325016204,
+"dec1": -28.169131670759075,
+"n": 271
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles_2/region_015",
+"ra0": 53.002523990599805,
+"ra1": 53.03648818321645,
+"dec0": -28.170329343449534,
+"dec1": -28.140749050565898,
+"n": 312
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles_2/region_016",
+"ra0": 53.1921361194908,
+"ra1": 53.22478254554827,
+"dec0": -28.004068989241738,
+"dec1": -27.97399146586428,
+"n": 213
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles_2/region_017",
+"ra0": 53.00241443591864,
+"ra1": 53.03642762129304,
+"dec0": -28.337119465179647,
+"dec1": -28.30767384492801,
+"n": 219
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles_2/region_018",
+"ra0": 53.00260635669529,
+"ra1": 53.03653741809733,
+"dec0": -28.142318142894972,
+"dec1": -28.112284744297188,
+"n": 262
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles_2/region_019",
+"ra0": 53.191269417670135,
+"ra1": 53.22529425817687,
+"dec0": -27.975223300894918,
+"dec1": -27.94556966989245,
+"n": 237
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles_2/region_020",
+"ra0": 53.00252188492043,
+"ra1": 53.03648783749565,
+"dec0": -28.3089174316682,
+"dec1": -28.27887583348957,
+"n": 229
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles_2/region_021",
+"ra0": 53.19140058636547,
+"ra1": 53.22526359974489,
+"dec0": -27.947150808331955,
+"dec1": -27.91737453223392,
+"n": 239
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles_2/region_022",
+"ra0": 53.19176724924201,
+"ra1": 53.22568083387064,
+"dec0": -28.28024801949066,
+"dec1": -28.25049696907277,
+"n": 206
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles_2/region_023",
+"ra0": 53.00257791227089,
+"ra1": 53.036351635518336,
+"dec0": -28.08540088743897,
+"dec1": -28.05556285766428,
+"n": 234
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles_2/region_024",
+"ra0": 53.15911333344844,
+"ra1": 53.19314674405884,
+"dec0": -28.032276862739167,
+"dec1": -28.00253949239785,
+"n": 210
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles_2/region_025",
+"ra0": 52.97021403849386,
+"ra1": 53.003778141566194,
+"dec0": -28.36576868520728,
+"dec1": -28.33576741124569,
+"n": 224
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles_2/region_026",
+"ra0": 52.97016574989918,
+"ra1": 53.00425163446358,
+"dec0": -28.17065492498356,
+"dec1": -28.140688803537948,
+"n": 282
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles_2/region_027",
+"ra0": 53.15913378743897,
+"ra1": 53.19294047386061,
+"dec0": -28.004062164435386,
+"dec1": -27.97401209909573,
+"n": 206
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles_2/region_028",
+"ra0": 52.97018964757009,
+"ra1": 53.00404241352764,
+"dec0": -28.33715156724274,
+"dec1": -28.30729685169065,
+"n": 237
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles_2/region_029",
+"ra0": 52.97069483757576,
+"ra1": 53.004285269977416,
+"dec0": -28.14203267157599,
+"dec1": -28.112479336489557,
+"n": 177
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles_2/region_030",
+"ra0": 53.15915772575247,
+"ra1": 53.19310140738975,
+"dec0": -27.975595185520586,
+"dec1": -27.94573234525978,
+"n": 213
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles_2/region_031",
+"ra0": 52.97004913665403,
+"ra1": 53.00408867568141,
+"dec0": -28.308663925539427,
+"dec1": -28.278908499559325,
+"n": 261
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles_2/region_032",
+"ra0": 52.970250084849766,
+"ra1": 53.00429063570646,
+"dec0": -28.113743318377285,
+"dec1": -28.08388081563202,
+"n": 229
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles_2/region_033",
+"ra0": 53.15907471795085,
+"ra1": 53.19308828584381,
+"dec0": -27.947067926950112,
+"dec1": -27.917348496229398,
+"n": 238
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles_2/region_034",
+"ra0": 53.159380311047926,
+"ra1": 53.1933662743335,
+"dec0": -28.280466936570814,
+"dec1": -28.25077103674917,
+"n": 170
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles_2/region_035",
+"ra0": 53.15917203053135,
+"ra1": 53.19317179501753,
+"dec0": -28.085356729647224,
+"dec1": -28.055342453803068,
+"n": 215
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles_2/region_036",
+"ra0": 53.1593931935741,
+"ra1": 53.19299183722474,
+"dec0": -28.0567819154995,
+"dec1": -28.02690278923293,
+"n": 221
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles_2/region_037",
+"ra0": 52.93806674980478,
+"ra1": 52.97187072255838,
+"dec0": -28.1991332166535,
+"dec1": -28.16911074546133,
+"n": 319
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles_2/region_038",
+"ra0": 53.12730426043471,
+"ra1": 53.16057444484241,
+"dec0": -28.03231338448628,
+"dec1": -28.002682078824723,
+"n": 212
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles_2/region_039",
+"ra0": 52.9376306091686,
+"ra1": 52.97176326543164,
+"dec0": -28.36569389768484,
+"dec1": -28.3358388498159,
+"n": 252
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles_2/region_040",
+"ra0": 52.937971015327946,
+"ra1": 52.97196853937868,
+"dec0": -28.17069843970676,
+"dec1": -28.140677740002204,
+"n": 264
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles_2/region_041",
+"ra0": 53.12704519356612,
+"ra1": 53.160658573181394,
+"dec0": -28.004066052113554,
+"dec1": -27.97416715286565,
+"n": 198
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles_2/region_042",
+"ra0": 52.93766781958762,
+"ra1": 52.97180807230599,
+"dec0": -28.33732366993467,
+"dec1": -28.307345801186564,
+"n": 305
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles_2/region_043",
+"ra0": 53.12712049635295,
+"ra1": 53.16090258046742,
+"dec0": -27.97561687507841,
+"dec1": -27.945632624612013,
+"n": 213
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles_2/region_044",
+"ra0": 53.12701817124525,
+"ra1": 53.16109264929819,
+"dec0": -28.30891916953512,
+"dec1": -28.27895908352357,
+"n": 198
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles_2/region_045",
+"ra0": 52.93773301299796,
+"ra1": 52.971705289207705,
+"dec0": -28.308881906877915,
+"dec1": -28.27901421688617,
+"n": 299
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles_2/region_046",
+"ra0": 53.126997745487344,
+"ra1": 53.16094362122252,
+"dec0": -28.1138396571142,
+"dec1": -28.08388707684712,
+"n": 287
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles_2/region_047",
+"ra0": 52.93802322651688,
+"ra1": 52.97156660096088,
+"dec0": -28.1137754422144,
+"dec1": -28.083816735983675,
+"n": 274
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles_2/region_048",
+"ra0": 53.12698344711328,
+"ra1": 53.16103550283101,
+"dec0": -28.280505890755787,
+"dec1": -28.250831172058327,
+"n": 211
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles_2/region_049",
+"ra0": 53.12698048622632,
+"ra1": 53.16096694757494,
+"dec0": -28.0854108304364,
+"dec1": -28.055380829457174,
+"n": 211
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles_2/region_050",
+"ra0": 53.12698351388114,
+"ra1": 53.16040273848393,
+"dec0": -28.25184885253468,
+"dec1": -28.22202541725096,
+"n": 232
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles_2/region_051",
+"ra0": 52.937888285200586,
+"ra1": 52.971611324121135,
+"dec0": -28.251969928941243,
+"dec1": -28.22198824072853,
+"n": 224
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles_2/region_052",
+"ra0": 53.12687397209171,
+"ra1": 53.160803092291566,
+"dec0": -27.890200840462715,
+"dec1": -27.860454989746746,
+"n": 211
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles_2/region_053",
+"ra0": 53.12699251409707,
+"ra1": 53.160778911966815,
+"dec0": -28.223556185813315,
+"dec1": -28.19378550199603,
+"n": 180
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles_2/region_054",
+"ra0": 52.937867606222845,
+"ra1": 52.97194668487553,
+"dec0": -28.22356368873447,
+"dec1": -28.19353583877453,
+"n": 243
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles_2/region_055",
+"ra0": 53.094704621939016,
+"ra1": 53.12876397907489,
+"dec0": -28.365588847633003,
+"dec1": -28.335784716265668,
+"n": 174
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles_2/region_056",
+"ra0": 52.905702522210895,
+"ra1": 52.93949148136899,
+"dec0": -28.36569604678581,
+"dec1": -28.33592643968532,
+"n": 265
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles_2/region_057",
+"ra0": 52.9056807745696,
+"ra1": 52.93973902232178,
+"dec0": -28.1706471657522,
+"dec1": -28.140640016074723,
+"n": 233
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles_2/region_058",
+"ra0": 52.905358424648526,
+"ra1": 52.9395272967747,
+"dec0": -28.337222512073904,
+"dec1": -28.30735361968936,
+"n": 324
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles_2/region_059",
+"ra0": 52.90548373523726,
+"ra1": 52.939507896105646,
+"dec0": -28.308632887986136,
+"dec1": -28.278786622274737,
+"n": 281
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles_2/region_060",
+"ra0": 53.09479000134892,
+"ra1": 53.128815360227215,
+"dec0": -28.28048686520831,
+"dec1": -28.250533194957125,
+"n": 239
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles_2/region_061",
+"ra0": 52.90558220067036,
+"ra1": 52.93954650849523,
+"dec0": -28.28028829517321,
+"dec1": -28.25033428610565,
+"n": 239
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles_2/region_062",
+"ra0": 53.09475557866222,
+"ra1": 53.12877095186289,
+"dec0": -28.25205449084936,
+"dec1": -28.22234553931869,
+"n": 249
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles_2/region_063",
+"ra0": 52.9055298664056,
+"ra1": 52.93958408293377,
+"dec0": -28.251959385625582,
+"dec1": -28.22193958538608,
+"n": 251
+},
+{
+"region": "models/photometry/self_supervised/runs/amortised_scarlet/training_tiles_2/region_064",
+"ra0": 53.09477331341264,
+"ra1": 53.12868529289579,
+"dec0": -28.22290493414651,
+"dec1": -28.193637474719345,
+"n": 192
+}
+]
